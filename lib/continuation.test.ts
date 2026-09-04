@@ -1,0 +1,39 @@
+import { describe, expect, test } from "bun:test";
+import { createStubCtx } from "#shrink-framework/x/testing";
+
+import {
+  SHRINK_CONTINUATION_MESSAGE_TYPE,
+  SHRINK_CONTINUATION_PROMPT,
+  queueAutonomousContinuation,
+} from "./continuation.ts";
+
+describe("shrink continuation delivery", () => {
+  test("queues hidden custom continuation instead of visible user input", () => {
+    const stub = createStubCtx();
+
+    expect(queueAutonomousContinuation(stub.pi, stub.ctx)).toBe(true);
+
+    expect(stub.calls.some((call) => call.api === "pi.sendUserMessage")).toBe(
+      false,
+    );
+    const call = stub.calls.find((entry) => entry.api === "pi.sendMessage");
+    expect(call).toBeDefined();
+    expect(call?.args[0]).toEqual({
+      customType: SHRINK_CONTINUATION_MESSAGE_TYPE,
+      content: SHRINK_CONTINUATION_PROMPT,
+      display: false,
+      details: { reason: "autonomous_compaction" },
+    });
+    expect(call?.args[1]).toEqual({ triggerTurn: true });
+  });
+
+  test("does not queue while user input is pending", () => {
+    const stub = createStubCtx();
+    (stub.ctx as any).isIdle = () => false;
+
+    expect(queueAutonomousContinuation(stub.pi, stub.ctx)).toBe(false);
+    expect(stub.calls.some((call) => call.api === "pi.sendMessage")).toBe(
+      false,
+    );
+  });
+});

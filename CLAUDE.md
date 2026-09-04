@@ -1,0 +1,174 @@
+# CLAUDE.md — dc-shrink
+
+## What This Is
+
+`dc-shrink` replaces Pi's default LLM compactor with a deterministic, local
+TypeScript compiler. Pi still owns `/compact`, cut selection, entry append, and
+context rebuilding. This feature owns the `session_before_compact` result and
+never calls an LLM.
+
+## Hard Invariants
+
+1. Never add an LLM call. If a workflow needs subjective LLM summarization,
+   build a separate extension from Pi's custom-compaction example.
+2. Production compaction input comes only from Pi's `event.preparation` and
+   active `event.branchEntries`. Never read the append-only session file in the
+   live hook.
+3. Fail closed with `Events.cancelCompact()`. A compiler failure or cancellation
+   must never fall through to Pi's default compactor.
+4. Success is transactional. Prepare the result in `session_before_compact`,
+   but write success logs, dumps, recall, notifications, and monitor state only
+   after a matching extension-owned `session_compact` event.
+5. The runtime is owned by one primary session. Child/in-process sessions are
+   no-ops, and their before-compact hooks cancel explicitly.
+
+## Authoritative Input
+
+`lib/compaction-source.ts` builds a typed `CompactionSource` in this order:
+
+1. previous compaction summary
+2. discarded `messagesToSummarize`
+3. discarded split-turn `turnPrefixMessages`
+4. latest eligible active-branch shrink handoff
+
+It directly normalizes user, assistant, tool-result, bash-execution, custom,
+branch-summary, and compaction-summary messages. Retained tail entries and
+abandoned branches cannot enter the compiler. The canonical normalized bytes
+are reused for `inputDigest` and an optional before-dump.
+
+Oversized input keeps metadata, the previous summary, and the newest whole
+discarded records inside a 20 MiB envelope. It never slices JSON or message
+records. `digestScope` is `compaction-input` or `bounded-compaction-input`.
+
+`compileSessionJsonl()` and `compileSessionFile()` remain diagnostic/test
+compatibility utilities only. They reject empty, malformed, truncated, and
+entirely filtered input.
+
+## Output Contract
+
+`session_before_compact` returns Pi's canonical shape with dc-shrink details
+version 6:
+
+```ts
+{
+  compaction: {
+    summary: string,
+    firstKeptEntryId: string,
+    tokensBefore: number,
+    details: {
+      compactor: "dc-shrink",
+      version: 6,
+      tier: 1,
+      attemptId: string,
+      tokensAfter: number,
+      summaryTokens: number,
+      tokensAfterSource: "pi-rebuilt-message-estimate",
+      reductionPct: number,
+      apiTokensBefore?: number,
+      readFiles: string[],
+      modifiedFiles: string[],
+      literalAnchors: string[],
+      inputDigest: string,
+      summaryDigest: string,
+      digestScope: "compaction-input" | "bounded-compaction-input"
+    }
+  }
+}
+```
+
+`tokensAfter` is Pi's rebuilt message-context estimate, calculated with
+`buildSessionContext()` and `estimateTokens()`. `summaryTokens` estimates the
+returned summary alone. `summaryDigest` hashes the exact returned wire summary,
+including its metric line. Version-5 session entries remain readable and are
+not rewritten.
+
+The final summary is limited to 65,536 Unicode code points. User focus is
+limited to 2,048 code points; read and modified file lists each keep 50 items;
+individual marker items keep 512 code points. Truncated lists include omitted
+counts. Formatting must preserve complete headings and balanced XML markers;
+never apply a final substring to structured output.
+
+## Transactional Lifecycle
+
+`session_before_compact` snapshots counters, compiles, calculates prospective
+metrics, freezes a `PendingCompaction`, and returns it. It does not emit durable
+success artifacts or reset the monitor.
+
+`session_compact` commits only when the owner session, extension identity,
+details version, attempt, first-kept ID, and exact summary digest match. Commit
+then resets the monitor from Pi's post-rebuild full-context usage when available,
+writes log/dump/recall, clears failure state, notifies only in a UI, and queues
+continuation only for an autonomous attempt. Pending state and the latch are
+released in `finally`.
+
+Session replacement, shutdown, autonomous errors, cancellation, foreign
+compaction, mismatches, and duplicate events cannot create success artifacts.
+
+## Trigger Policy
+
+Every effective threshold is:
+
+```text
+min(absolute tokens, round(percentage * context window))
+```
+
+Defaults are:
+
+| Band | Absolute | Percentage | Action |
+| --- | ---: | ---: | --- |
+| Auto | 100,000 | 75% | Mechanical compaction from auto through warn-minus-one. |
+| Warn | 140,000 | 85% | Cooperative warning from warn through emergency-minus-one. |
+| Emergency | 160,000 | 92% | Unconditional Mechanical compaction at and above emergency. |
+
+Cooldown, post-compaction growth, Pi-sync, and warmup guards still apply.
+Emergency bypasses cooldown and sync. `/compact-status` reports all effective
+thresholds plus their absolute and percentage sources.
+
+## Recall, Dumps, and Migration
+
+`ShrinkStore` owns migration, logs, dumps, and recall. Default recall is stored
+under `Path.project("dc-shrink", cwd)/recall.json`, keeps ten summaries per
+project, and does not expose other projects. `recall_compaction(scope: "all")`
+explicitly merges projects and labels ownerless version-5 entries
+`legacy-unscoped`.
+
+Raw dumps default off. When enabled, each committed pair contains the exact
+canonical input and exact returned wire summary. Names include millisecond
+time, PID, and attempt suffix; writes are temporary-file-and-rename operations
+under a lock.
+
+Migration runs during store initialization/session start, never module import.
+The `.migrated-from-legacy-shrink` marker is written only after all operations
+succeed. A failure preserves source/current data, leaves no marker, and retries
+on the next startup.
+
+## Focus Echo
+
+Focus echo reads Pi's native `{ role: "compactionSummary", summary }` message.
+It is bounded and de-duplicated before context injection. Do not restore the old
+synthetic assistant/content assumption.
+
+## Compatibility
+
+The repository's locked Pi SDK test surface is 0.82.1: the root package pins
+the four `@earendil-works/pi-*` development dependencies and overrides to that
+version. Keep focused tests and typechecking on the resolved 0.82.1 packages;
+the installed PATH runtime is not a general compatibility target unless it
+resolves to the same version. The TUI-only compaction-card compatibility shim
+keeps a separate, explicit allowlist of reviewed active Pi versions. Add a
+version there only after inspecting that runtime's `compaction_end` handler and
+verifying its focused compatibility test against the active implementation.
+
+## Verification
+
+```bash
+bun test pi-dc-shrink
+bun x tsc --noEmit
+bun run analyze
+bun run style-gate
+bun audit
+git diff --check
+```
+
+Keep `runStrategies()` single-strategy and deterministic. Bump
+`details.version` when details fields or their semantics change.
