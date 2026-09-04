@@ -30,7 +30,7 @@ const defaultThemes = _require("./defaults/themes.json") as {
 // ── Theme assignments (config-backed) ───────────────────────────────────────
 //
 // Per-extension theme assignments + fallback live in
-// ~/.pi/agent/pi-dc-architect-themes.json, NOT in source (workspace config-data
+// ~/.pi/agent/pi-dc-shrink-themes.json, NOT in source (workspace config-data
 // rule). Embedded defaults (./defaults/themes.json) are materialized to that
 // path on first read, then the user may edit it. Key = extension filename
 // without extension; value = theme name from .pi/themes/<value>.json.
@@ -40,7 +40,7 @@ interface ThemeConfig {
   fallback: string;
 }
 
-const THEME_STORE_PATH = join(AGENT_DIR, "pi-dc-architect-themes.json");
+const THEME_STORE_PATH = join(AGENT_DIR, "pi-dc-shrink-themes.json");
 
 // Memoized: load once per process. update(c => c) materializes embedded
 // defaults on first read when the file is absent, so users get an editable file.

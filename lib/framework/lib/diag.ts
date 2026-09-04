@@ -6,7 +6,7 @@
  * Output never touches the TUI surface.
  *
  * Routing:
- *   • Always: append a line to dataDir("pi-dc-architect")/diag.ndjson
+ *   • Always: append a line to dataDir("pi-dc-shrink")/diag.ndjson
  *   • If process.env.PI_DEBUG is truthy: also mirror to process.stderr
  *
  * Safety: callable from any context (no host, no ctx). Never throws —
@@ -53,7 +53,7 @@ function write(
     msg,
     err: normalizeErr(err),
   };
-  appendNDJSON(join(dataDir("pi-dc-architect"), "diag.ndjson"), entry, {
+  appendNDJSON(join(dataDir("pi-dc-shrink"), "diag.ndjson"), entry, {
     timestampField: "ts",
   });
   if (DEBUG_ON) {
