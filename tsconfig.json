@@ -1,0 +1,28 @@
+{
+  "compilerOptions": {
+    "target": "ES2022",
+    "module": "ES2022",
+    "moduleResolution": "bundler",
+    "allowImportingTsExtensions": true,
+    "noEmit": true,
+    "strict": false,
+    "strictNullChecks": true,
+    "skipLibCheck": true,
+    "esModuleInterop": true,
+    "isolatedModules": true,
+    "lib": ["ES2023", "DOM"],
+    "types": ["node", "bun"],
+    "typeRoots": ["./node_modules/@types"],
+    "paths": {
+      "#distill-framework": ["./lib/framework/index.ts"],
+      "#distill-framework/*": ["./lib/framework/*"],
+      "typebox": ["./node_modules/typebox"],
+      "@earendil-works/pi-agent-core": ["./node_modules/@earendil-works/pi-agent-core"],
+      "@earendil-works/pi-coding-agent": ["./node_modules/@earendil-works/pi-coding-agent"],
+      "@earendil-works/pi-ai": ["./node_modules/@earendil-works/pi-ai"],
+      "@earendil-works/pi-tui": ["./node_modules/@earendil-works/pi-tui"]
+    }
+  },
+  "include": ["**/*.ts"],
+  "exclude": ["node_modules"]
+}

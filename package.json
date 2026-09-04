@@ -1,0 +1,71 @@
+{
+  "name": "pi-dc-distill",
+  "version": "0.1.1",
+  "description": "Deterministic provider-free context and tool-output compaction for Pi.",
+  "license": "MIT",
+  "type": "module",
+  "main": "./index.ts",
+  "keywords": [
+    "pi-package",
+    "pi-extension"
+  ],
+  "pi": {
+    "extensions": [
+      "./index.ts"
+    ]
+  },
+  "bin": {
+    "dc-distill-session": "./bin/dc-distill-session.ts"
+  },
+  "imports": {
+    "#distill-framework": "./lib/framework/index.ts",
+    "#distill-framework/*": "./lib/framework/*.ts"
+  },
+  "files": [
+    "index.ts",
+    "bin/**",
+    "lib/**",
+    "docs/**",
+    "README.md",
+    "AGENTS.md",
+    "LICENSE",
+    "tsconfig.json",
+    "!**/*.test.ts",
+    "bun.lock",
+    "tests/compare-session.ts",
+    "tests/fixtures/**"
+  ],
+  "scripts": {
+    "distill:session": "bun ./bin/dc-distill-session.ts",
+    "test": "bun test",
+    "typecheck": "tsc --noEmit",
+    "distill:e2e": "bun test ./tests/e2e/lifecycle.e2e.ts",
+    "distill:demo": "bun run tests/e2e/demo.ts",
+    "distill:compare": "bun run tests/compare-session.ts"
+  },
+  "peerDependencies": {
+    "@earendil-works/pi-coding-agent": "^0.99.2",
+    "@earendil-works/pi-ai": "^0.99.2",
+    "@earendil-works/pi-tui": "^0.99.2",
+    "@earendil-works/pi-agent-core": "^0.99.2",
+    "typebox": "^1.3.34"
+  },
+  "devDependencies": {
+    "@earendil-works/pi-agent-core": "0.99.2",
+    "@earendil-works/pi-ai": "0.99.2",
+    "@earendil-works/pi-coding-agent": "0.99.2",
+    "@earendil-works/pi-tui": "0.99.2",
+    "@types/bun": "1.4.2",
+    "@types/node": "26.6.3",
+    "typebox": "1.3.34",
+    "typescript": "7.0.2"
+  },
+  "engines": {
+    "node": ">=22.19.0"
+  },
+  "packageManager": "bun@1.4.0",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/dotcommander/pi-dc-distill.git"
+  }
+}
