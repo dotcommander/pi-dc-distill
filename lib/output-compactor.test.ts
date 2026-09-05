@@ -13,7 +13,7 @@ import {
 const tempDirs: string[] = [];
 
 async function tempRoot(): Promise<string> {
-  const dir = await mkdtemp(join(tmpdir(), "dc-hooks-compactor-"));
+  const dir = await mkdtemp(join(tmpdir(), "dc-shrink-compactor-"));
   tempDirs.push(dir);
   return dir;
 }
@@ -121,16 +121,16 @@ describe("output compactor", () => {
     expect(content).toHaveLength(2);
     expect(content[0]).toEqual({ type: "image", data: "kept" });
     const text = content[1] as { type: "text"; text: string };
-    expect(text.text).toContain("[dc-hooks] Compacted bash output.");
+    expect(text.text).toContain("[dc-shrink] Compacted bash output.");
     expect(text.text).toContain("... omitted 4 lines ...");
     expect(text.text).toContain("Full output saved; read this path if needed:");
 
     const details = patch?.details as Record<string, any>;
     expect(details.existing).toBe(true);
-    expect(details.dcHooksOutputCompactor.compacted).toBe(true);
-    expect(details.dcHooksOutputCompactor.originalLines).toBe(8);
+    expect(details.dcShrinkOutputCompactor.compacted).toBe(true);
+    expect(details.dcShrinkOutputCompactor.originalLines).toBe(8);
 
-    const artifactPath = details.dcHooksOutputCompactor.artifactPath as string;
+    const artifactPath = details.dcShrinkOutputCompactor.artifactPath as string;
     expect(await readFile(artifactPath, "utf8")).toBe(fullText);
 
     const index = await readFile(join(root, "index.jsonl"), "utf8");
@@ -181,6 +181,6 @@ describe("output compactor", () => {
     await expect(compactor.onToolResult(event, callCtx)).resolves.toBeUndefined();
     await expect(compactor.onToolResult(event, callCtx)).resolves.toBeUndefined();
 
-    expect(callCtx.notices).toEqual(["dc-hooks output compactor failed open: disk full"]);
+    expect(callCtx.notices).toEqual(["dc-shrink output compactor failed open: disk full"]);
   });
 });

@@ -282,7 +282,7 @@ export function createOutputCompactor(options: OutputCompactorOptions = {}) {
         content: [...nonText, { type: "text", text: notice }],
         details: {
           ...(event.details ?? {}),
-          dcHooksOutputCompactor: {
+          dcShrinkOutputCompactor: {
             compacted: true,
             artifactPath: artifact.artifactPath,
             originalChars: compact.originalChars,
