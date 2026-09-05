@@ -104,5 +104,7 @@ bun test
 bun x tsc --noEmit
 ```
 
-The repository packages Pi 0.79.8. Installed-runtime compatibility is verified
-against `/opt/homebrew/bin/pi` 0.80.10 when that binary is available.
+The repository typechecks and tests against the pinned Pi SDK 0.82.1. The
+TUI compaction-card shim has been reviewed against Pi 0.84.4;
+verify `command -v pi` and `pi --version` before reviewing a new
+runtime version.

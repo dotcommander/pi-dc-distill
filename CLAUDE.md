@@ -153,11 +153,12 @@ synthetic assistant/content assumption.
 The repository's locked Pi SDK test surface is 0.82.1: the root package pins
 the four `@earendil-works/pi-*` development dependencies and overrides to that
 version. Keep focused tests and typechecking on the resolved 0.82.1 packages;
-the installed PATH runtime is not a general compatibility target unless it
-resolves to the same version. The TUI-only compaction-card compatibility shim
-keeps a separate, explicit allowlist of reviewed active Pi versions. Add a
-version there only after inspecting that runtime's `compaction_end` handler and
-verifying its focused compatibility test against the active implementation.
+the installed PATH runtime is reviewed separately. The TUI-only
+compaction-card compatibility shim keeps a separate, explicit allowlist of
+reviewed active Pi versions. Pi 0.84.4 is reviewed: its `compaction_end` handler
+rebuilds the chat, then appends one native `compactionSummary` card. Add a
+version there only after inspecting that runtime's handler and verifying its
+focused compatibility test against the active implementation.
 
 ## Verification
 
