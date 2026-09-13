@@ -51,6 +51,7 @@ const SUPPORTED_PI_VERSIONS = new Set([
   "0.82.1",
   "0.83.0",
   "0.84.4",
+  "0.85.1",
 ]);
 
 export interface CompactionCardDedupeHandle {

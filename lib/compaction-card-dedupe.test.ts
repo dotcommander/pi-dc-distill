@@ -181,6 +181,7 @@ describe("compaction card dedupe", () => {
       "0.82.1",
       "0.83.0",
       "0.84.4",
+      "0.85.1",
     ]).toContain(
       activePi.packageVersion,
     );
