@@ -435,7 +435,7 @@ function createExtension(pi: ExtensionAPI, options: ShrinkExtensionOptions = {})
         }
       },
 
-      turn_end: async (_event, ctx) => {
+      agent_settled: async (_event, ctx) => {
         if (!isOwner(runtime, ctx)) return;
         let piSynced = false;
         try {

@@ -37,8 +37,9 @@ notification.
 
 ## Autonomous Compaction
 
-At `turn_end`, dc-shrink computes each boundary as the smaller of the configured
-absolute tokens and configured percentage of the active context window.
+At `agent_settled`, after the active turn is fully idle, dc-shrink computes each
+boundary as the smaller of the configured absolute tokens and configured
+percentage of the active context window.
 
 - below auto: no action
 - auto through warn-minus-one: Mechanical compaction

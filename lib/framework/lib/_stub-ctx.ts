@@ -191,6 +191,7 @@ export function createStubCtx(): StubCtx {
     } as any,
     modelRegistry: {} as ExtensionContext["modelRegistry"],
     model: undefined as ExtensionContext["model"],
+    scopedModels: [] as ExtensionContext["scopedModels"],
     isProjectTrusted: () => (r("ctx.isProjectTrusted"), true),
     isIdle: () => (r("ctx.isIdle"), true),
     signal: undefined as ExtensionContext["signal"],

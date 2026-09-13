@@ -304,7 +304,7 @@ describe("dc-shrink subagent safety", () => {
     return stub.calls.filter((call) => call.api === "ctx.compact");
   }
 
-  test("turn_end does not autonomously compact a non-primary (subagent) session", async () => {
+  test("agent_settled does not autonomously compact a non-primary (subagent) session", async () => {
     const stub = createStubCtx();
     extension(stub.pi);
 
@@ -318,22 +318,36 @@ describe("dc-shrink subagent safety", () => {
     stub.cmdCtx.sessionManager.getSessionId = () => "subagent-session-id";
 
     // Even if the monitor were over threshold, a non-primary session must
-    // never reach ctx.compact() from turn_end.
-    await simulate.hook(stub, "turn_end", {});
+    // never reach ctx.compact() from agent_settled.
+    await simulate.hook(stub, "agent_settled", {});
 
     expect(compactCalls(stub).length).toBe(0);
   });
 
-  test("turn_end still serves the primary session after the latch", async () => {
+  test("turn_end stays inert and agent_settled compacts the primary session once", async () => {
     const stub = createStubCtx();
     extension(stub.pi);
     await simulate.hook(stub, "session_start", {});
 
-    // Same session id as latched → guard is a no-op; turn_end proceeds
-    // normally (warmup/threshold guards still apply, so no compact here).
+    // Consume the warmup in both the old and new lifecycle locations so this
+    // regression fails if the autonomous decision moves back to turn_end.
     await simulate.hook(stub, "turn_end", {});
+    await simulate.hook(stub, "agent_settled", {});
 
+    stub.ctx.getContextUsage = () => ({
+      tokens: 170_000,
+      contextWindow: 200_000,
+      percent: 85,
+    });
+
+    await simulate.hook(stub, "turn_end", {});
     expect(compactCalls(stub).length).toBe(0);
+
+    await simulate.hook(stub, "agent_settled", {});
+    expect(compactCalls(stub).length).toBe(1);
+
+    await simulate.hook(stub, "agent_settled", {});
+    expect(compactCalls(stub).length).toBe(1);
   });
 
   test("isolates hooks, tools, commands, shutdown, and owner recovery", async () => {

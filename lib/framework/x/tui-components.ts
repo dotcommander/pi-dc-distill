@@ -11,7 +11,6 @@ export {
   Spacer,
   Text,
   TruncatedText,
-  TUI,
 } from "../pi/tui.ts";
 
 export type {
@@ -19,6 +18,7 @@ export type {
   EditorTheme,
   ImageTheme,
   SelectItem,
+  TUI,
 } from "../pi/tui.ts";
 
 export {
