@@ -1,110 +1,103 @@
 # dc-shrink
 
-Compact the current Pi session with a focus hint:
+`dc-shrink` lets Pi compact a session without asking a model to summarize it. Run Pi’s normal `/compact` command with an optional focus hint; Pi chooses the discarded active-branch context and appends the compaction, while this package deterministically builds the summary. It never reads the append-only session file during that live hook and never falls back to an LLM if compilation cannot produce a safe result.
+
+## Start here
+
+| Need | Use | What happens |
+| --- | --- | --- |
+| Compact a session now | `/compact <focus>` | Pi invokes the extension-owned deterministic compaction result. |
+| Preserve explicit near-limit state | `save_shrink_handoff` | Stores a handoff entry that the next eligible compaction can include. |
+| Find committed prior summaries | `recall_compaction` | Searches the current project’s recall first; cross-project search is explicit. |
+| Keep oversized tool output recoverable | automatic `tool_result` hook | Saves full text and leaves a bounded preview in the conversation. |
+
+## Compact with a focus hint
+
+Use Pi’s built-in command when the session has eligible context to discard:
 
 ```text
-/compact preserve the bug report, current file edits, and next verification step
+/compact preserve the active task, edited files, failing test, and next command
 ```
 
-Check autonomous compaction state:
+Pi supplies the discarded active-branch input. dc-shrink compiles it locally, prefixes the returned summary with deterministic metrics, and returns it to Pi for the normal append and context rebuild. The focus text becomes a bounded part of the summary; it is limited to 2,048 Unicode code points.
+
+A manual compaction leaves the next action under your control. Autonomous compaction may queue a hidden continuation only after Pi confirms the matching compaction was appended and the session is idle.
+
+## Configuration and stored data
+
+Configuration is merged at session start from `extensionConfig["dc-shrink"]` in `~/.pi/agent/settings.json` and `~/.pi/data/dc-shrink/settings.json`; data-file values are applied after agent settings.
+
+```json
+{
+  "cacheTtlMs": 120000,
+  "autoThresholdTokens": 100000,
+  "warnThresholdTokens": 140000,
+  "emergencyThresholdTokens": 160000,
+  "autoThresholdPct": 0.75,
+  "warnThresholdPct": 0.85,
+  "emergencyThresholdPct": 0.92,
+  "dumpCompactions": false,
+  "dumpRetention": 20
+}
+```
+
+Each automatic boundary is the smaller of its token setting and its percentage of the active context window. The defaults therefore request compaction at 100,000 tokens or 75% of the window, warn at 140,000 or 85%, and compact unconditionally at 160,000 or 92%. Normal automatic attempts also observe warmup, latch, cooldown, Pi-sync, and post-compaction-growth guards; the emergency band bypasses cooldown and Pi-sync.
+
+| Location | Contents |
+| --- | --- |
+| `~/.pi/data/dc-shrink/compact-log.jsonl` | Committed-success and deterministic-failure records. |
+| `~/.pi/data/dc-shrink/compact-dumps/` | Opt-in canonical-input and returned-summary pairs. |
+| `Path.project("dc-shrink", cwd)/recall.json` | The ten newest committed summaries for one project. |
+| `Path.project("dc-shrink", cwd)/tool-output/` | Full text and provenance for compacted tool output. |
+
+Raw dumps are off by default. When enabled, each committed pair is written under a lock through temporary files, then renamed; a partial pair is not exposed.
+
+## Capabilities and boundaries
+
+### Deterministic compaction
+
+The live compiler receives only Pi’s preparation and active branch: the previous summary, discarded messages, discarded split-turn prefix, and the latest eligible handoff. Retained-tail and abandoned-fork messages do not become compiler input. If the normalized input exceeds 20 MiB, it retains complete newest records within that envelope instead of slicing JSON or messages.
+
+The returned wire summary is capped at 65,536 Unicode code points. Its version-6 details include the rebuilt-context token estimate, returned-summary estimate, input and summary digests, bounded file/anchor arrays, and whether the input used the normal or bounded envelope. Version-5 entries remain readable and are not rewritten.
+
+Failures and cancellations fail closed: no default LLM compactor is used. Success artifacts—log, optional dumps, recall, notification, monitor reset, and autonomous continuation—are delayed until the matching extension-owned `session_compact` event verifies the appended entry.
+
+### Recall and handoffs
+
+`save_shrink_handoff` accepts a non-empty handoff string and appends it to the active session. `recall_compaction` searches the project store by default:
 
 ```text
-/compact-status
+recall_compaction(query="modified-files", limit=3)
 ```
 
-`dc-shrink` replaces Pi's default LLM-backed compactor with a deterministic
-local TypeScript compiler. Pi owns `/compact`, cut selection, append, and
-context rebuilding. dc-shrink compiles only the discarded active-branch input
-Pi provides in `event.preparation`; it never reads the append-only session file
-or calls an LLM. The package is standalone and has no dependency on another
-Dotcommander or Pi extension.
+To merge project stores and ownerless historical recall, make the wider scope explicit:
 
-## What It Registers
+```text
+recall_compaction(query="source-anchors", limit=5, scope="all")
+```
 
-| Surface | Purpose |
-| --- | --- |
-| `/compact [focus]` | Pi-owned manual command. Focus becomes a bounded `## User Focus` section. |
-| `/compact-status` | Show monitor state, all effective thresholds and sources, cooldown, dump settings, and last failure. |
-| `recall_compaction` | Search recent summaries in the current project by default, or all projects explicitly. |
-| `save_shrink_handoff` | Preserve the exact continuation state used by the next compaction. |
-| `tool_result` | Store oversized text output and replace it with a deterministic bounded preview. |
-| `session_before_compact` | Prepare an extension-owned deterministic result or cancel without LLM fallback. |
-| `session_compact` | Commit success artifacts only after Pi appends the matching compaction. |
-| `turn_end` | Evaluate the three-band autonomous policy. |
+The project store keeps ten newest committed summaries. Ownerless legacy records are labeled `legacy-unscoped` and are excluded from default project search.
 
-## Trigger Policy
+### Tool-output compaction
 
-Each effective boundary is the smaller of its absolute setting and its
-percentage of the active context window.
+The `tool_result` hook keeps small results unchanged. By default, text exceeding 12,000 characters or 240 lines is saved in the project tool-output directory and replaced with a deterministic head-and-tail preview that names the full artifact path. If saving or preview construction fails, the hook leaves the original result available and emits at most one UI warning.
 
-| Band | Default absolute | Default percentage | Inclusive behavior |
-| --- | ---: | ---: | --- |
-| Auto | `100000` | `0.75` | Auto through warn-minus-one: Mechanical compaction. |
-| Warn | `140000` | `0.85` | Warn through emergency-minus-one: cooperative warning. |
-| Emergency | `160000` | `0.92` | Emergency and above: unconditional Mechanical compaction. |
+## Verify and contribute
 
-The warmup, cooldown, Pi-sync, and post-compaction growth guards still apply;
-emergency bypasses cooldown and sync. Manual `/compact` bypasses autonomous
-threshold checks. Use `/compact-status`, not `/compact status`, for diagnostics.
-
-## Version-6 Output
-
-The returned summary is bounded to 65,536 Unicode code points and preserves
-complete headings and balanced marker blocks. Details version 6 includes:
-
-- `tokensAfter`: Pi rebuilt message-context estimate
-- `summaryTokens`: returned-summary estimate
-- `tokensAfterSource: "pi-rebuilt-message-estimate"`
-- `digestScope: "compaction-input" | "bounded-compaction-input"`
-- `summaryDigest`: SHA-256 of the exact metric-prefixed summary returned to Pi
-
-Version-5 entries remain readable and are not rewritten.
-
-## Settings
-
-Settings live at `~/.pi/data/dc-shrink/settings.json`.
-
-| Setting | Default |
-| --- | ---: |
-| `cacheTtlMs` | `120000` |
-| `autoThresholdTokens` | `100000` |
-| `warnThresholdTokens` | `140000` |
-| `emergencyThresholdTokens` | `160000` |
-| `autoThresholdPct` | `0.75` |
-| `warnThresholdPct` | `0.85` |
-| `emergencyThresholdPct` | `0.92` |
-| `dumpCompactions` | `false` |
-| `dumpRetention` | `20` |
-
-## Durable Data
-
-| Path | Purpose |
-| --- | --- |
-| `~/.pi/data/dc-shrink/compact-log.jsonl` | Locked success/failure event log. |
-| `~/.pi/data/dc-shrink/compact-dumps/` | Opt-in, collision-safe canonical-input/returned-summary pairs. |
-| `Path.project("dc-shrink", cwd)/recall.json` | Last ten committed summaries for the current project. |
-| `~/.pi/data/dc-shrink/recall.json` | Preserved ownerless legacy recall, visible only with `scope: "all"`. |
-| `~/.pi/data/dc-shrink/.migrated-from-legacy-shrink` | Written only after a fully successful migration. |
-| `Path.project("dc-shrink", cwd)/tool-output/` | Full text and JSONL provenance for compacted tool output. |
-
-Migration is retryable: failures leave no completion marker and preserve both
-legacy and current data.
-
-## Docs
-
-- [Usage](docs/usage.md)
-- [Settings and data](docs/settings.md)
-- [Architecture](docs/architecture.md)
-- [Troubleshooting](docs/troubleshooting.md)
-
-## Verification
+This is an ESM TypeScript/Bun package. Run its configured checks from the repository root:
 
 ```bash
 bun test
 bun x tsc --noEmit
 ```
 
-The repository typechecks and tests against the pinned Pi SDK 0.82.1. The
-TUI compaction-card shim has been reviewed against Pi 0.84.4;
-verify `command -v pi` and `pi --version` before reviewing a new
-runtime version.
+Focused behavioral coverage includes deterministic results for manual, threshold, and overflow compaction triggers; transaction commit matching; continuation delivery; recall; storage; input bounding; and tool-output previews.
+
+## Limits and non-goals
+
+- dc-shrink does not call an LLM or replace Pi’s cut selection, compaction append, or context rebuild.
+- Live compaction does not read the append-only session file; session-file compiler helpers exist only for diagnostics and tests.
+- A compiler failure, cancellation, foreign compaction, mismatched append, duplicate event, or child session cannot commit success artifacts.
+- Raw dumps can contain canonical discarded context and returned summaries; enable them only when that local storage is appropriate for the project.
+
+See [architecture](docs/architecture.md), [usage](docs/usage.md), [settings and data](docs/settings.md), and [troubleshooting](docs/troubleshooting.md) for supporting detail.
