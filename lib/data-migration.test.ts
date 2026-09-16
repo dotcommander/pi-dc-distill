@@ -20,7 +20,7 @@ async function write(path: string, content: string): Promise<void> {
 }
 
 describe("migrateShrinkData", () => {
-  test("copies missing legacy files into the shrink namespace", async () => {
+  test("copies active legacy data but preserves obsolete settings in place", async () => {
     const root = tempRoot();
     const legacyDir = join(root, legacyName());
     const currentDir = join(root, "dc-shrink");
@@ -30,8 +30,9 @@ describe("migrateShrinkData", () => {
     const result = migrateShrinkData({ legacyDir, currentDir, now: () => new Date("2026-01-01T00:00:00Z") });
 
     expect(result.status).toBe("migrated");
-    expect(result.copied.sort()).toEqual(["compact-dumps/one-after.txt", "settings.json"]);
-    expect(readFileSync(join(currentDir, "settings.json"), "utf8")).toBe("{\"cacheTtlMs\":10000}\n");
+    expect(result.copied).toEqual(["compact-dumps/one-after.txt"]);
+    expect(existsSync(join(currentDir, "settings.json"))).toBe(false);
+    expect(readFileSync(join(legacyDir, "settings.json"), "utf8")).toBe("{\"cacheTtlMs\":10000}\n");
     expect(existsSync(join(currentDir, ".migrated-from-legacy-shrink"))).toBe(true);
   });
 

@@ -1,186 +1,79 @@
 import { existsSync, readFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
-import { Path } from "#shrink-framework";
 
-export interface ShrinkSettings {
-  cacheTtlMs: number;
-  autoThresholdTokens: number;
-  warnThresholdTokens: number;
-  emergencyThresholdTokens: number;
-  autoThresholdPct: number;
-  warnThresholdPct: number;
-  emergencyThresholdPct: number;
-  dumpCompactions: boolean;
-  dumpRetention: number;
+export interface PiCompactionSettings {
+  enabled: boolean;
+  reserveTokens: number;
 }
 
-export const DEFAULT_SHRINK_SETTINGS: ShrinkSettings = {
-  cacheTtlMs: 120_000,
-  autoThresholdTokens: 100_000,
-  warnThresholdTokens: 140_000,
-  emergencyThresholdTokens: 160_000,
-  autoThresholdPct: 0.75,
-  warnThresholdPct: 0.85,
-  emergencyThresholdPct: 0.92,
-  dumpCompactions: false,
-  dumpRetention: 20,
+export const DEFAULT_PI_COMPACTION_SETTINGS: PiCompactionSettings = {
+  enabled: true,
+  reserveTokens: 16_384,
 };
 
-const SETTINGS_FILE = "settings.json";
+/** Minimum gap between autonomous compactions. Pi has no equivalent setting. */
+export const COMPACTION_COOLDOWN_MS = 120_000;
+/** Raw-dump retention when DC_SHRINK_DUMPS enables diagnostic dumps. */
+export const DUMP_RETENTION = 20;
+
 const AGENT_SETTINGS_FILE = join(homedir(), ".pi", "agent", "settings.json");
-const MIN_CACHE_TTL_MS = 10_000;
-const MAX_CACHE_TTL_MS = 3_600_000;
-const MIN_AUTO_THRESHOLD_TOKENS = 10_000;
-const MAX_AUTO_THRESHOLD_TOKENS = 160_000;
-const MIN_WARN_THRESHOLD_TOKENS = 11_000;
-const MAX_WARN_THRESHOLD_TOKENS = 320_000;
-const MIN_EMERGENCY_THRESHOLD_TOKENS = 12_000;
-const MAX_EMERGENCY_THRESHOLD_TOKENS = 500_000;
-const MAX_DUMP_RETENTION = 500;
-const MIN_AUTO_THRESHOLD_PCT = 0.5;
-const MAX_AUTO_THRESHOLD_PCT = 0.95;
-const MIN_WARN_THRESHOLD_PCT = 0.5;
-const MAX_WARN_THRESHOLD_PCT = 0.97;
-const MIN_EMERGENCY_THRESHOLD_PCT = 0.6;
-const MAX_EMERGENCY_THRESHOLD_PCT = 0.98;
+const PROJECT_SETTINGS_FILE = ".pi/settings.json";
 
-function numberInRange(
-  value: unknown,
-  fallback: number,
-  min: number,
-  max: number,
-): number {
+function asRecord(value: unknown): Record<string, unknown> {
+  return value !== null && typeof value === "object"
+    ? value as Record<string, unknown>
+    : {};
+}
+
+function positiveInteger(value: unknown, fallback: number): number {
   if (typeof value !== "number" || !Number.isFinite(value)) return fallback;
-  return Math.min(max, Math.max(min, Math.round(value)));
+  return Math.max(1, Math.round(value));
 }
 
-function fractionInRange(
-  value: unknown,
-  fallback: number,
-  min: number,
-  max: number,
-): number {
-  if (typeof value !== "number" || !Number.isFinite(value)) return fallback;
-  return Math.min(max, Math.max(min, value));
-}
-
-function booleanValue(value: unknown, fallback: boolean): boolean {
-  return typeof value === "boolean" ? value : fallback;
-}
-
-export function normalizeShrinkSettings(
+/**
+ * Pi deep-merges global and project settings. Preserve that merge shape for the
+ * two compaction keys dc-shrink reads without owning a parallel config.
+ */
+export function normalizePiCompactionSettings(
   raw: unknown,
-  fallback: ShrinkSettings = DEFAULT_SHRINK_SETTINGS,
-): ShrinkSettings {
-  const source =
-    raw !== null && typeof raw === "object"
-      ? (raw as Record<string, unknown>)
-      : {};
-  const autoThresholdPct = fractionInRange(
-    source.autoThresholdPct,
-    fallback.autoThresholdPct,
-    MIN_AUTO_THRESHOLD_PCT,
-    MAX_AUTO_THRESHOLD_PCT,
-  );
-  const warnThresholdPct = Math.min(
-    MAX_WARN_THRESHOLD_PCT,
-    Math.max(
-      autoThresholdPct + 0.01,
-      fractionInRange(
-        source.warnThresholdPct,
-        fallback.warnThresholdPct,
-        MIN_WARN_THRESHOLD_PCT,
-        MAX_WARN_THRESHOLD_PCT,
-      ),
-    ),
-  );
-  const autoThresholdTokens = numberInRange(
-    source.autoThresholdTokens,
-    fallback.autoThresholdTokens,
-    MIN_AUTO_THRESHOLD_TOKENS,
-    MAX_AUTO_THRESHOLD_TOKENS,
-  );
-  const warnThresholdTokens = Math.max(
-    autoThresholdTokens + 1_000,
-    numberInRange(
-      source.warnThresholdTokens,
-      fallback.warnThresholdTokens,
-      MIN_WARN_THRESHOLD_TOKENS,
-      MAX_WARN_THRESHOLD_TOKENS,
-    ),
-  );
-
+  fallback: PiCompactionSettings = DEFAULT_PI_COMPACTION_SETTINGS,
+): PiCompactionSettings {
+  const compaction = asRecord(raw);
   return {
-    cacheTtlMs: numberInRange(
-      source.cacheTtlMs,
-      fallback.cacheTtlMs,
-      MIN_CACHE_TTL_MS,
-      MAX_CACHE_TTL_MS,
-    ),
-    autoThresholdTokens,
-    warnThresholdTokens,
-    emergencyThresholdTokens: Math.max(
-      warnThresholdTokens + 1_000,
-      numberInRange(
-        source.emergencyThresholdTokens,
-        fallback.emergencyThresholdTokens,
-        MIN_EMERGENCY_THRESHOLD_TOKENS,
-        MAX_EMERGENCY_THRESHOLD_TOKENS,
-      ),
-    ),
-    autoThresholdPct,
-    warnThresholdPct,
-    emergencyThresholdPct: Math.min(
-      MAX_EMERGENCY_THRESHOLD_PCT,
-      Math.max(
-        warnThresholdPct + 0.01,
-        fractionInRange(
-          source.emergencyThresholdPct,
-          fallback.emergencyThresholdPct,
-          MIN_EMERGENCY_THRESHOLD_PCT,
-          MAX_EMERGENCY_THRESHOLD_PCT,
-        ),
-      ),
-    ),
-    dumpCompactions: booleanValue(
-      source.dumpCompactions,
-      fallback.dumpCompactions,
-    ),
-    dumpRetention: numberInRange(
-      source.dumpRetention,
-      fallback.dumpRetention,
-      0,
-      MAX_DUMP_RETENTION,
-    ),
+    enabled: typeof compaction.enabled === "boolean"
+      ? compaction.enabled
+      : fallback.enabled,
+    reserveTokens: positiveInteger(compaction.reserveTokens, fallback.reserveTokens),
   };
 }
 
-export function mergeShrinkSettings(...sources: unknown[]): ShrinkSettings {
-  return sources.reduce<ShrinkSettings>(
-    (settings, source) => normalizeShrinkSettings(source, settings),
-    DEFAULT_SHRINK_SETTINGS,
+export function mergePiCompactionSettings(...settingsFiles: unknown[]): PiCompactionSettings {
+  return settingsFiles.reduce<PiCompactionSettings>(
+    (settings, settingsFile) =>
+      normalizePiCompactionSettings(asRecord(settingsFile).compaction, settings),
+    DEFAULT_PI_COMPACTION_SETTINGS,
   );
 }
 
-function readAgentExtensionConfig(): unknown {
+function readSettingsFile(path: string): unknown {
   try {
-    if (!existsSync(AGENT_SETTINGS_FILE)) return {};
-    const settings = JSON.parse(readFileSync(AGENT_SETTINGS_FILE, "utf8"));
-    return settings?.extensionConfig?.["dc-shrink"] ?? {};
+    if (!existsSync(path)) return {};
+    return JSON.parse(readFileSync(path, "utf8"));
   } catch {
     return {};
   }
 }
 
-function readDataSettings(): unknown {
-  try {
-    return Path.data("dc-shrink").read(SETTINGS_FILE, {});
-  } catch {
-    return {};
-  }
+/** Read Pi's global settings followed by the current project's override file. */
+export function loadPiCompactionSettings(cwd: string): PiCompactionSettings {
+  return mergePiCompactionSettings(
+    readSettingsFile(AGENT_SETTINGS_FILE),
+    readSettingsFile(join(cwd, PROJECT_SETTINGS_FILE)),
+  );
 }
 
-export function loadShrinkSettings(): ShrinkSettings {
-  return mergeShrinkSettings(readAgentExtensionConfig(), readDataSettings());
+/** Raw dumps are diagnostic-only and intentionally require an explicit process opt-in. */
+export function dumpsEnabled(env: NodeJS.ProcessEnv = process.env): boolean {
+  return ["1", "true", "yes"].includes((env.DC_SHRINK_DUMPS ?? "").toLowerCase());
 }

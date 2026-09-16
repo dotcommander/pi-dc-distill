@@ -171,6 +171,9 @@ export function migrateShrinkData(
   if (existsSync(flagPath)) return result;
 
   for (const entry of readdirSync(legacyDir)) {
+    // dc-shrink no longer owns a settings file. Preserve legacy settings in
+    // place rather than copying dead configuration into current storage.
+    if (entry === "settings.json") continue;
     migrateEntry(
       join(legacyDir, entry),
       join(currentDir, entry),

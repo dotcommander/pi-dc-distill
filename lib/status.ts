@@ -1,8 +1,15 @@
 import { join } from "node:path";
 import { Path } from "#shrink-framework";
-import { DEFAULT_SHRINK_SETTINGS, type ShrinkSettings } from "./settings.ts";
+import {
+  COMPACTION_COOLDOWN_MS,
+  DEFAULT_PI_COMPACTION_SETTINGS,
+  DUMP_RETENTION,
+  dumpsEnabled,
+  type PiCompactionSettings,
+} from "./settings.ts";
 import {
   resolveTriggerThresholds,
+  SHRINK_LEAD_TOKENS,
   type ResolvedThreshold,
 } from "./trigger.ts";
 import type { CompactState } from "./types.ts";
@@ -14,7 +21,8 @@ export interface ShrinkStatusInput {
   hasPiSynced: boolean;
   pendingMetric: string | null;
   lastEcho: string | null;
-  settings?: ShrinkSettings;
+  compaction?: PiCompactionSettings;
+  dumpEnabled?: boolean;
   compactorAvailable?: boolean;
   lastFailure?: string | null;
   contextWindow?: number;
@@ -27,22 +35,17 @@ function formatTokens(tokens: number): string {
 
 export function formatShrinkStatus(input: ShrinkStatusInput): string {
   const now = input.now ?? Date.now();
-  const cooldownMs = input.settings?.cacheTtlMs ?? DEFAULT_SHRINK_SETTINGS.cacheTtlMs;
-  const settings = input.settings ?? DEFAULT_SHRINK_SETTINGS;
+  const compaction = input.compaction ?? DEFAULT_PI_COMPACTION_SETTINGS;
   const thresholds = resolveTriggerThresholds({
-    autoThresholdTokens: settings.autoThresholdTokens,
-    warnThresholdTokens: settings.warnThresholdTokens,
-    emergencyThresholdTokens: settings.emergencyThresholdTokens,
-    autoThresholdPct: settings.autoThresholdPct,
-    warnThresholdPct: settings.warnThresholdPct,
-    emergencyThresholdPct: settings.emergencyThresholdPct,
+    compaction,
     contextWindow: input.contextWindow,
   });
   const cooldownRemaining = Math.max(
     0,
-    cooldownMs - (now - input.state.lastCompactionTime),
+    COMPACTION_COOLDOWN_MS - (now - input.state.lastCompactionTime),
   );
   const dataDir = Path.data("dc-shrink").path;
+  const dumpEnabled = input.dumpEnabled ?? dumpsEnabled();
 
   const lines = [
     "shrink status",
@@ -52,13 +55,14 @@ export function formatShrinkStatus(input: ShrinkStatusInput): string {
     `  Calls since compact: ${input.state.callCount}`,
     `  User exchanges since compact: ${input.state.exchangeCount}`,
     `  Compactions this session: ${input.state.compactionCount}`,
+    `  Pi auto-compaction: ${compaction.enabled ? "enabled" : "disabled (dc-shrink monitor standing down)"}`,
     `  Cooldown: ${cooldownRemaining > 0 ? `${Math.ceil(cooldownRemaining / 1000)}s remaining` : "ready"}`,
-    `  Configured cooldown: ${Math.ceil(cooldownMs / 1000)}s`,
-    `  Auto threshold: ${formatThreshold(thresholds.auto, input.contextWindow)}`,
-    `  Warn threshold: ${formatThreshold(thresholds.warn, input.contextWindow)}`,
-    `  Emergency threshold: ${formatThreshold(thresholds.emergency, input.contextWindow)}`,
+    `  Configured cooldown: ${Math.ceil(COMPACTION_COOLDOWN_MS / 1000)}s fixed`,
+    `  Auto threshold: ${formatThreshold("auto", thresholds.auto, compaction, input.contextWindow)}`,
+    `  Warn threshold: ${formatThreshold("warn", thresholds.warn, compaction, input.contextWindow)}`,
+    `  Emergency threshold: ${formatThreshold("emergency", thresholds.emergency, compaction, input.contextWindow)}`,
     `  Compactor: ${input.compactorAvailable === false ? "unavailable" : "local TypeScript"}`,
-    `  Dumps: ${formatDumpStatus(input.settings)}`,
+    `  Dumps: ${dumpEnabled ? `enabled, retaining ${DUMP_RETENTION}` : "disabled (set DC_SHRINK_DUMPS=1)"}`,
     `  In flight: ${input.inFlight ? "yes" : "no"}`,
     `  Warmup turns remaining: ${input.warmupTurnsRemaining}`,
   ];
@@ -83,19 +87,21 @@ export function formatShrinkStatus(input: ShrinkStatusInput): string {
 }
 
 function formatThreshold(
+  band: "auto" | "warn" | "emergency",
   threshold: ResolvedThreshold,
+  compaction: PiCompactionSettings,
   contextWindow: number | undefined,
 ): string {
-  const pct = `${Math.round(threshold.percentage * 100)}%`;
-  if (threshold.percentageTokens === null) {
-    return `${formatTokens(threshold.effective)} tokens (absolute ${formatTokens(threshold.absolute)}; ${pct} source unavailable without context window)`;
+  if (threshold.source === "fallback") {
+    return `${formatTokens(threshold.effective)} tokens (fallback; Pi context window unavailable)`;
   }
 
-  return `${formatTokens(threshold.effective)} tokens (${threshold.source}; absolute ${formatTokens(threshold.absolute)}, ${pct} of ${formatTokens(contextWindow!)} = ${formatTokens(threshold.percentageTokens)})`;
-}
-
-function formatDumpStatus(settings: ShrinkSettings | undefined): string {
-  const effective = settings ?? DEFAULT_SHRINK_SETTINGS;
-  if (!effective.dumpCompactions) return "disabled";
-  return `enabled, retaining ${effective.dumpRetention}`;
+  const window = formatTokens(contextWindow!);
+  if (band === "auto") {
+    return `${formatTokens(threshold.effective)} tokens (Pi trigger: ${window} window − ${formatTokens(compaction.reserveTokens)} reserve − fixed ${formatTokens(SHRINK_LEAD_TOKENS)} lead)`;
+  }
+  if (band === "warn") {
+    return `${formatTokens(threshold.effective)} tokens (Pi: ${window} window − ${formatTokens(compaction.reserveTokens)} reserve)`;
+  }
+  return `${formatTokens(threshold.effective)} tokens (Pi context window)`;
 }

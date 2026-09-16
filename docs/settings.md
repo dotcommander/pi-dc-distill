@@ -1,41 +1,44 @@
-# dc-shrink Settings and Data
+# dc-shrink Policy and Data
 
-Create or edit `~/.pi/data/dc-shrink/settings.json`:
+`dc-shrink` has no extension configuration. It reads Pi's effective global and
+project compaction settings at primary-session start:
 
-```json
-{
-  "cacheTtlMs": 120000,
-  "autoThresholdTokens": 100000,
-  "warnThresholdTokens": 140000,
-  "emergencyThresholdTokens": 160000,
-  "autoThresholdPct": 0.75,
-  "warnThresholdPct": 0.85,
-  "emergencyThresholdPct": 0.92,
-  "dumpCompactions": false,
-  "dumpRetention": 20
-}
+```text
+~/.pi/agent/settings.json
+<project>/.pi/settings.json
 ```
 
-Settings load at extension startup and again when the primary session starts.
+The project file overrides individual keys from the global file, matching Pi's
+compaction settings merge.
 
-## Settings
+## Trigger Policy
 
-| Setting | Default | Normalization |
+| Pi setting | Default | dc-shrink behavior |
 | --- | ---: | --- |
-| `cacheTtlMs` | `120000` | Rounded and clamped to `10000`-`3600000`. |
-| `autoThresholdTokens` | `100000` | Rounded and clamped to `10000`-`160000`. |
-| `warnThresholdTokens` | `140000` | Clamped to `11000`-`320000` and at least auto + `1000`. |
-| `emergencyThresholdTokens` | `160000` | Clamped to `12000`-`500000` and at least warn + `1000`. |
-| `autoThresholdPct` | `0.75` | Clamped to `0.50`-`0.95`. |
-| `warnThresholdPct` | `0.85` | Clamped to `0.50`-`0.97` and at least auto + `0.01`. |
-| `emergencyThresholdPct` | `0.92` | Clamped to `0.60`-`0.98` and at least warn + `0.01`. |
-| `dumpCompactions` | `false` | Non-boolean values fall back to the previous/default value. Explicit `true` is preserved. |
-| `dumpRetention` | `20` | Rounded and clamped to `0`-`500`. |
+| `compaction.enabled` | `true` | When `false`, dc-shrink's autonomous monitor stands down. Manual `/compact` remains available. |
+| `compaction.reserveTokens` | `16384` | Pi trigger is `contextWindow - reserveTokens`; dc-shrink auto-compacts 20,000 tokens before it. |
 
-Each effective token boundary is the minimum of its absolute value and the
-rounded percentage of the active context window. `/compact-status` shows the
-effective value and both sources. `cacheTtlMs` affects autonomous compaction
-only; manual `/compact` ignores it.
+`compaction.keepRecentTokens` controls Pi's retained tail at cut selection, not its trigger, so it does not change dc-shrink's 20,000-token lead.
+
+Emergency compaction is the reported Pi context-window limit. It bypasses
+cooldown and Pi-sync guards. Very small windows use fixed internal floors to
+keep auto, warn, and emergency ordered. If an older Pi cannot report a context
+window, dc-shrink falls back to 100,000 / 140,000 / 160,000 tokens.
+
+The monitor retains a fixed 120-second cooldown and post-compaction growth
+guard. These are loop-safety mechanics, not user settings. `/compact-status`
+reports the resolved geometry and its Pi inputs.
+
+## Diagnostic Dumps
+
+Raw dumps are disabled by default. Set `DC_SHRINK_DUMPS=1` in the Pi process
+environment to enable them. dc-shrink retains 20 complete pairs; retention is
+fixed. Dumps can contain discarded conversation context, so enable them only
+when that local storage is appropriate.
+
+Existing `extensionConfig["dc-shrink"]` blocks and
+`~/.pi/data/dc-shrink/settings.json` are no longer read. They are preserved;
+dc-shrink never deletes user settings files.
 
 ## Durable Storage
 
@@ -43,9 +46,8 @@ only; manual `/compact` ignores it.
 
 | File or directory | Purpose |
 | --- | --- |
-| `~/.pi/data/dc-shrink/settings.json` | User settings. |
 | `~/.pi/data/dc-shrink/compact-log.jsonl` | Locked, rotation-safe failure and committed-success log. |
-| `~/.pi/data/dc-shrink/compact-dumps/` | Opt-in canonical-input/returned-summary pairs. |
+| `~/.pi/data/dc-shrink/compact-dumps/` | Optional canonical-input/returned-summary pairs. |
 | `Path.project("dc-shrink", cwd)/recall.json` | Ten newest committed summaries for one project. |
 | `~/.pi/data/dc-shrink/recall.json` | Preserved ownerless legacy recall. |
 | `~/.pi/data/dc-shrink/.migrated-from-legacy-shrink` | Successful migration marker. |
@@ -61,7 +63,7 @@ and the exact returned summary.
 Migration runs during store initialization/session start, never when the module
 is imported.
 
-- Missing files are copied into the current directory.
+- Missing active data files are copied into the current directory; obsolete legacy `settings.json` stays in place.
 - Global historical recall remains ownerless legacy data; dc-shrink does not
   guess a project owner.
 - JSONL data is merged without duplicate lines.
@@ -74,7 +76,7 @@ If any migration or marker write fails, source and current data remain intact,
 no completion marker is left, diagnostics record the failure, and startup
 retries later. Conversion is idempotent.
 
-## Compaction Log
+## Compaction Log and Dumps
 
 Committed success entries distinguish rebuilt-message after tokens from Pi's
 optional post-hook full-context tokens and record their source. They also carry
@@ -82,10 +84,7 @@ the pre-compact API snapshot, counts, strategy, digest information, and bounded
 summary metadata. Failure entries may be written before host commit; success
 entries may not.
 
-## Dumps
-
-Raw dumps are off by default. When explicitly enabled, a committed compaction
-writes:
+When `DC_SHRINK_DUMPS=1`, each committed compaction writes:
 
 ```text
 compact-dumps/<millisecond-time>-<pid>-<attempt>-before.jsonl
@@ -95,5 +94,4 @@ compact-dumps/<millisecond-time>-<pid>-<attempt>-after.txt
 The before file contains the compiler's canonical input bytes verbatim. The
 after file contains the exact metric-prefixed wire summary returned to Pi.
 Temporary files are renamed under a lock so partial pairs are not exposed and
-same-millisecond attempts cannot collide. `dumpRetention` counts complete pairs;
-`0` prunes all retained pairs after a new dump attempt.
+same-millisecond attempts cannot collide.
