@@ -36,9 +36,11 @@ import { buildMetricLine } from "./lib/metric.ts";
 import { Monitor } from "./lib/monitor.ts";
 import { searchRecallEntries } from "./lib/recall.ts";
 import {
-  DEFAULT_SHRINK_SETTINGS,
-  loadShrinkSettings,
-  type ShrinkSettings,
+  DUMP_RETENTION,
+  DEFAULT_PI_COMPACTION_SETTINGS,
+  dumpsEnabled,
+  loadPiCompactionSettings,
+  type PiCompactionSettings,
 } from "./lib/settings.ts";
 import { formatShrinkStatus } from "./lib/status.ts";
 import { ShrinkStore, type StoredRecallEntry } from "./lib/store.ts";
@@ -47,12 +49,13 @@ import { shouldCompact } from "./lib/trigger.ts";
 import { Tier } from "./lib/types.ts";
 import { registerOutputCompactor } from "./lib/output-compactor.ts";
 
-const VERSION = 6;
+const VERSION = 7;
 const WARN_COOLDOWN_MS = 120_000;
 const WARN_STEER_PROMPT = [
   "You are near the context boundary — compaction is imminent.",
-  "Finish the current atomic unit and save state, then call save_shrink_handoff",
-  "with the remaining steps, key invariants, and exact next action.",
+  "Finish the current atomic unit, then call save_shrink_handoff with either legacy text",
+  "or one strict ```shrink-handoff-v1 JSON block containing objective, done, next, blocker,",
+  "decision, and verification-needed. Record only explicit current state and exact next actions.",
 ].join("\n");
 
 interface ApiUsage {
@@ -104,7 +107,7 @@ interface ShrinkRuntime {
   pi: ExtensionAPI;
   monitor: Monitor;
   latch: Latch;
-  settings: ShrinkSettings;
+  compactionSettings: PiCompactionSettings;
   store: ShrinkStore | null;
   pending: PendingCompaction | null;
   nextAttemptAutonomous: boolean;
@@ -219,7 +222,7 @@ function createRuntime(pi: ExtensionAPI): ShrinkRuntime {
     pi,
     monitor: new Monitor(),
     latch: new Latch(),
-    settings: DEFAULT_SHRINK_SETTINGS,
+    compactionSettings: DEFAULT_PI_COMPACTION_SETTINGS,
     store: null,
     pending: null,
     nextAttemptAutonomous: false,
@@ -233,6 +236,7 @@ function createRuntime(pi: ExtensionAPI): ShrinkRuntime {
 
 export interface ShrinkExtensionOptions {
   storeFactory?: (ctx: ExtensionContext) => ShrinkStore;
+  loadCompactionSettings?: (cwd: string) => PiCompactionSettings;
   installCompactionDedupe?: () => Promise<CompactionCardDedupeHandle | null>;
 }
 
@@ -391,7 +395,8 @@ function createExtension(pi: ExtensionAPI, options: ShrinkExtensionOptions = {})
         runtime.ownerSessionId = currentId;
         clearAttempt(runtime);
         runtime.monitor.reset();
-        runtime.settings = loadShrinkSettings();
+        runtime.compactionSettings = options.loadCompactionSettings?.(ctx.cwd)
+          ?? loadPiCompactionSettings(ctx.cwd);
         runtime.lastFailure = null;
         runtime.store = options.storeFactory?.(ctx)
           ?? new ShrinkStore({ projectIdentity: ctx.cwd });
@@ -447,6 +452,7 @@ function createExtension(pi: ExtensionAPI, options: ShrinkExtensionOptions = {})
         } catch { /* older Pi */ }
 
         if (runtime.latch.held) return;
+        if (!runtime.compactionSettings.enabled) return;
         if (runtime.warmupTurnsRemaining > 0) {
           runtime.warmupTurnsRemaining--;
           return;
@@ -455,14 +461,8 @@ function createExtension(pi: ExtensionAPI, options: ShrinkExtensionOptions = {})
           runtime.monitor.state,
           piSynced || runtime.monitor.hasPiSynced,
           {
-            cooldownMs: runtime.settings.cacheTtlMs,
-            autoThresholdTokens: runtime.settings.autoThresholdTokens,
-            warnThresholdTokens: runtime.settings.warnThresholdTokens,
-            emergencyThresholdTokens: runtime.settings.emergencyThresholdTokens,
-            autoThresholdPct: runtime.settings.autoThresholdPct,
-            warnThresholdPct: runtime.settings.warnThresholdPct,
-            emergencyThresholdPct: runtime.settings.emergencyThresholdPct,
             contextWindow: runtime.contextWindow,
+            compaction: runtime.compactionSettings,
           },
         );
         if (!decision) return;
@@ -544,8 +544,8 @@ function createExtension(pi: ExtensionAPI, options: ShrinkExtensionOptions = {})
             pending.canonicalInput,
             pending.wireSummary,
             {
-              enabled: runtime.settings.dumpCompactions,
-              maxDumps: runtime.settings.dumpRetention,
+              enabled: dumpsEnabled(),
+              maxDumps: DUMP_RETENTION,
               attemptId: pending.attemptId,
             },
           );
@@ -580,7 +580,7 @@ function createExtension(pi: ExtensionAPI, options: ShrinkExtensionOptions = {})
     tools: {
       save_shrink_handoff: {
         name: "save_shrink_handoff",
-        description: "Save the current near-compaction continuation handoff.",
+        description: "Save near-compaction state as legacy text or one strict shrink-handoff-v1 JSON envelope with objective, done, next, blocker, decision, and verification-needed.",
         parameters: Type.Object({ handoff: Type.String() }),
         // Custom rendering: the house rail preserves the handoff completion summary.
         renderStyle: "custom",

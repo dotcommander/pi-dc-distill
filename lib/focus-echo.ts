@@ -96,16 +96,27 @@ function compactItems(items: string[]): string[] {
 
 function buildEcho(summary: string): string | null {
   const userFocus = extractHeading(summary, "User Focus");
+  const structuredState = linesFromBlock(extractTag(summary, "resume-state"))
+    .filter((line) => !line.startsWith("provenance:"));
+  const currentIntent = linesFromBlock(extractTag(summary, "current-intent"));
+  const risks = linesFromBlock(extractTag(summary, "resume-risks"));
   const resume = linesFromBlock(extractTag(summary, "resume-index"));
   const readFiles = compactItems(linesFromBlock(extractTag(summary, "read-files")));
   const modifiedFiles = compactItems(linesFromBlock(extractTag(summary, "modified-files")));
 
-  if (!hasEchoSignal(userFocus, resume, readFiles, modifiedFiles)) {
+  if (!hasEchoSignal(userFocus, structuredState, currentIntent, risks, resume, readFiles, modifiedFiles)) {
     return null;
   }
 
   const lines = [ECHO_MARKER];
+  if (structuredState.length > 0) {
+    lines.push("Explicit resume state:");
+    for (const item of structuredState) lines.push(`- ${item}`);
+  } else if (currentIntent.length > 0) {
+    lines.push(`Current intent: ${currentIntent.join(" ")}`);
+  }
   if (userFocus) lines.push(`Focus: ${userFocus}`);
+  if (risks.length > 0) lines.push(`Resume risks: ${risks.join("; ")}`);
   if (modifiedFiles.length > 0) lines.push(`Modified files: ${modifiedFiles.join(", ")}`);
   if (readFiles.length > 0) lines.push(`Read files: ${readFiles.join(", ")}`);
   if (resume.length > 0) {
@@ -125,12 +136,18 @@ function buildEcho(summary: string): string | null {
 
 function hasEchoSignal(
   userFocus: string,
+  structuredState: string[],
+  currentIntent: string[],
+  risks: string[],
   resume: string[],
   readFiles: string[],
   modifiedFiles: string[],
 ): boolean {
   return (
     !!userFocus ||
+    structuredState.length > 0 ||
+    currentIntent.length > 0 ||
+    risks.length > 0 ||
     resume.length > 0 ||
     readFiles.length > 0 ||
     modifiedFiles.length > 0
@@ -142,6 +159,9 @@ function detectShrinkSummary(messages: unknown[]): string | null {
     if (roleOf(message) !== "compactionSummary") continue;
     const text = extractMessageText(message);
     if (
+      text.includes("<resume-state>") ||
+      text.includes("<current-intent>") ||
+      text.includes("<resume-risks>") ||
       text.includes("<resume-index>") ||
       text.includes("<read-files>") ||
       text.includes("<modified-files>")

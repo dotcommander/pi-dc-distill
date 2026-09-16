@@ -12,6 +12,10 @@ import { ShrinkStore } from "./lib/store.ts";
 
 const testRoot = mkdtempSync(join(tmpdir(), "dc-shrink-index-tests-"));
 const extension = createShrinkExtension({
+  loadCompactionSettings: () => ({
+    enabled: true,
+    reserveTokens: 16_384,
+  }),
   storeFactory: (ctx) => new ShrinkStore({
     dataDir: join(testRoot, "data"),
     projectRoot: join(testRoot, "projects", encodeURIComponent(ctx.cwd)),
@@ -53,8 +57,8 @@ describe("dc-shrink entrypoint", () => {
     );
 
     expect(source).not.toMatch(/Notify\.user\(\s*(?:`|"|')/);
-    expect(source).toContain("warnThresholdTokens: runtime.settings.warnThresholdTokens");
-    expect(source).toContain("warnThresholdPct: runtime.settings.warnThresholdPct");
+    expect(source).toContain("compaction: runtime.compactionSettings");
+    expect(source).toContain("if (!runtime.compactionSettings.enabled) return;");
   });
 
   test("does not register compact-status as a slash command", () => {
@@ -167,13 +171,42 @@ describe("dc-shrink host compaction override", () => {
           tokensBefore: 120_000,
           details: {
             compactor: "dc-shrink",
-            version: 6,
+            version: 7,
             tokensAfterSource: "pi-rebuilt-message-estimate",
           },
         },
       });
       expect(Array.from((result as any).compaction.summary).length).toBeLessThanOrEqual(65_536);
     }
+  });
+
+  test("keeps manual compaction available when Pi disables auto-compaction", async () => {
+    const disabled = createShrinkExtension({
+      loadCompactionSettings: () => ({
+        enabled: false,
+        reserveTokens: 16_384,
+      }),
+      storeFactory: (ctx) => new ShrinkStore({
+        dataDir: join(testRoot, "manual-disabled-data"),
+        projectRoot: join(testRoot, "manual-disabled-projects", encodeURIComponent(ctx.cwd)),
+        projectsRoot: join(testRoot, "manual-disabled-projects"),
+        projectIdentity: ctx.cwd,
+        legacyDir: join(testRoot, "missing-manual-disabled-legacy"),
+      }),
+    });
+    const stub = createStubCtx();
+    disabled(stub.pi);
+    await simulate.hook(stub, "session_start", {});
+
+    const [result] = await simulate.hook(
+      stub,
+      "session_before_compact",
+      compactEvent("manual"),
+    );
+
+    expect(result).toMatchObject({
+      compaction: { details: { compactor: "dc-shrink", version: 7 } },
+    });
   });
 
   test("tokensAfter matches Pi's rebuilt message-context calculation", async () => {
@@ -324,6 +357,31 @@ describe("dc-shrink subagent safety", () => {
     expect(compactCalls(stub).length).toBe(0);
   });
 
+  test("stands down the monitor when Pi disables auto-compaction", async () => {
+    const disabled = createShrinkExtension({
+      loadCompactionSettings: () => ({
+        enabled: false,
+        reserveTokens: 16_384,
+      }),
+      storeFactory: (ctx) => new ShrinkStore({
+        dataDir: join(testRoot, "disabled-data"),
+        projectRoot: join(testRoot, "disabled-projects", encodeURIComponent(ctx.cwd)),
+        projectsRoot: join(testRoot, "disabled-projects"),
+        projectIdentity: ctx.cwd,
+        legacyDir: join(testRoot, "missing-disabled-legacy"),
+      }),
+    });
+    const stub = createStubCtx();
+    disabled(stub.pi);
+    await simulate.hook(stub, "session_start", {});
+    stub.ctx.getContextUsage = () => ({ tokens: 200_000, contextWindow: 200_000, percent: 100 });
+
+    await simulate.hook(stub, "agent_settled", {});
+    await simulate.hook(stub, "agent_settled", {});
+
+    expect(compactCalls(stub)).toEqual([]);
+  });
+
   test("turn_end stays inert and agent_settled compacts the primary session once", async () => {
     const stub = createStubCtx();
     extension(stub.pi);
@@ -335,9 +393,9 @@ describe("dc-shrink subagent safety", () => {
     await simulate.hook(stub, "agent_settled", {});
 
     stub.ctx.getContextUsage = () => ({
-      tokens: 170_000,
+      tokens: 200_000,
       contextWindow: 200_000,
-      percent: 85,
+      percent: 100,
     });
 
     await simulate.hook(stub, "turn_end", {});
@@ -409,7 +467,7 @@ describe("dc-shrink subagent safety", () => {
         },
       },
     );
-    expect(replacement).toMatchObject({ compaction: { details: { version: 6 } } });
+    expect(replacement).toMatchObject({ compaction: { details: { version: 7 } } });
   });
 });
 

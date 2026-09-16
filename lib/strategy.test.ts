@@ -59,6 +59,24 @@ describe("runStrategies", () => {
         type: "message",
         message: {
           role: "toolResult",
+          toolName: "Read",
+          content: "source",
+          isError: false,
+        },
+      },
+      {
+        type: "message",
+        message: {
+          role: "toolResult",
+          toolName: "Edit",
+          content: "updated",
+          isError: false,
+        },
+      },
+      {
+        type: "message",
+        message: {
+          role: "toolResult",
           toolName: "Bash",
           content: "PASS dc-shrink tests",
           isError: false,
@@ -77,7 +95,7 @@ describe("runStrategies", () => {
     expect(result.summary).toContain("## Conversation");
     expect(result.readFiles).toEqual(["extensions/dc-shrink/index.ts"]);
     expect(result.modifiedFiles).toEqual(["extensions/dc-shrink/lib/recall.ts"]);
-    expect(result.summary).toContain("<verification>\nPASS: bun test extensions/dc-shrink");
+    expect(result.summary).toContain("<verification>\nPASS [Bash cwd=/tmp/project]: bun test extensions/dc-shrink");
     expect(result.literalAnchors).toContain("TASK-88");
     expect(result.inputDigest).toMatch(/^[0-9a-f]{64}$/);
     expect(result.summaryDigest).toMatch(/^[0-9a-f]{64}$/);

@@ -15,7 +15,7 @@ call a model and cancels instead of falling back to Pi's default compactor.
 | --- | --- |
 | `/compact` | Run Pi's built-in manual compaction with dc-shrink's deterministic result. |
 | `/compact <focus>` | Preserve a bounded focus hint at the top of the summary. |
-| `/compact-status` | Show monitor, cooldown, threshold sources, dump state, pending state, and last failure without compacting. |
+| `/compact-status` | Show monitor, Pi-derived thresholds, dump state, pending state, and last failure without compacting. |
 
 Pi owns and dispatches `/compact`; dc-shrink does not shadow it. `/compact
 status` compacts with `status` as focus text, so use `/compact-status` for
@@ -37,17 +37,19 @@ notification.
 
 ## Autonomous Compaction
 
-At `agent_settled`, after the active turn is fully idle, dc-shrink computes each
-boundary as the smaller of the configured absolute tokens and configured
-percentage of the active context window.
+At `agent_settled`, after the active turn is fully idle, dc-shrink derives
+boundaries from Pi's effective `compaction` settings:
 
-- below auto: no action
-- auto through warn-minus-one: Mechanical compaction
-- warn through emergency-minus-one: cooperative Warn
-- emergency and above: Mechanical compaction regardless of cooldown or Pi sync
+- Pi trigger: `contextWindow - reserveTokens`
+- auto: `Pi trigger - 20,000` → Mechanical compaction
+- warn: `Pi trigger` → cooperative Warn
+- emergency: `contextWindow` → Mechanical compaction regardless of cooldown or Pi sync
 
-Defaults are 100K/75%, 140K/85%, and 160K/92%. Warmup, latch, cooldown,
-post-compaction growth, and Pi-sync guards protect normal autonomous attempts.
+If Pi has `compaction.enabled: false`, the autonomous monitor stands down;
+manual `/compact` remains available. Fixed small-window floors and legacy
+100K/140K/160K fallbacks cover degenerate or unavailable context windows.
+Warmup, latch, cooldown, post-compaction growth, and Pi-sync guards protect
+normal autonomous attempts.
 
 After Pi appends a matching autonomous compaction, dc-shrink may queue a hidden
 `dc-shrink-continuation` turn if the session is idle. It does not render as user
@@ -75,10 +77,29 @@ legacy entries never appear in default project search. The result limit applies
 after the all-project merge.
 
 Supported named sections are `Session`, `User Focus`, and `Conversation`.
-Supported marker names include `read-files`, `modified-files`,
-`recent-tool-calls`, `recent-tool-results`, `verification`, `working-tree`,
-`source-anchors`, `active-tasks`, `resume-tasks`, and `resume-index`. Other
+Supported marker names include `resume-state`, `current-intent`, `resume-risks`,
+`file-evidence`, `read-files`, `modified-files`, `recent-tool-calls`,
+`recent-tool-results`, `verification`, `working-tree`, `source-anchors`,
+`active-tasks`, `resume-tasks`, `resume-index`, and `summary-omissions`. Other
 queries perform keyword search across supported parts.
+
+## Resume Evidence Semantics
+
+Read and modified file lists contain only successful, unambiguously paired tool
+results. They mean “tool-observed read” and “tool-reported write”; they do not
+prove current existence, exact contents, or Git state. Failed writes remain as
+bounded `resume-risks` because partial effects can be unknown. Git receipts stay
+separate and retain their captured working directory.
+
+Verification receipts are keyed by the exact runner, command bytes, and known
+working directory. The latest completed result replaces only the same identity;
+similar commands remain separate. A later successful file write or non-read-only
+shell command marks older receipts as having unestablished freshness.
+
+The compiler targets a 13,024-code-point operating summary by removing complete
+optional records first and reporting those removals. Explicit resume state,
+risks, verification, and next actions have priority. The 65,536-code-point wire
+limit remains the fail-closed safety ceiling.
 
 ## Summary Shape and Bounds
 
@@ -88,7 +109,7 @@ file blocks each keep 50 paths, individual marker items keep 512 code points,
 and verification/working-tree/source-anchor/task blocks keep ten items. Every
 truncated list includes an omitted-count row, and XML markers remain balanced.
 
-Details version 6 includes:
+Details version 7 includes:
 
 - `tokensAfter`, Pi's rebuilt message-context estimate
 - `summaryTokens`, the returned-summary estimate

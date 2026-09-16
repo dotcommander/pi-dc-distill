@@ -23,25 +23,16 @@ Pi supplies the discarded active-branch input. dc-shrink compiles it locally, pr
 
 A manual compaction leaves the next action under your control. Autonomous compaction may queue a hidden continuation only after Pi confirms the matching compaction was appended and the session is idle.
 
-## Configuration and stored data
+## Pi-derived policy and stored data
 
-Configuration is merged at session start from `extensionConfig["dc-shrink"]` in `~/.pi/agent/settings.json` and `~/.pi/data/dc-shrink/settings.json`; data-file values are applied after agent settings.
+dc-shrink has no extension settings. At primary-session start, it reads Pi's effective global and project `compaction.enabled` and `compaction.reserveTokens`. A project `.pi/settings.json` overrides individual global keys.
 
-```json
-{
-  "cacheTtlMs": 120000,
-  "autoThresholdTokens": 100000,
-  "warnThresholdTokens": 140000,
-  "emergencyThresholdTokens": 160000,
-  "autoThresholdPct": 0.75,
-  "warnThresholdPct": 0.85,
-  "emergencyThresholdPct": 0.92,
-  "dumpCompactions": false,
-  "dumpRetention": 20
-}
-```
+- Pi trigger: `contextWindow - reserveTokens`
+- Auto: `Pi trigger - 20,000`
+- Warn: `Pi trigger` (Pi's native trigger line)
+- Emergency: `contextWindow`
 
-Each automatic boundary is the smaller of its token setting and its percentage of the active context window. The defaults therefore request compaction at 100,000 tokens or 75% of the window, warn at 140,000 or 85%, and compact unconditionally at 160,000 or 92%. Normal automatic attempts also observe warmup, latch, cooldown, Pi-sync, and post-compaction-growth guards; the emergency band bypasses cooldown and Pi-sync.
+When Pi has `compaction.enabled: false`, dc-shrink's autonomous monitor stands down; manual `/compact` remains deterministic and available. A fixed 120-second cooldown and small-window floors remain internal loop-safety mechanics. Normal automatic attempts also observe warmup, latch, Pi-sync, and post-compaction-growth guards; emergency bypasses cooldown and Pi-sync.
 
 | Location | Contents |
 | --- | --- |
@@ -50,7 +41,7 @@ Each automatic boundary is the smaller of its token setting and its percentage o
 | `Path.project("dc-shrink", cwd)/recall.json` | The ten newest committed summaries for one project. |
 | `Path.project("dc-shrink", cwd)/tool-output/` | Full text and provenance for compacted tool output. |
 
-Raw dumps are off by default. When enabled, each committed pair is written under a lock through temporary files, then renamed; a partial pair is not exposed.
+Raw dumps are off by default. Set `DC_SHRINK_DUMPS=1` in Pi's process environment to enable fixed-retention (20 pair) diagnostic dumps. Each pair is written under a lock through temporary files, then renamed; a partial pair is not exposed.
 
 ## Capabilities and boundaries
 
@@ -58,13 +49,23 @@ Raw dumps are off by default. When enabled, each committed pair is written under
 
 The live compiler receives only Pi’s preparation and active branch: the previous summary, discarded messages, discarded split-turn prefix, and the latest eligible handoff. Retained-tail and abandoned-fork messages do not become compiler input. If the normalized input exceeds 20 MiB, it retains complete newest records within that envelope instead of slicing JSON or messages.
 
-The returned wire summary is capped at 65,536 Unicode code points. Its version-6 details include the rebuilt-context token estimate, returned-summary estimate, input and summary digests, bounded file/anchor arrays, and whether the input used the normal or bounded envelope. Version-5 entries remain readable and are not rewritten.
+The returned wire summary is capped at 65,536 Unicode code points. Its version-7 details include the rebuilt-context token estimate, returned-summary estimate, input and summary digests, bounded file/anchor arrays, and whether the input used the normal or bounded envelope. Version-5 and version-6 entries remain readable and are not rewritten.
 
 Failures and cancellations fail closed: no default LLM compactor is used. Success artifacts—log, optional dumps, recall, notification, monitor reset, and autonomous continuation—are delayed until the matching extension-owned `session_compact` event verifies the appended entry.
 
 ### Recall and handoffs
 
-`save_shrink_handoff` accepts a non-empty handoff string and appends it to the active session. `recall_compaction` searches the project store by default:
+`save_shrink_handoff` accepts a non-empty handoff string and appends it to the active session. Legacy text remains supported. For the highest-signal resume state, pass one strict whole-message envelope:
+
+````text
+```shrink-handoff-v1
+{"objective":"Finish parser repair.","done":["Implemented result-aware file evidence."],"next":["Run focused tests."],"blocker":[],"decision":["Keep legacy handoffs compatible."],"verification-needed":["bun test lib/local-compact.test.ts"]}
+```
+````
+
+Malformed, unknown-version, or oversized envelopes remain bounded opaque text; fields are never inferred from ordinary prose. Handoff content is task state, not verification evidence.
+
+`recall_compaction` searches the project store by default:
 
 ```text
 recall_compaction(query="modified-files", limit=3)

@@ -12,11 +12,11 @@ function userMsg(text: string) {
 function assistantMsg(text: string) {
   return line({ type: "message", message: { role: "assistant", content: [{ type: "text", text }] } });
 }
-function toolCall(name: string, args: Record<string, unknown>) {
-  return line({ type: "message", message: { role: "assistant", content: [{ type: "toolCall", name, arguments: args }] } });
+function toolCall(name: string, args: Record<string, unknown>, id?: string) {
+  return line({ type: "message", message: { role: "assistant", content: [{ type: "toolCall", id, name, arguments: args }] } });
 }
-function toolResult(toolName: string, text: string, isError = false) {
-  return line({ type: "message", message: { role: "toolResult", toolName, isError, content: [{ type: "text", text }] } });
+function toolResult(toolName: string, text: string, isError = false, toolCallId?: string) {
+  return line({ type: "message", message: { role: "toolResult", toolCallId, toolName, isError, content: [{ type: "text", text }] } });
 }
 
 describe("compileSessionJsonl", () => {
@@ -143,8 +143,206 @@ describe("compileSessionJsonl", () => {
       compileSessionJsonl(
         [sessionLine, userMsg("test it"), toolCall("bash", { command: "bun test lib/" }), toolResult("bash", output, isError)].join("\n"),
       ).summary;
-    expect(mk("12 pass, 0 failed")).toContain("PASS: bun test lib/");
-    expect(mk("--- FAIL: TestThing", true)).toContain("FAIL: bun test lib/");
+    expect(mk("12 pass, 0 failed")).toContain("PASS [bash cwd=/tmp/proj]: bun test lib/");
+    expect(mk("--- FAIL: TestThing", true)).toContain("FAIL [bash cwd=/tmp/proj]: bun test lib/");
+  });
+
+  test("keeps only the latest completed result for the exact scoped command", () => {
+    const summary = compileSessionJsonl([
+      sessionLine,
+      userMsg("verify the parser"),
+      toolCall("bash", { command: "bun test lib/parser.test.ts" }),
+      toolResult("bash", "--- FAIL: parser", true),
+      toolCall("bash", { command: "bun test lib/parser.test.ts" }),
+      toolResult("bash", "8 pass, 0 fail"),
+      toolCall("bash", { command: "bun  test lib/parser.test.ts" }),
+      toolResult("bash", "8 pass, 0 fail"),
+      toolCall("bash", { command: "bun test lib/parser.test.ts", cwd: "/tmp/other" }),
+      toolResult("bash", "8 pass, 0 fail"),
+    ].join("\n")).summary;
+
+    expect(summary).not.toContain("--- FAIL: parser");
+    expect(summary.match(/PASS \[bash cwd=\/tmp\/proj\]/g)).toHaveLength(2);
+    expect(summary).toContain("PASS [bash cwd=/tmp/other]: bun test lib/parser.test.ts");
+    expect(summary).toContain("bun test lib/parser.test.ts");
+    expect(summary).toContain("bun  test lib/parser.test.ts");
+  });
+
+  test("keeps prior verification identities separate across working directories", () => {
+    const prior = [
+      "<verification>",
+      "PASS [bash cwd=/tmp/a]: bun test lib/parser.test.ts — 8 pass",
+      "FAIL [bash cwd=/tmp/b]: bun test lib/parser.test.ts — parser failed",
+      "</verification>",
+    ].join("\n");
+    const summary = compileSessionJsonl([
+      sessionLine,
+      line({ type: "compaction", summary: prior }),
+      userMsg("continue"),
+    ].join("\n")).summary;
+
+    expect(summary).toContain("PASS [bash cwd=/tmp/a]: bun test lib/parser.test.ts");
+    expect(summary).toContain("FAIL [bash cwd=/tmp/b]: bun test lib/parser.test.ts");
+  });
+
+  test("keeps the latest failure when the same scoped command passes then fails", () => {
+    const summary = compileSessionJsonl([
+      sessionLine,
+      userMsg("verify parser"),
+      toolCall("bash", { command: "bun test lib/parser.test.ts" }),
+      toolResult("bash", "8 pass, 0 fail"),
+      toolCall("bash", { command: "bun test lib/parser.test.ts" }),
+      toolResult("bash", "--- FAIL: parser", true),
+    ].join("\n")).summary;
+
+    expect(summary).toContain("FAIL [bash cwd=/tmp/proj]: bun test lib/parser.test.ts");
+    expect(summary).not.toContain("PASS [bash cwd=/tmp/proj]: bun test lib/parser.test.ts");
+  });
+
+  test("retains an incomplete verification attempt without erasing the last completed receipt", () => {
+    const summary = compileSessionJsonl([
+      sessionLine,
+      userMsg("verify parser"),
+      toolCall("bash", { command: "bun test lib/parser.test.ts" }),
+      toolResult("bash", "8 pass, 0 fail"),
+      toolCall("bash", { command: "bun test lib/parser.test.ts" }, "pending-test"),
+    ].join("\n")).summary;
+
+    expect(summary).toContain("PASS [bash cwd=/tmp/proj]: bun test lib/parser.test.ts");
+    expect(summary).toContain("INCOMPLETE [bash cwd=/tmp/proj]: bun test lib/parser.test.ts");
+  });
+
+  test("marks a passing receipt stale after a later non-read-only shell command", () => {
+    const summary = compileSessionJsonl([
+      sessionLine,
+      userMsg("verify then patch"),
+      toolCall("bash", { command: "bun test lib/parser.test.ts" }),
+      toolResult("bash", "8 pass, 0 fail"),
+      toolCall("bash", { command: "sed -i s/old/new/ lib/parser.ts" }),
+      toolResult("bash", ""),
+    ].join("\n")).summary;
+
+    expect(summary).toContain("freshness: not established after later potentially modifying work");
+  });
+
+  test("does not promote a failed Git probe to a working-tree receipt", () => {
+    const summary = compileSessionJsonl([
+      sessionLine,
+      userMsg("check status"),
+      toolCall("bash", { command: "git status --short" }),
+      toolResult("bash", "fatal: not a git repository", true),
+    ].join("\n")).summary;
+
+    expect(summary).not.toContain("<working-tree>");
+    expect(summary).toContain("fatal: not a git repository");
+  });
+
+  test("marks a passing receipt stale after a later successful write", () => {
+    const summary = compileSessionJsonl([
+      sessionLine,
+      userMsg("verify then edit"),
+      toolCall("bash", { command: "bun test lib/parser.test.ts" }),
+      toolResult("bash", "8 pass, 0 fail"),
+      toolCall("edit", { path: "lib/parser.ts" }),
+      toolResult("edit", "updated"),
+    ].join("\n")).summary;
+
+    expect(summary).toContain("freshness: not established after later potentially modifying work");
+  });
+
+  test("promotes file evidence only after an unambiguous successful result", () => {
+    const summary = compileSessionJsonl([
+      sessionLine,
+      userMsg("inspect and repair"),
+      toolCall("read", { path: "wrong-path.ts" }, "read-bad"),
+      toolResult("read", "ENOENT", true, "read-bad"),
+      toolCall("edit", { path: "maybe-partial.ts" }, "edit-bad"),
+      toolResult("edit", "write interrupted", true, "edit-bad"),
+      toolCall("read", { path: "lib/right-path.ts" }, "read-good"),
+      toolResult("read", "source", false, "read-good"),
+      toolCall("edit", { path: "lib/right-path.ts" }, "edit-good"),
+      toolResult("edit", "updated", false, "edit-good"),
+      toolCall("read", { path: "ambiguous.ts" }, "read-unmatched"),
+      toolResult("read", "source", false, "different-id"),
+    ].join("\n")).summary;
+
+    expect(summary).toContain("<read-files>\nlib/right-path.ts\n</read-files>");
+    expect(summary).toContain("<modified-files>\nlib/right-path.ts\n</modified-files>");
+    expect(summary).not.toContain("<read-files>\nwrong-path.ts");
+    expect(summary).not.toContain("<read-files>\nambiguous.ts");
+    expect(summary).toContain("Failed edit for maybe-partial.ts may have partial effects");
+    expect(summary).toContain("successful tool-observed access");
+    expect(summary).toContain("successful tool-reported write");
+  });
+
+  test("retains only actionable state from a prior shrink summary", () => {
+    const prior = [
+      "## Session\nCWD: /tmp/proj",
+      "",
+      "## Conversation\n[User] obsolete investigation\n[Assistant] old conclusion",
+      "",
+      "<recent-tool-results>\nbash [ERROR]: obsolete failed script\n</recent-tool-results>",
+      "",
+      "<verification>\nFAIL: bun test lib/ — old failure\nPASS: bun test lib/ — repaired\n</verification>",
+      "",
+      "<working-tree>\ngit status --short: M lib/parse.ts\n</working-tree>",
+      "",
+      "<resume-tasks>\nReread active files: wrong-path.ts\nRun bun test lib/\n</resume-tasks>",
+      "",
+      "<resume-index>\nactive-files:\n- wrong-path.ts\nrecent-user-intent:\n- fix the parser\nrecall-queries:\n- wrong-path.ts\n</resume-index>",
+    ].join("\n");
+    const result = compileSessionJsonl(
+      [
+        sessionLine,
+        line({ type: "compaction", summary: prior }),
+        userMsg("continue the parser fix"),
+      ].join("\n"),
+    ).summary;
+
+    expect(result).toContain("[Prior 1 retained state]");
+    expect(result).toContain("PASS: bun test lib/ — repaired");
+    expect(result).not.toContain("FAIL: bun test lib/ — old failure");
+    expect(result).toContain("Run bun test lib/");
+    expect(result).toContain("fix the parser");
+    expect(result).not.toContain("wrong-path.ts");
+    expect(result).not.toContain("obsolete investigation");
+    expect(result).not.toContain("obsolete failed script");
+  });
+
+  test("keeps projected resume semantics stable across repeated compactions", () => {
+    const handoff = `\`\`\`shrink-handoff-v1\n${JSON.stringify({
+      objective: "Finish parser repair.",
+      done: ["Implemented parser fix."],
+      next: ["Run parser tests."],
+      blocker: [],
+      decision: ["Keep strict parsing."],
+      "verification-needed": ["bun test lib/parser.test.ts"],
+    })}\n\`\`\``;
+    const first = compileSessionJsonl([
+      sessionLine,
+      userMsg("repair parser"),
+      line({ type: "custom", customType: SHRINK_HANDOFF_ENTRY_TYPE, data: { handoff } }),
+      toolCall("bash", { command: "bun test lib/parser.test.ts" }),
+      toolResult("bash", "7 pass, 0 fail"),
+    ].join("\n")).summary;
+    const second = compileSessionJsonl([
+      sessionLine,
+      line({ type: "compaction", summary: first }),
+      userMsg("continue"),
+    ].join("\n")).summary;
+    const third = compileSessionJsonl([
+      sessionLine,
+      line({ type: "compaction", summary: second }),
+      userMsg("continue"),
+    ].join("\n")).summary;
+
+    for (const summary of [second, third]) {
+      expect(summary).toContain("objective: Finish parser repair.");
+      expect(summary).toContain("PASS [bash cwd=/tmp/proj]: bun test lib/parser.test.ts");
+      expect(summary).not.toContain("<recent-tool-results>");
+      expect(Array.from(summary).length).toBeLessThanOrEqual(13_024);
+      expect(summary.match(/objective: Finish parser repair\./g)).toHaveLength(1);
+    }
   });
 
   test("tool-result content cannot break marker block structure", () => {
@@ -252,7 +450,8 @@ describe("compileSessionJsonl output bounds", () => {
       lines.push(toolCall("write", { path: writePath }), toolResult("write", "ok"));
     }
     const result = compileSessionJsonl(lines.join("\n"));
-    expect(Array.from(result.summary).length).toBeLessThanOrEqual(65_536);
+    expect(Array.from(result.summary).length).toBeLessThanOrEqual(13_024);
+    expect(result.summary).toContain("<summary-omissions>");
     expect(result.summary.match(/<read-files>/g)).toHaveLength(1);
     expect(result.summary.match(/<\/read-files>/g)).toHaveLength(1);
     expect(result.summary.match(/<modified-files>/g)).toHaveLength(1);
@@ -313,6 +512,32 @@ describe("compileSessionJsonl handoff (<current-intent>)", () => {
     const sessionIdx = result.summary.indexOf("## Session");
     expect(intentIdx).toBeGreaterThanOrEqual(0);
     expect(intentIdx).toBeLessThan(sessionIdx);
+  });
+
+  test("strict v1 handoff renders explicit bounded resume state", () => {
+    const handoff = `\`\`\`shrink-handoff-v1\n${JSON.stringify({
+      objective: "Finish deterministic resume state.",
+      done: ["Promoted successful file evidence."],
+      next: ["Run focused tests."],
+      blocker: ["Inspect possible partial write."],
+      decision: ["Keep legacy text compatible."],
+      "verification-needed": ["bun test lib/local-compact.test.ts"],
+    })}\n\`\`\``;
+    const summary = compileSessionJsonl([
+      sessionLine,
+      userMsg("continue"),
+      line({
+        type: "custom",
+        customType: SHRINK_HANDOFF_ENTRY_TYPE,
+        data: { handoff },
+      }),
+    ].join("\n")).summary;
+
+    expect(summary).toContain("<resume-state>");
+    expect(summary).toContain("provenance: explicit handoff; task state, not verification");
+    expect(summary).toContain("objective: Finish deterministic resume state.");
+    expect(summary).toContain("verification-needed:");
+    expect(summary).not.toContain("<current-intent>");
   });
 
   test("saved shrink handoff wins over older raw handoff markers", () => {
@@ -471,6 +696,7 @@ test("skips bare confirmations in resume user intents", () => {
       toolCall("Edit", { path: "lib/json-parser.ts" }),
       toolResult("Edit", "updated parser"),
       userMsg("continue"),
+      userMsg("1. recommended. 2. stand down."),
       assistantMsg("I updated the JSON parser and am ready to run the focused trailing comma tests."),
     ].join("\n"),
   );
@@ -482,6 +708,7 @@ test("skips bare confirmations in resume user intents", () => {
   expect(userIntentLines).toContain("- fix the JSON parser so it handles trailing commas");
   expect(userIntentLines).not.toContain("- ok");
   expect(userIntentLines).not.toContain("- continue");
+  expect(userIntentLines).not.toContain("- 1. recommended. 2. stand down.");
 });
 
 describe("compileSessionJsonl literal anchors", () => {

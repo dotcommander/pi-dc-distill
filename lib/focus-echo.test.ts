@@ -44,6 +44,24 @@ Finish the compact-status command.
     expect((result?.messages[3] as any).content[0].text).toBe("continue");
   });
 
+  test("prioritizes explicit resume state and risks in the echo", () => {
+    const summary = assistant(`<resume-state>
+provenance: explicit handoff; task state, not verification
+objective: Finish parser repair.
+next:
+- Run parser tests.
+</resume-state>
+<resume-risks>
+Failed edit may have partial effects; inspect before retry.
+</resume-risks>`);
+    const result = injectFocusEcho([summary, user("continue")]);
+
+    expect(result?.echoText).toContain("Explicit resume state:");
+    expect(result?.echoText).toContain("objective: Finish parser repair.");
+    expect(result?.echoText).toContain("Resume risks:");
+    expect(result?.echoText).not.toContain("provenance: explicit handoff");
+  });
+
   test("deduplicates an existing echo marker", () => {
     const summary = assistant("<resume-index>\n- Resume here.\n</resume-index>");
     const existing = user(`${__test__.ECHO_MARKER}\nResume index:\n- Resume here.`);

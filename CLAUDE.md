@@ -47,7 +47,7 @@ entirely filtered input.
 ## Output Contract
 
 `session_before_compact` returns Pi's canonical shape with dc-shrink details
-version 6:
+version 7:
 
 ```ts
 {
@@ -57,7 +57,7 @@ version 6:
     tokensBefore: number,
     details: {
       compactor: "dc-shrink",
-      version: 6,
+      version: 7,
       tier: 1,
       attemptId: string,
       tokensAfter: number,
@@ -79,14 +79,22 @@ version 6:
 `tokensAfter` is Pi's rebuilt message-context estimate, calculated with
 `buildSessionContext()` and `estimateTokens()`. `summaryTokens` estimates the
 returned summary alone. `summaryDigest` hashes the exact returned wire summary,
-including its metric line. Version-5 session entries remain readable and are
-not rewritten.
+including its metric line. Version-5 and version-6 session entries remain
+readable and are not rewritten.
 
-The final summary is limited to 65,536 Unicode code points. User focus is
-limited to 2,048 code points; read and modified file lists each keep 50 items;
-individual marker items keep 512 code points. Truncated lists include omitted
-counts. Formatting must preserve complete headings and balanced XML markers;
-never apply a final substring to structured output.
+The final summary is limited to 65,536 Unicode code points and targets a 13,024-
+code-point operating state by dropping complete optional records first. User
+focus is limited to 2,048 code points; read and modified file lists each keep 50
+items; individual marker items keep 512 code points. Truncated lists include
+omitted counts. Formatting must preserve complete headings and balanced XML
+markers; never apply a final substring to structured output.
+
+File lists require an unambiguously paired successful tool result and remain
+provenance-labeled observations, not Git receipts. Failed or unmatched writes
+produce bounded inspect-before-retry risks. Verification identity is exact runner,
+command bytes, and known working directory; later successful writes or non-read-
+only shell commands stale older passes. Strict `shrink-handoff-v1` envelopes are
+optional and invalid envelopes stay bounded legacy text.
 
 ## Transactional Lifecycle
 
@@ -106,23 +114,21 @@ compaction, mismatches, and duplicate events cannot create success artifacts.
 
 ## Trigger Policy
 
-Every effective threshold is:
+dc-shrink has no extension trigger settings. It reads Pi's effective global and
+project `compaction` settings at primary-session start:
 
-```text
-min(absolute tokens, round(percentage * context window))
-```
+| Band | Pi-derived boundary | Action |
+| --- | --- | --- |
+| Auto | `(contextWindow - reserveTokens) - 20,000` | Mechanical compaction through warn-minus-one. |
+| Warn | `contextWindow - reserveTokens` | Pi's native trigger line; cooperative warning through emergency-minus-one. |
+| Emergency | `contextWindow` | Unconditional Mechanical compaction. |
 
-Defaults are:
-
-| Band | Absolute | Percentage | Action |
-| --- | ---: | ---: | --- |
-| Auto | 100,000 | 75% | Mechanical compaction from auto through warn-minus-one. |
-| Warn | 140,000 | 85% | Cooperative warning from warn through emergency-minus-one. |
-| Emergency | 160,000 | 92% | Unconditional Mechanical compaction at and above emergency. |
-
-Cooldown, post-compaction growth, Pi-sync, and warmup guards still apply.
-Emergency bypasses cooldown and sync. `/compact-status` reports all effective
-thresholds plus their absolute and percentage sources.
+`compaction.enabled: false` disables dc-shrink's autonomous monitor; manual
+`/compact` remains available. Fixed small-window floors preserve ordered bands,
+and 100K/140K/160K are legacy fallbacks only when Pi cannot report a context
+window. Cooldown, post-compaction growth, Pi-sync, and warmup guards still
+apply. Emergency bypasses cooldown and sync. `/compact-status` reports Pi's
+inputs and the resolved boundaries.
 
 ## Recall, Dumps, and Migration
 
@@ -163,11 +169,8 @@ focused compatibility test against the active implementation.
 ## Verification
 
 ```bash
-bun test pi-dc-shrink
+bun test
 bun x tsc --noEmit
-bun run analyze
-bun run style-gate
-bun audit
 git diff --check
 ```
 

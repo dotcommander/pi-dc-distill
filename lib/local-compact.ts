@@ -4,12 +4,15 @@ import { basename } from "node:path";
 import {
   SHRINK_HANDOFF_ENTRY_TYPE,
   handoffTextFromEntryData,
+  parseStructuredShrinkHandoff,
+  type StructuredShrinkHandoff,
 } from "./handoff.ts";
 
 const RECALL_NOTE =
   "Use `recall_compaction` to search for prior work, decisions, and context from before this summary. Do not redo work already completed.";
 const COMPILE_SEPARATOR = "\n\n---\n\n";
 const MAX_STRUCTURED_SUMMARY_CODE_POINTS = 65_300;
+const TARGET_RESUME_SUMMARY_CODE_POINTS = 13_024;
 
 const KIND_USER = "user";
 const KIND_ASSISTANT = "assistant";
@@ -32,6 +35,7 @@ interface NormalizedBlock {
   kind: BlockKind;
   text?: string;
   name?: string;
+  callId?: string;
   args?: Record<string, unknown>;
   isError?: boolean;
   redacted?: boolean;
@@ -76,7 +80,9 @@ interface ResumeIndex {
 
 interface ConversationResult {
   turns: ConversationTurn[];
+  /** Successful tool-observed reads; not proof of current existence. */
   readFiles: string[];
+  /** Successful tool-reported writes; not a Git working-tree receipt. */
   modifiedFiles: string[];
   omittedReadFiles: number;
   omittedModifiedFiles: number;
@@ -87,6 +93,8 @@ interface ConversationResult {
   sourceAnchors: string[];
   literalAnchors: string[];
   activeTasks: string[];
+  resumeRisks: string[];
+  budgetOmissions: string[];
   resumeTasks: string[];
   resumeIndex: ResumeIndex;
 }
@@ -263,6 +271,7 @@ function normalizeAssistant(blocks: Array<Record<string, unknown>>): NormalizedB
       out.push({
         kind: KIND_TOOL_CALL,
         name: String(block.name ?? ""),
+        callId: typeof block.id === "string" ? block.id : undefined,
         args: isRecord(block.arguments) ? block.arguments : {},
       });
     }
@@ -397,6 +406,7 @@ function normalizeMessageEntry(entry: Record<string, unknown>, meta: SessionMeta
       main: [{
         kind: KIND_TOOL_RESULT,
         name: typeof message.toolName === "string" ? message.toolName : "",
+        callId: typeof message.toolCallId === "string" ? message.toolCallId : undefined,
         text: sanitize(textJoin(blocks)),
         isError: Boolean(message.isError),
       }],
@@ -609,6 +619,36 @@ function limitedSetSlice(set: OrderedSet, limit: number, label: string): string[
   return [...values.slice(values.length - limit), `... (${values.length - limit} ${label} omitted)`];
 }
 
+function renderVerificationReceipt(
+  receipt: VerificationReceipt,
+  currentMutationEpoch: number,
+): string {
+  const rawCwd = receipt.cwd ?? "unknown";
+  const cwd = Array.from(rawCwd).length <= 200
+    ? rawCwd
+    : `[cwd sha256:${digest(rawCwd).slice(0, 16)}]`;
+  const scope = `${receipt.tool || "shell"} cwd=${cwd}`;
+  const command = Array.from(receipt.command).length <= 300
+    ? receipt.command
+    : `[command sha256:${digest(receipt.command).slice(0, 16)}]`;
+  const evidence = sliceU16(receipt.evidence, 300);
+  const stale = receipt.mutationEpoch < currentMutationEpoch
+    ? " [freshness: not established after later potentially modifying work]"
+    : "";
+  return `${receipt.status} [${scope}]: ${command} — ${evidence}${stale}`;
+}
+
+function limitedVerificationSlice(
+  receipts: Map<string, VerificationReceipt>,
+  mutationEpoch: number,
+  limit = 10,
+): string[] {
+  const values = [...receipts.values()].map((receipt) =>
+    renderVerificationReceipt(receipt, mutationEpoch));
+  if (values.length <= limit) return values;
+  return [...values.slice(values.length - limit), `... (${values.length - limit} verification rows omitted)`];
+}
+
 function newestLimited<T>(values: T[], limit: number): { values: T[]; omitted: number } {
   if (values.length <= limit) return { values, omitted: 0 };
   return { values: values.slice(values.length - limit), omitted: values.length - limit };
@@ -632,14 +672,35 @@ interface ToolAdjacent {
 
 interface PendingToolCall {
   name: string;
+  callId?: string;
   args?: Record<string, unknown>;
 }
 
-function popPendingToolCall(calls: PendingToolCall[], resultName: string): PendingToolCall {
-  if (calls.length === 0) return { name: resultName };
-  const idx = calls.findIndex((call) => call.name === resultName);
-  if (idx >= 0) return calls.splice(idx, 1)[0];
-  return calls.shift() ?? { name: resultName };
+interface VerificationReceipt {
+  status: "PASS" | "FAIL" | "SKIP" | "INCOMPLETE";
+  tool: string;
+  command: string;
+  cwd?: string;
+  evidence: string;
+  mutationEpoch: number;
+}
+
+function popPendingToolCall(
+  calls: PendingToolCall[],
+  resultName: string,
+  resultCallId?: string,
+): { call: PendingToolCall; matched: boolean } {
+  if (resultCallId) {
+    const idx = calls.findIndex((call) => call.callId === resultCallId);
+    return idx >= 0
+      ? { call: calls.splice(idx, 1)[0], matched: true }
+      : { call: { name: resultName, callId: resultCallId }, matched: false };
+  }
+  const candidates = calls
+    .map((call, index) => ({ call, index }))
+    .filter(({ call }) => call.name === resultName && !call.callId);
+  if (candidates.length !== 1) return { call: { name: resultName }, matched: false };
+  return { call: calls.splice(candidates[0].index, 1)[0], matched: true };
 }
 
 function isShellTool(name: string): boolean {
@@ -648,11 +709,12 @@ function isShellTool(name: string): boolean {
 
 function shellCommand(call: PendingToolCall): string | undefined {
   if (!isShellTool(call.name)) return undefined;
-  return (argString(call.args, "command") ?? argString(call.args, "cmd"))?.trim() || undefined;
+  const command = argString(call.args, "command") ?? argString(call.args, "cmd");
+  return command && command.trim() ? command : undefined;
 }
 
 function isVerificationCommand(command: string): boolean {
-  const lower = command.toLowerCase();
+  const lower = command.toLowerCase().replace(/\s+/g, " ");
   return [
     "go test",
     "go build",
@@ -674,6 +736,11 @@ function isVerificationCommand(command: string): boolean {
     "just build",
     "git diff --check",
   ].some((marker) => lower.includes(marker));
+}
+
+function isKnownReadOnlyShellCommand(command: string): boolean {
+  const normalized = command.trim().toLowerCase();
+  return /^(?:pwd|ls(?:\s|$)|rg(?:\s|$)|grep(?:\s|$)|find(?:\s|$)|cat(?:\s|$)|head(?:\s|$)|tail(?:\s|$)|git\s+(?:status|diff)(?:\s|$))/.test(normalized);
 }
 
 function isWorkingTreeCommand(command: string): boolean {
@@ -709,18 +776,43 @@ function summarizeResultLines(result: string, empty: string): string {
   return lines.length > 0 ? lines.join("; ") : empty;
 }
 
-function collectShellMarkers(call: PendingToolCall, result: string, isError: boolean, verification: OrderedSet, workingTree: OrderedSet): boolean {
+function verificationIdentity(call: PendingToolCall, sessionCwd?: string): string | undefined {
+  const command = shellCommand(call);
+  if (!command) return undefined;
+  const cwd = argString(call.args, "cwd") ?? sessionCwd;
+  return JSON.stringify([call.name, command, cwd ?? null]);
+}
+
+function collectShellMarkers(
+  call: PendingToolCall,
+  result: string,
+  isError: boolean,
+  verification: Map<string, VerificationReceipt>,
+  workingTree: OrderedSet,
+  sessionCwd: string | undefined,
+  mutationEpoch: number,
+): boolean {
   const command = shellCommand(call);
   if (!command) return false;
-  const shortCommand = stripCdPrefix(command);
   let captured = false;
   if (isVerificationCommand(command)) {
-    addMarkerLine(verification, `${verificationStatus(result, isError)}: ${shortCommand} — ${resultEvidence(result)}`);
+    const identity = verificationIdentity(call, sessionCwd);
+    if (identity) {
+      verification.delete(identity);
+      verification.set(identity, {
+        status: verificationStatus(result, isError),
+        tool: call.name,
+        command,
+        cwd: argString(call.args, "cwd") ?? sessionCwd,
+        evidence: resultEvidence(result),
+        mutationEpoch,
+      });
+    }
     captured = true;
   }
-  if (isWorkingTreeCommand(command)) {
+  if (isWorkingTreeCommand(command) && !isError) {
     const empty = command.toLowerCase().includes("diff") && !command.toLowerCase().includes("check") ? "no diff" : "clean";
-    addMarkerLine(workingTree, `${shortCommand}: ${summarizeResultLines(result, empty)}`);
+    addMarkerLine(workingTree, `[git receipt, cwd=${argString(call.args, "cwd") ?? sessionCwd ?? "unknown"}] ${stripCdPrefix(command)}: ${summarizeResultLines(result, empty)}`);
     captured = true;
   }
   return captured;
@@ -1036,7 +1128,10 @@ function boundedValues(values: string[], limit: number, label: string, keep: "ne
 // captures the actual ask, not "ok"/"continue". Anchored + length-bounded so it
 // never swallows a real instruction that merely starts with "yes,".
 function isBareConfirmation(text: string): boolean {
-  return /^\s*(y|yes|yep|yeah|ok|okay|sure|go|go ahead|do it|proceed|continue|run it|ship it|approved|thanks|ty)[.!,]?\s*$/i.test(text);
+  if (/^\s*(y|yes|yep|yeah|ok|okay|sure|go|go ahead|do it|proceed|continue|run it|ship it|approved|thanks|ty)[.!,]?\s*$/i.test(text)) {
+    return true;
+  }
+  return /^(?:\s*\d+[.)]\s*(?:recommended|stand down|yes|no|approve|approved|skip|stop|continue|go)[.!]?\s*)+$/i.test(text);
 }
 
 function buildResumeIndex(turns: ConversationTurn[], readFiles: string[], modifiedFiles: string[], recentToolCalls: ToolCallFingerprint[]): ResumeIndex {
@@ -1339,7 +1434,10 @@ function buildResumeTasks(input: {
   const out = new OrderedSet();
   const activeFiles = appendUniqueLimited([], new Set(), 4, [...input.modifiedFiles, ...input.readFiles]);
   if (activeFiles.length > 0) addMarkerLine(out, `Reread active files: ${activeFiles.join(", ")}`);
-  const verify = input.verification.map(verificationCommand).find(Boolean);
+  const verificationLines = input.verification.filter((line) => !line.startsWith("... ("));
+  const gate = verificationLines.find((line) => /^(?:FAIL|INCOMPLETE|BLOCKED)\b/.test(line))
+    ?? verificationLines.at(-1);
+  const verify = gate ? verificationCommand(gate) : "";
   if (verify) addMarkerLine(out, `Verify: ${verify}`);
   const activeBases = new Set(activeFiles.map(recallQueryFromAnchor));
   const querySources = [
@@ -1356,19 +1454,13 @@ function buildResumeTasks(input: {
 function collectConversationToolCall(
   block: NormalizedBlock,
   pendingCalls: PendingToolCall[],
-  sourceAnchors: OrderedSet,
-  readFiles: OrderedSet,
-  modifiedFiles: OrderedSet,
-  createdFiles: OrderedSet,
   fingerprints: Map<string, ToolCallFingerprint>,
   fingerprintOrder: string[],
 ): { pendingTool: string; pendingFile: string } {
   const name = block.name ?? "";
   const args = block.args ?? {};
-  pendingCalls.push({ name, args });
-  collectSourceAnchorsFromValue(sourceAnchors, args);
+  pendingCalls.push({ name, callId: block.callId, args });
   const path = extractPath(args);
-  if (path) recordToolFileAccess(name, path, readFiles, modifiedFiles, createdFiles);
   recordToolFingerprint(name, args, fingerprints, fingerprintOrder);
   return { pendingTool: name, pendingFile: path ?? "" };
 }
@@ -1408,31 +1500,59 @@ function recordToolFingerprint(
 function collectConversationToolResult(
   block: NormalizedBlock,
   pendingCalls: PendingToolCall[],
-  verification: OrderedSet,
+  verification: Map<string, VerificationReceipt>,
   workingTree: OrderedSet,
   activeTasks: OrderedSet,
+  sourceAnchors: OrderedSet,
+  readFiles: OrderedSet,
+  modifiedFiles: OrderedSet,
+  createdFiles: OrderedSet,
+  resumeRisks: OrderedSet,
   errorResults: ToolResultEntry[],
   recentResults: ToolResultEntry[],
   omittedErrorResults: number,
   omittedRecentResults: number,
-): { pendingError: boolean; omittedErrorResults: number; omittedRecentResults: number } {
+  sessionCwd: string | undefined,
+  mutationEpoch: number,
+): { pendingError: boolean; omittedErrorResults: number; omittedRecentResults: number; mutationEpoch: number } {
   const text = (block.text ?? "").trim();
-  const call = popPendingToolCall(pendingCalls, block.name ?? "");
+  const { call, matched } = popPendingToolCall(pendingCalls, block.name ?? "", block.callId);
   const isError = Boolean(block.isError);
-  const capturedAsMarker = collectShellMarkers(call, text, isError, verification, workingTree);
+  const path = matched ? extractPath(call.args) : undefined;
+  if (matched && !isError) {
+    collectSourceAnchorsFromValue(sourceAnchors, call.args);
+    const command = shellCommand(call);
+    if (command && !isKnownReadOnlyShellCommand(command)) mutationEpoch += 1;
+    if (path) {
+      recordToolFileAccess(call.name, path, readFiles, modifiedFiles, createdFiles);
+      if (fileWriteTools.has(call.name.toLowerCase())) mutationEpoch += 1;
+    }
+  } else if (matched && isError && path && fileWriteTools.has(call.name.toLowerCase())) {
+    addMarkerLine(resumeRisks, `Failed ${call.name} for ${path} may have partial effects; inspect before retry.`);
+  }
+  const capturedAsMarker = matched && collectShellMarkers(
+    call,
+    text,
+    isError,
+    verification,
+    workingTree,
+    sessionCwd,
+    mutationEpoch,
+  );
   collectActiveTasks(call.name, text, activeTasks);
   if (!text || capturedAsMarker) {
-    return { pendingError: isError, omittedErrorResults, omittedRecentResults };
+    return { pendingError: isError, omittedErrorResults, omittedRecentResults, mutationEpoch };
   }
 
+  const target = path ? `[target: ${path}] ` : "";
   const entry = {
     toolName: block.name ?? "",
-    text: sliceU16(text, isError ? 500 : 300),
+    text: sliceU16(`${target}${text}`, isError ? 500 : 300),
     isError,
   };
   if (entry.isError) {
     if (HARNESS_ERROR_SKIP.some((needle) => text.includes(needle))) {
-      return { pendingError: true, omittedErrorResults, omittedRecentResults };
+      return { pendingError: true, omittedErrorResults, omittedRecentResults, mutationEpoch };
     }
     errorResults.push(entry);
     if (errorResults.length > 10) {
@@ -1446,7 +1566,7 @@ function collectConversationToolResult(
       omittedRecentResults += 1;
     }
   }
-  return { pendingError: isError, omittedErrorResults, omittedRecentResults };
+  return { pendingError: isError, omittedErrorResults, omittedRecentResults, mutationEpoch };
 }
 
 function collectConversationTurn(
@@ -1466,7 +1586,7 @@ function collectConversationTurn(
   return true;
 }
 
-function extractConversation(blocks: NormalizedBlock[]): ConversationResult {
+function extractConversation(blocks: NormalizedBlock[], sessionCwd?: string): ConversationResult {
   const turns: ConversationTurn[] = [];
   const readFiles = new OrderedSet();
   const modifiedFiles = new OrderedSet();
@@ -1477,26 +1597,24 @@ function extractConversation(blocks: NormalizedBlock[]): ConversationResult {
   const recentResults: ToolResultEntry[] = [];
   let omittedErrorResults = 0;
   let omittedRecentResults = 0;
-  const verification = new OrderedSet();
+  const verification = new Map<string, VerificationReceipt>();
   const workingTree = new OrderedSet();
   const sourceAnchors = new OrderedSet();
   const literalAnchors = collectLiteralAnchors(blocks);
   const activeTasks = new OrderedSet();
+  const resumeRisks = new OrderedSet();
   const pendingCalls: PendingToolCall[] = [];
   const toolAdj: ToolAdjacent[] = [];
   let pendingTools: string[] = [];
   let pendingFiles: string[] = [];
   let pendingError = false;
+  let mutationEpoch = 0;
 
   for (const block of blocks) {
     if (block.kind === KIND_TOOL_CALL) {
       const pending = collectConversationToolCall(
         block,
         pendingCalls,
-        sourceAnchors,
-        readFiles,
-        modifiedFiles,
-        createdFiles,
         fingerprints,
         fingerprintOrder,
       );
@@ -1512,14 +1630,22 @@ function extractConversation(blocks: NormalizedBlock[]): ConversationResult {
         verification,
         workingTree,
         activeTasks,
+        sourceAnchors,
+        readFiles,
+        modifiedFiles,
+        createdFiles,
+        resumeRisks,
         errorResults,
         recentResults,
         omittedErrorResults,
         omittedRecentResults,
+        sessionCwd,
+        mutationEpoch,
       );
       if (collected.pendingError) pendingError = true;
       omittedErrorResults = collected.omittedErrorResults;
       omittedRecentResults = collected.omittedRecentResults;
+      mutationEpoch = collected.mutationEpoch;
       continue;
     }
 
@@ -1538,6 +1664,27 @@ function extractConversation(blocks: NormalizedBlock[]): ConversationResult {
       pendingTools = [];
       pendingFiles = [];
       pendingError = false;
+    }
+  }
+
+  // Ambiguous un-ID'd call/result groups remain pending by design: conservative
+  // INCOMPLETE receipts are safer than falsely assigning a result by adjacency.
+  for (const [index, call] of pendingCalls.entries()) {
+    const identity = verificationIdentity(call, sessionCwd);
+    const command = shellCommand(call);
+    if (identity && command && isVerificationCommand(command)) {
+      verification.set(`${identity}:incomplete:${call.callId ?? index}`, {
+        status: "INCOMPLETE",
+        tool: call.name,
+        command,
+        cwd: argString(call.args, "cwd") ?? sessionCwd,
+        evidence: "tool call has no matching result",
+        mutationEpoch,
+      });
+    }
+    const path = extractPath(call.args);
+    if (path && fileWriteTools.has(call.name.toLowerCase())) {
+      addMarkerLine(resumeRisks, `Unmatched ${call.name} for ${path} has unknown effects; inspect before retry.`);
     }
   }
 
@@ -1565,10 +1712,11 @@ function extractConversation(blocks: NormalizedBlock[]): ConversationResult {
   const boundedModifiedFiles = newestLimited([...modifiedFiles.slice(), ...createdFiles.slice()], 50);
   const finalReadFiles = boundedReadFiles.values;
   const finalModifiedFiles = boundedModifiedFiles.values;
-  const finalVerification = limitedSetSlice(verification, 10, "verification rows");
+  const finalVerification = limitedVerificationSlice(verification, mutationEpoch);
   const finalWorkingTree = limitedSetSlice(workingTree, 10, "working-tree rows");
   const finalSourceAnchors = limitedSetSlice(sourceAnchors, 10, "source anchors");
   const finalActiveTasks = limitedSetSlice(activeTasks, 10, "active tasks");
+  const finalResumeRisks = limitedSetSlice(resumeRisks, 8, "resume risks");
   const resumeIndex = buildResumeIndex(finalTurns, finalReadFiles, finalModifiedFiles, recentToolCalls);
 
   return {
@@ -1592,6 +1740,8 @@ function extractConversation(blocks: NormalizedBlock[]): ConversationResult {
     sourceAnchors: finalSourceAnchors,
     literalAnchors,
     activeTasks: finalActiveTasks,
+    resumeRisks: finalResumeRisks,
+    budgetOmissions: [],
     resumeIndex,
     resumeTasks: buildResumeTasks({
       readFiles: finalReadFiles,
@@ -1614,6 +1764,28 @@ function markerBlock(name: string, lines: string[]): string {
   return escaped.length > 0 ? [`<${name}>`, ...escaped, `</${name}>`].join("\n") : "";
 }
 
+function exactLineMarkerBlock(name: string, lines: string[]): string {
+  const escaped = lines
+    .map((line) => sanitize(line).trim().replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;"))
+    .filter(Boolean);
+  return escaped.length > 0 ? [`<${name}>`, ...escaped, `</${name}>`].join("\n") : "";
+}
+
+function renderStructuredHandoff(handoff: StructuredShrinkHandoff): string {
+  const lines = [
+    "<resume-state>",
+    "provenance: explicit handoff; task state, not verification",
+    `objective: ${escapeResumeLine(handoff.objective)}`,
+  ];
+  for (const key of ["done", "next", "blocker", "decision", "verification-needed"] as const) {
+    const items = handoff[key];
+    if (items.length === 0) continue;
+    lines.push(`${key}:`, ...items.map((item) => `- ${escapeResumeLine(item)}`));
+  }
+  lines.push("</resume-state>");
+  return lines.join("\n");
+}
+
 function escapeAngles(line: string): string {
   return sliceU16(line, 512).replace(/</g, "&lt;").replace(/>/g, "&gt;");
 }
@@ -1629,6 +1801,14 @@ function formatFileMarkers(
   omittedModifiedFiles = 0,
 ): string {
   const parts: string[] = [];
+  if (readFiles.length > 0 || modifiedFiles.length > 0) {
+    parts.push(
+      "<file-evidence>",
+      "read-files: successful tool-observed access; not proof of current existence",
+      "modified-files: successful tool-reported write; not a Git working-tree receipt",
+      "</file-evidence>",
+    );
+  }
   if (readFiles.length > 0 || omittedReadFiles > 0) {
     parts.push("<read-files>", ...readFiles.map(escapeAngles));
     if (omittedReadFiles > 0) parts.push(`... (${omittedReadFiles} read files omitted)`);
@@ -1676,22 +1856,112 @@ function formatResumeIndex(index: ResumeIndex): string {
   return lines.join("\n");
 }
 
+function markerContent(text: string, tag: string): string | undefined {
+  const open = `<${tag}>`;
+  const close = `</${tag}>`;
+  const start = text.indexOf(open);
+  if (start < 0) return undefined;
+  const end = text.indexOf(close, start + open.length);
+  if (end < 0) return undefined;
+  return text.slice(start + open.length, end).trim() || undefined;
+}
+
+function latestVerificationState(text: string): string | undefined {
+  const verification = markerContent(text, "verification");
+  if (!verification) return undefined;
+  const latest = new Map<string, string>();
+  for (const line of verification.split("\n")) {
+    const match = line.match(/^(?:PASS|FAIL|SKIP|BLOCKED|INCOMPLETE)(\s+\[[^\]]+\])?:\s*(.*?)(?:\s+—|$)/);
+    if (!match) continue;
+    const key = `${match[1] ?? ""}:${match[2]}`;
+    latest.delete(key);
+    latest.set(key, line);
+  }
+  return [...latest.values()].join("\n") || undefined;
+}
+
+/**
+ * Prior dc-shrink output is already a structured recovery record. Carry its
+ * forward-looking state instead of recursively embedding stale conversation,
+ * tool output, and superseded verification receipts on every compaction.
+ */
+function filterPriorResumeIndex(value: string): string {
+  const kept: string[] = [];
+  let include = false;
+  for (const line of value.split("\n")) {
+    if (/^[a-z-]+:$/.test(line.trim())) {
+      include = ["recent-user-intent:", "continuation:"].includes(line.trim());
+    }
+    if (include) kept.push(line);
+  }
+  return kept.join("\n").trim();
+}
+
+function filterPriorResumeTasks(value: string): string {
+  return value
+    .split("\n")
+    .filter((line) => !/^(?:Reread active files|Recall):/.test(line.trim()))
+    .join("\n")
+    .trim();
+}
+
+function summarizePriorState(summary: string): string {
+  const parts: string[] = [];
+  const resumeState = markerContent(summary, "resume-state");
+  if (resumeState) parts.push(`<resume-state>\n${escapeMarkerText(resumeState)}\n</resume-state>`);
+  const currentIntent = markerContent(summary, "current-intent");
+  if (currentIntent) parts.push(`<current-intent>\n${escapeMarkerText(currentIntent)}\n</current-intent>`);
+  const userFocus = summary.match(/^## User Focus\n([\s\S]*?)(?=\n## |\n<|$)/m)?.[1]?.trim();
+  if (userFocus) parts.push(`## User Focus\n${escapeMarkerText(userFocus)}`);
+  const verification = latestVerificationState(summary);
+  if (verification) parts.push(`<verification>\n${escapeMarkerText(verification)}\n</verification>`);
+  for (const tag of [
+    "resume-risks",
+    "working-tree",
+    "resume-tasks",
+    "resume-index",
+  ] as const) {
+    const raw = markerContent(summary, tag);
+    const value = tag === "resume-index"
+      ? filterPriorResumeIndex(raw ?? "")
+      : tag === "resume-tasks"
+        ? filterPriorResumeTasks(raw ?? "")
+        : raw;
+    if (value) parts.push(`<${tag}>\n${escapeMarkerText(value)}\n</${tag}>`);
+  }
+  if (parts.length === 0) {
+    return `Legacy prior summary (opaque):\n${escapeMarkerText(sliceU16(summary, 2_000))}`;
+  }
+  const budget = 3_800;
+  const kept: string[] = [];
+  let used = 0;
+  for (const part of parts) {
+    const size = Array.from(part).length + (kept.length > 0 ? 2 : 0);
+    if (used + size > budget) break;
+    kept.push(part);
+    used += size;
+  }
+  if (kept.length < parts.length) kept.push(`... (${parts.length - kept.length} prior-state sections omitted)`);
+  return kept.join("\n\n");
+}
+
 function formatPriorSummaries(summaries: string[]): string {
   if (summaries.length === 0) return "";
-  const budget = 32_000;
+  const budget = 4_000;
   const newest = summaries.slice().reverse();
   const kept: string[] = [];
   let used = 0;
   for (const summary of newest) {
     const remaining = budget - used;
     if (remaining <= 0) break;
-    const clipped = sliceU16(summary, remaining);
-    kept.unshift(escapeMarkerText(clipped));
-    used += Array.from(clipped).length;
-    if (clipped.length < summary.length) break;
+    const state = summarizePriorState(summary);
+    const size = Array.from(state).length;
+    if (size > remaining) break;
+    kept.unshift(state);
+    used += size;
   }
   const omitted = summaries.length - kept.length;
-  const rows = kept.map((summary, index) => `[Prior ${index + 1}]\n${summary}`);
+  const rows = kept.map((summary, index) => `[Prior ${index + 1} retained state]\n${summary}`);
   if (omitted > 0) rows.unshift(`... (${omitted} older summaries omitted)`);
   return `## Prior Summaries\n${rows.join("\n\n")}`;
 }
@@ -1702,7 +1972,15 @@ function formatSummary(meta: SessionMeta, conv: ConversationResult, userFocus?: 
   // intent and the highest-value recovery signal. XML-marker style matches the
   // other activity blocks. Absent → no part pushed → byte-identical output.
   const handoff = meta.handoff?.trim();
-  if (handoff) parts.push(`<current-intent>\n${escapeAngles(handoff)}\n</current-intent>`, "");
+  if (handoff) {
+    const structured = parseStructuredShrinkHandoff(handoff);
+    parts.push(
+      structured
+        ? renderStructuredHandoff(structured)
+        : `<current-intent>\n${escapeAngles(handoff)}\n</current-intent>`,
+      "",
+    );
+  }
   const metaLines = [
     meta.cwd ? `CWD: ${meta.cwd}` : "",
     meta.model ? `Model: ${meta.model}` : "",
@@ -1726,17 +2004,86 @@ function formatSummary(meta: SessionMeta, conv: ConversationResult, userFocus?: 
     ),
     formatRecentToolCalls(conv.recentToolCalls),
     formatRecentToolResults(conv.recentToolResults),
-    markerBlock("verification", conv.verification),
+    exactLineMarkerBlock("verification", conv.verification),
+    markerBlock("resume-risks", conv.resumeRisks),
     markerBlock("working-tree", conv.workingTree),
     markerBlock("source-anchors", conv.sourceAnchors),
     markerBlock("active-tasks", conv.activeTasks),
     markerBlock("literal-anchors", conv.literalAnchors),
     markerBlock("resume-tasks", conv.resumeTasks),
     formatResumeIndex(conv.resumeIndex),
+    markerBlock("summary-omissions", conv.budgetOmissions),
   ]) {
     if (block) parts.push("", block);
   }
   return parts.join("\n");
+}
+
+function enforceOperatingBudget(
+  meta: SessionMeta,
+  conv: ConversationResult,
+  userFocus?: string,
+): void {
+  const omitted = new Map<string, number>();
+  const note = (label: string) => omitted.set(label, (omitted.get(label) ?? 0) + 1);
+  const refreshResume = () => {
+    conv.resumeIndex = buildResumeIndex(
+      conv.turns,
+      conv.readFiles,
+      conv.modifiedFiles,
+      conv.recentToolCalls,
+    );
+    conv.resumeTasks = buildResumeTasks({
+      readFiles: conv.readFiles,
+      modifiedFiles: conv.modifiedFiles,
+      recentToolCalls: conv.recentToolCalls,
+      verification: conv.verification,
+      workingTree: conv.workingTree,
+      sourceAnchors: conv.sourceAnchors,
+      resumeIndex: conv.resumeIndex,
+    });
+  };
+  // Reserve room for the omission receipt, separator, recall note, and metric prefix.
+  const target = TARGET_RESUME_SUMMARY_CODE_POINTS - 1_024;
+  let guard = 0;
+  while (Array.from(formatSummary(meta, conv, userFocus)).length > target && guard++ < 1_000) {
+    if (conv.recentToolResults.length > 0) {
+      conv.recentToolResults.shift();
+      note("recent tool results");
+    } else if (conv.sourceAnchors.length > 0) {
+      conv.sourceAnchors.shift();
+      note("source anchors");
+    } else if (conv.literalAnchors.length > 0) {
+      conv.literalAnchors.shift();
+      note("literal anchors");
+    } else if (conv.recentToolCalls.length > 0) {
+      conv.recentToolCalls.shift();
+      note("recent tool calls");
+    } else if (conv.activeTasks.length > 0) {
+      conv.activeTasks.shift();
+      note("active tasks");
+    } else if (conv.turns.length > 1) {
+      conv.turns.shift();
+      note("conversation turns");
+    } else if (conv.readFiles.length > 0) {
+      conv.readFiles.shift();
+      conv.omittedReadFiles += 1;
+    } else if (conv.modifiedFiles.length > 0) {
+      conv.modifiedFiles.shift();
+      conv.omittedModifiedFiles += 1;
+    } else if (conv.workingTree.length > 1) {
+      conv.workingTree.shift();
+      note("working-tree receipts");
+    } else if (conv.verification.length > 1) {
+      conv.verification.shift();
+      note("verification receipts");
+    } else {
+      break;
+    }
+    refreshResume();
+  }
+  conv.budgetOmissions = [...omitted.entries()].map(([label, count]) =>
+    `${count} ${label} omitted for the ${TARGET_RESUME_SUMMARY_CODE_POINTS.toLocaleString()}-code-point operating target`);
 }
 
 export function compileSessionJsonl(content: string, userFocus?: string, signal?: AbortSignal): LocalCompileResult {
@@ -1751,7 +2098,11 @@ export function compileSessionJsonl(content: string, userFocus?: string, signal?
   if (normalized.usefulRecordCount === 0) {
     throw new CompactionInputError("compaction input contains no useful records");
   }
-  const conv = extractConversation(compressToolResults(filterNoise(normalized.blocks)));
+  const conv = extractConversation(
+    compressToolResults(filterNoise(normalized.blocks)),
+    normalized.meta.cwd,
+  );
+  enforceOperatingBudget(normalized.meta, conv, userFocus);
   checkAbort(signal);
   let summary = `${formatSummary(normalized.meta, conv, userFocus)}${COMPILE_SEPARATOR}${RECALL_NOTE}`;
   while (Array.from(summary).length > MAX_STRUCTURED_SUMMARY_CODE_POINTS && (conv.readFiles.length > 0 || conv.modifiedFiles.length > 0)) {

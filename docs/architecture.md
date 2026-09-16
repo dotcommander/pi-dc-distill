@@ -23,7 +23,7 @@ only after Pi confirms the matching append.
 session_start
   -> primary session claims ShrinkRuntime
   -> initialize store and retry migration
-  -> reload settings and project recall
+  -> read Pi compaction settings and project recall
 
 session_before_compact
   -> build CompactionSource from preparation + active branch
@@ -74,7 +74,7 @@ Events.compact({
   tokensBefore: preparation.tokensBefore,
   details: {
     compactor: "dc-shrink",
-    version: 6,
+    version: 7,
     tier: 1,
     attemptId,
     tokensAfter,
@@ -117,7 +117,21 @@ closed if structured output cannot fit after applying deterministic limits:
 | Verification, working tree, source anchors, task blocks | 10 items each |
 
 Every truncated list emits an omitted-count row. Details arrays are derived
-from the same bounded marker contents.
+from the same bounded marker contents. The compiler also targets a 13,024-code-
+point operating summary: it removes complete optional records before file
+observations, working-tree receipts, verification, risks, or explicit handoff
+state. The 65,536-code-point limit remains the fail-closed wire ceiling.
+
+File evidence is result-confirmed and provenance-labeled. Successful reads are
+observations, successful writes are tool reports, and neither substitutes for a
+scoped Git receipt. Failed or unmatched writes produce bounded inspect-before-
+retry risks. Verification freshness uses exact runner + command + known working
+directory identity; later successful writes or non-read-only shell commands
+conservatively stale earlier passes.
+
+A strict whole-message `shrink-handoff-v1` JSON fence can provide objective,
+done, next, blocker, decision, and verification-needed fields without changing
+the stored custom-entry schema. Invalid envelopes remain bounded legacy text.
 
 ## Session Isolation
 
@@ -130,16 +144,21 @@ resumed, or forked primary session can claim cleanly.
 
 ## Trigger Bands
 
-Each threshold is `min(absolute, round(percentage * contextWindow))`.
+Pi owns the trigger policy. At primary-session start, dc-shrink reads Pi's
+effective `compaction.enabled` and `reserveTokens` from the global and project
+settings merge.
 
 - below auto: no action
-- auto through warn-minus-one: Mechanical compaction
-- warn through emergency-minus-one: cooperative Warn
-- emergency and above: unconditional Mechanical compaction
+- Pi trigger = `contextWindow - reserveTokens`
+- auto = `Pi trigger - 20,000`: Mechanical compaction
+- warn = `Pi trigger`: cooperative Warn
+- emergency = `contextWindow`: unconditional Mechanical compaction
 
-Defaults are 100K/75%, 140K/85%, and 160K/92%. A 128K context window resolves
-to 96K, 108.8K, and 117.76K. Emergency bypasses cooldown and sync; warmup and
-post-compaction growth protections otherwise remain.
+`compaction.enabled: false` makes the autonomous monitor a no-op; manual
+`/compact` still enters the deterministic `session_before_compact` hook. Fixed
+small-window floors preserve ordered bands. If Pi cannot report a context
+window, legacy 100K/140K/160K fallbacks apply. Emergency bypasses cooldown and
+sync; warmup and post-compaction growth protections otherwise remain.
 
 ## Continuation and Focus Echo
 
@@ -152,7 +171,7 @@ message, bounds the echo, and suppresses duplicates.
 
 ## Compatibility
 
-The repository is pinned to Pi 0.79.8. The installed-runtime RPC smoke targets
-`/opt/homebrew/bin/pi` 0.80.10 and skips clearly when that exact runtime is not
-available. It must prove one extension-owned append, active discarded/focused
-content only, version-6 metrics, and zero provider requests.
+The repository's locked Pi SDK test surface is 0.82.1. Installed PATH runtimes
+are reviewed separately; Pi 0.84.4's compaction-card lifecycle is explicitly
+allowlisted. Compatibility checks must prove one extension-owned append, active
+discarded/focused content only, version-7 metrics, and zero provider requests.
