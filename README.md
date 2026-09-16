@@ -65,6 +65,12 @@ Failures and cancellations fail closed: no default LLM compactor is used. Succes
 
 Malformed, unknown-version, or oversized envelopes remain bounded opaque text; fields are never inferred from ordinary prose. Handoff content is task state, not verification evidence.
 
+For dependency-aware recovery, `shrink-handoff-v2` requires exactly `objective`,
+`invariants`, `decisions`, `rejected-hypotheses`, `tasks`, and
+`verification-needed`. IDs and dependency edges are validated, cycles are
+rejected, and pending tasks whose dependencies are done are rendered in stable
+topological order. The v1 format remains unchanged and supported.
+
 `recall_compaction` searches the project store by default:
 
 ```text
@@ -81,7 +87,13 @@ The project store keeps ten newest committed summaries. Ownerless legacy records
 
 ### Tool-output compaction
 
-The `tool_result` hook keeps small results unchanged. By default, text exceeding 12,000 characters or 240 lines is saved in the project tool-output directory and replaced with a deterministic head-and-tail preview that names the full artifact path. If saving or preview construction fails, the hook leaves the original result available and emits at most one UI warning.
+The `tool_result` hook keeps small results unchanged. By default, text exceeding 12,000 characters or 240 lines is saved in the project tool-output directory and replaced with a deterministic preview. Classification precedence is diagnostic, unified diff, whole-document JSON, test output, search output, then generic head/tail fallback. Each new artifact index row, replacement notice, and details object carries the exact UTF-8 byte count, lowercase SHA-256 digest, and selected preview strategy. Existing artifacts and index rows are not rewritten. If persistence or preview construction fails, the hook leaves the original result available and emits at most one UI warning.
+
+Conversation turns use conservative recency limits: the newest five retain the
+current semantic limit, records 6–20 retain half, and older records retain one
+quarter. Explicit state, failures, diffs, latest verification, file/literal
+evidence, and artifact receipts remain protected evidence rather than recency
+signals.
 
 ## Verify and contribute
 

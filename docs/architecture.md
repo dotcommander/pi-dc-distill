@@ -132,6 +132,18 @@ conservatively stale earlier passes.
 A strict whole-message `shrink-handoff-v1` JSON fence can provide objective,
 done, next, blocker, decision, and verification-needed fields without changing
 the stored custom-entry schema. Invalid envelopes remain bounded legacy text.
+The backward-compatible `shrink-handoff-v2` fence adds validated invariants,
+decisions, rejected hypotheses, and an acyclic task graph. Ready pending tasks
+are derived only from graph state and rendered in stable topological order.
+Both versions are task-state provenance, never verification evidence.
+
+Oversized tool results are classified only after crossing the existing size
+threshold. Diagnostic, diff, whole-JSON, test, and search previews precede the
+generic head/tail fallback. Newly written artifacts carry an exact UTF-8 byte
+count, content SHA-256, and strategy receipt; no historical artifact migration
+or deduplication occurs. Recency scales otherwise eligible conversation turns,
+while explicit handoff state and evidence-bearing failure, diff, verification,
+file, literal, and artifact records remain exempt.
 
 ## Session Isolation
 

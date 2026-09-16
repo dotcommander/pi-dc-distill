@@ -540,6 +540,52 @@ describe("compileSessionJsonl handoff (<current-intent>)", () => {
     expect(summary).not.toContain("<current-intent>");
   });
 
+  test("strict v2 handoff renders graph evidence and source-stable ready tasks", () => {
+    const handoff = `\`\`\`shrink-handoff-v2\n${JSON.stringify({
+      objective: "Finish parser repair.",
+      invariants: ["Legacy input remains valid."],
+      decisions: [{ id: "D1", text: "Use recursive descent.", rationale: "Regex failed on nesting." }],
+      "rejected-hypotheses": [{ id: "H1", claim: "Input is malformed.", evidence: "Fixture parses with reference parser." }],
+      tasks: [
+        { id: "T1", status: "done", action: "Add fixture.", "depends-on": [], blocker: "" },
+        { id: "T2", status: "pending", action: "Implement parser.", "depends-on": ["T1"], blocker: "" },
+        { id: "T3", status: "pending", action: "Run tests.", "depends-on": [], blocker: "" },
+        { id: "T4", status: "blocked", action: "Publish.", "depends-on": ["T2"], blocker: "Release approval required." },
+      ],
+      "verification-needed": ["bun test lib/handoff.test.ts"],
+    })}\n\`\`\``;
+    const summary = compileSessionJsonl([
+      sessionLine,
+      userMsg("continue"),
+      line({ type: "custom", customType: SHRINK_HANDOFF_ENTRY_TYPE, data: { handoff } }),
+    ].join("\n")).summary;
+
+    expect(summary).toContain("<resume-state>");
+    expect(summary).toContain("version: 2");
+    expect(summary).toContain("provenance: explicit handoff; task state, not verification");
+    expect(summary).toContain("invariants:");
+    expect(summary).toContain("D1: Use recursive descent.; rationale: Regex failed on nesting.");
+    expect(summary).toContain("H1: Input is malformed.; evidence: Fixture parses with reference parser.");
+    expect(summary).toContain("T4 [blocked]: Publish.");
+    expect(summary).toContain("blocker: Release approval required.");
+    const ready = summary.match(/ready-tasks:\n([\s\S]*?)\nverification-needed:/)?.[1] ?? "";
+    expect(ready).toContain("T2: Implement parser.");
+    expect(ready).toContain("T3: Run tests.");
+    expect(ready.indexOf("T2:")).toBeLessThan(ready.indexOf("T3:"));
+    expect(summary).not.toContain("<current-intent>");
+  });
+
+  test("malformed v2 handoff remains opaque current intent", () => {
+    const handoff = "```shrink-handoff-v2\n{\"objective\":\"x\"}\n```";
+    const summary = compileSessionJsonl([
+      sessionLine,
+      line({ type: "custom", customType: SHRINK_HANDOFF_ENTRY_TYPE, data: { handoff } }),
+    ].join("\n")).summary;
+    expect(summary).toContain("<current-intent>");
+    expect(summary).toContain("shrink-handoff-v2");
+    expect(summary).not.toContain("<resume-state>");
+  });
+
   test("saved shrink handoff wins over older raw handoff markers", () => {
     const jsonl = [
       sessionLine,
@@ -791,5 +837,44 @@ describe("compileSessionJsonl literal anchors", () => {
     expect(anchors).toContain("TASK-77");
     expect(anchors).toContain("/Users/vampire/project/src/app.ts");
     expect(anchors.filter((anchor) => /^a1b2c3[0-9a-f]{2}$/.test(anchor)).length).toBeLessThanOrEqual(6);
+  });
+
+  test("scales ordinary turn detail by recency while preserving old diff evidence", () => {
+    const ordinary = Array.from({ length: 24 }, (_, index) =>
+      userMsg(`record ${index} ${"word ".repeat(140)} END-${index}`));
+    const oldDiff = assistantMsg(`diff --git a/a b/a\n@@ -1 +1 @@\n-${"old ".repeat(220)}\n+${"new ".repeat(220)}\nDIFF-END`);
+    const newest = userMsg(`newest ${"detail ".repeat(60)} NEWEST-END`);
+    const result = compileSessionJsonl([sessionLine, oldDiff, ...ordinary, newest].join("\n"));
+    const conversation = result.summary.match(/## Conversation\n([\s\S]*?)(?:\n\n<|$)/)?.[1] ?? "";
+
+    expect(conversation).toContain("DIFF-END");
+    expect(conversation).toContain("NEWEST-END");
+    expect(conversation).not.toContain("END-0");
+    expect(conversation).not.toContain("END-10");
+    expect(result.summary).toContain("END-0");
+  });
+
+  test("preserves exact output-artifact receipts ahead of ordinary recent results", () => {
+    const digest = "a".repeat(64);
+    const artifactPath = "/tmp/project/.pi/dc-shrink/tool-output/000001-bash.txt";
+    const receipt = [
+      "[dc-shrink] Compacted bash output (10000 chars, 400 lines).",
+      "Preview:",
+      "first line",
+      "",
+      `Full output saved; read this path if needed: ${artifactPath}`,
+      `Receipt: sha256=${digest} bytes=10000 strategy=diagnostic`,
+    ].join("\n");
+    const lines = [sessionLine, userMsg("keep the artifact receipt")];
+    lines.push(toolCall("bash", { command: "run-large-command" }));
+    lines.push(toolResult("bash", receipt));
+    for (let index = 0; index < 20; index++) {
+      lines.push(toolCall("bash", { command: `ordinary-${index}` }));
+      lines.push(toolResult("bash", `ordinary result ${index}`));
+    }
+
+    const result = compileSessionJsonl(lines.join("\n"));
+    expect(result.summary).toContain(`artifact: ${artifactPath}`);
+    expect(result.summary).toContain(`sha256=${digest} bytes=10000 strategy=diagnostic`);
   });
 });

@@ -54,8 +54,8 @@ const WARN_COOLDOWN_MS = 120_000;
 const WARN_STEER_PROMPT = [
   "You are near the context boundary — compaction is imminent.",
   "Finish the current atomic unit, then call save_shrink_handoff with either legacy text",
-  "or one strict ```shrink-handoff-v1 JSON block containing objective, done, next, blocker,",
-  "decision, and verification-needed. Record only explicit current state and exact next actions.",
+  "or one strict shrink-handoff-v1/v2 JSON block. Prefer v2 when task dependencies, decisions,",
+  "or rejected hypotheses matter. Record only explicit current state and exact next actions.",
 ].join("\n");
 
 interface ApiUsage {
@@ -580,7 +580,7 @@ function createExtension(pi: ExtensionAPI, options: ShrinkExtensionOptions = {})
     tools: {
       save_shrink_handoff: {
         name: "save_shrink_handoff",
-        description: "Save near-compaction state as legacy text or one strict shrink-handoff-v1 JSON envelope with objective, done, next, blocker, decision, and verification-needed.",
+        description: "Save near-compaction state as legacy text or one strict shrink-handoff-v1/v2 JSON envelope; v2 preserves task dependencies, decisions, rejected hypotheses, and verification needed.",
         parameters: Type.Object({ handoff: Type.String() }),
         // Custom rendering: the house rail preserves the handoff completion summary.
         renderStyle: "custom",

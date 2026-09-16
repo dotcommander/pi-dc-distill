@@ -14,6 +14,41 @@ export interface StructuredShrinkHandoff {
   "verification-needed": string[];
 }
 
+export interface ShrinkHandoffDecision {
+  id: string;
+  text: string;
+  rationale: string;
+}
+
+export interface ShrinkHandoffRejectedHypothesis {
+  id: string;
+  claim: string;
+  evidence: string;
+}
+
+export interface ShrinkHandoffTask {
+  id: string;
+  status: "done" | "pending" | "blocked";
+  action: string;
+  "depends-on": string[];
+  blocker: string;
+}
+
+/** Strict execution-graph handoff. `version` is parser metadata, not an envelope key. */
+export interface StructuredShrinkHandoffV2 {
+  version: 2;
+  objective: string;
+  invariants: string[];
+  decisions: ShrinkHandoffDecision[];
+  "rejected-hypotheses": ShrinkHandoffRejectedHypothesis[];
+  tasks: ShrinkHandoffTask[];
+  "verification-needed": string[];
+}
+
+export type ParsedStructuredShrinkHandoff =
+  | StructuredShrinkHandoff
+  | StructuredShrinkHandoffV2;
+
 const STRUCTURED_HANDOFF_KEYS = [
   "objective",
   "done",
@@ -26,6 +61,16 @@ const STRUCTURED_HANDOFF_MAX_CODE_POINTS = 16_384;
 const STRUCTURED_HANDOFF_MAX_ITEMS = 32;
 const STRUCTURED_HANDOFF_MAX_ITEM_CODE_POINTS = 2_048;
 const STRUCTURED_HANDOFF_RE = /^\s*```shrink-handoff-v1\n([\s\S]*?)\n```\s*$/;
+const STRUCTURED_HANDOFF_V2_RE = /^\s*```shrink-handoff-v2\n([\s\S]*?)\n```\s*$/;
+const STRUCTURED_HANDOFF_V2_KEYS = [
+  "objective",
+  "invariants",
+  "decisions",
+  "rejected-hypotheses",
+  "tasks",
+  "verification-needed",
+] as const;
+const HANDOFF_ID_RE = /^[A-Za-z][A-Za-z0-9._-]{0,63}$/;
 
 export function shrinkHandoffEntry(
   handoff: string,
@@ -39,6 +84,143 @@ export function shrinkHandoffEntry(
 
 function withinCodePointLimit(value: string, limit: number): boolean {
   return Array.from(value).length <= limit;
+}
+
+function rootObjectKeys(json: string): string[] | undefined {
+  const keys: string[] = [];
+  let depth = 0;
+  let lastStructural = "";
+  for (let index = 0; index < json.length; index++) {
+    const char = json[index];
+    if (char === '"') {
+      const start = index;
+      index++;
+      while (index < json.length) {
+        if (json[index] === "\\") {
+          index += 2;
+          continue;
+        }
+        if (json[index] === '"') break;
+        index++;
+      }
+      if (index >= json.length) return undefined;
+      if (depth === 1 && (lastStructural === "{" || lastStructural === ",")) {
+        let after = index + 1;
+        while (/\s/.test(json[after] ?? "")) after++;
+        if (json[after] === ":") {
+          try {
+            keys.push(JSON.parse(json.slice(start, index + 1)));
+          } catch {
+            return undefined;
+          }
+        }
+      }
+      continue;
+    }
+    if (/\s/.test(char)) continue;
+    if (char === "{") depth++;
+    else if (char === "}") depth--;
+    lastStructural = char;
+  }
+  return depth === 0 ? keys : undefined;
+}
+
+function hasExactlyKeys(json: string, keys: readonly string[]): boolean {
+  const actual = rootObjectKeys(json);
+  return actual !== undefined && actual.length === keys.length &&
+    new Set(actual).size === keys.length &&
+    keys.every((key) => actual.includes(key));
+}
+
+function hasNoDuplicateObjectKeys(json: string): boolean {
+  const stack: Array<{ type: "object" | "array"; keys?: Set<string>; expectingKey?: boolean }> = [];
+  for (let index = 0; index < json.length; index++) {
+    const char = json[index];
+    if (char === '"') {
+      const start = index;
+      index++;
+      while (index < json.length) {
+        if (json[index] === "\\") {
+          index += 2;
+          continue;
+        }
+        if (json[index] === '"') break;
+        index++;
+      }
+      if (index >= json.length) return false;
+      const top = stack.at(-1);
+      if (top?.type === "object" && top.expectingKey) {
+        let key: string;
+        try {
+          key = JSON.parse(json.slice(start, index + 1));
+        } catch {
+          return false;
+        }
+        if (top.keys!.has(key)) return false;
+        top.keys!.add(key);
+        top.expectingKey = false;
+      }
+      continue;
+    }
+    if (char === "{") stack.push({ type: "object", keys: new Set(), expectingKey: true });
+    else if (char === "[") stack.push({ type: "array" });
+    else if (char === "}" || char === "]") stack.pop();
+    else if (char === "," && stack.at(-1)?.type === "object") stack.at(-1)!.expectingKey = true;
+  }
+  return stack.length === 0;
+}
+
+function isNonEmptyBoundedString(value: unknown): value is string {
+  return typeof value === "string" && value.trim().length > 0 &&
+    withinCodePointLimit(value, STRUCTURED_HANDOFF_MAX_ITEM_CODE_POINTS);
+}
+
+function hasUniqueBoundedIds<T extends { id: string }>(items: T[]): boolean {
+  const ids = new Set<string>();
+  return items.every(({ id }) => HANDOFF_ID_RE.test(id) && !ids.has(id) && !!ids.add(id));
+}
+
+function hasCycle(tasks: ShrinkHandoffTask[]): boolean {
+  const byId = new Map(tasks.map((task) => [task.id, task]));
+  const visiting = new Set<string>();
+  const visited = new Set<string>();
+  const visit = (id: string): boolean => {
+    if (visiting.has(id)) return true;
+    if (visited.has(id)) return false;
+    visiting.add(id);
+    const cyclic = byId.get(id)!["depends-on"].some(visit);
+    visiting.delete(id);
+    visited.add(id);
+    return cyclic;
+  };
+  return tasks.some((task) => visit(task.id));
+}
+
+/** Returns ready pending tasks in a stable topological (then source) order. */
+export function readyShrinkHandoffTasks(
+  handoff: StructuredShrinkHandoffV2,
+): ShrinkHandoffTask[] {
+  const sourceIndex = new Map(handoff.tasks.map((task, index) => [task.id, index]));
+  const dependents = new Map(handoff.tasks.map((task) => [task.id, [] as string[]]));
+  const remaining = new Map(handoff.tasks.map((task) => [task.id, task["depends-on"].length]));
+  for (const task of handoff.tasks) {
+    for (const dependency of task["depends-on"]) dependents.get(dependency)!.push(task.id);
+  }
+  const available = handoff.tasks.filter((task) => remaining.get(task.id) === 0);
+  const ordered: ShrinkHandoffTask[] = [];
+  while (available.length > 0) {
+    available.sort((left, right) => sourceIndex.get(left.id)! - sourceIndex.get(right.id)!);
+    const task = available.shift()!;
+    ordered.push(task);
+    for (const dependent of dependents.get(task.id)!) {
+      const count = remaining.get(dependent)! - 1;
+      remaining.set(dependent, count);
+      if (count === 0) available.push(handoff.tasks[sourceIndex.get(dependent)!]);
+    }
+  }
+  const status = new Map(handoff.tasks.map((task) => [task.id, task.status]));
+  return ordered.filter((task) =>
+    task.status === "pending" && task["depends-on"].every((dependency) => status.get(dependency) === "done"));
 }
 
 /** Parse only the explicit, whole-message v1 envelope. Invalid envelopes stay legacy text. */
@@ -83,6 +265,92 @@ export function parseStructuredShrinkHandoff(
     decision: (record.decision as string[]).map((item) => item.trim()),
     "verification-needed": (record["verification-needed"] as string[]).map((item) => item.trim()),
   };
+}
+
+/** Parse the strict whole-message v2 envelope. Invalid input is always opaque text. */
+export function parseStructuredShrinkHandoffV2(
+  text: string,
+): StructuredShrinkHandoffV2 | undefined {
+  if (!withinCodePointLimit(text, STRUCTURED_HANDOFF_MAX_CODE_POINTS)) return undefined;
+  const match = text.match(STRUCTURED_HANDOFF_V2_RE);
+  if (!match) return undefined;
+  const json = match[1];
+  let value: unknown;
+  try {
+    value = JSON.parse(json);
+  } catch {
+    return undefined;
+  }
+  if (typeof value !== "object" || value === null || Array.isArray(value)) return undefined;
+  if (!hasExactlyKeys(json, STRUCTURED_HANDOFF_V2_KEYS) || !hasNoDuplicateObjectKeys(json)) return undefined;
+  const record = value as Record<string, unknown>;
+  if (!isNonEmptyBoundedString(record.objective)) return undefined;
+
+  const invariants = record.invariants;
+  const verificationNeeded = record["verification-needed"];
+  if (!Array.isArray(invariants) || invariants.length > STRUCTURED_HANDOFF_MAX_ITEMS ||
+    invariants.some((item) => !isNonEmptyBoundedString(item))) return undefined;
+  if (!Array.isArray(verificationNeeded) || verificationNeeded.length > STRUCTURED_HANDOFF_MAX_ITEMS ||
+    verificationNeeded.some((item) => !isNonEmptyBoundedString(item))) return undefined;
+
+  const decisions = record.decisions;
+  if (!Array.isArray(decisions) || decisions.length > STRUCTURED_HANDOFF_MAX_ITEMS ||
+    decisions.some((decision) => typeof decision !== "object" || decision === null || Array.isArray(decision))) return undefined;
+  const typedDecisions = decisions as ShrinkHandoffDecision[];
+  if (typedDecisions.some((decision) =>
+    !hasExactlyKeys(JSON.stringify(decision), ["id", "text", "rationale"]) ||
+    !isNonEmptyBoundedString(decision.id) || !isNonEmptyBoundedString(decision.text) ||
+    !isNonEmptyBoundedString(decision.rationale)) || !hasUniqueBoundedIds(typedDecisions)) return undefined;
+
+  const hypotheses = record["rejected-hypotheses"];
+  if (!Array.isArray(hypotheses) || hypotheses.length > STRUCTURED_HANDOFF_MAX_ITEMS ||
+    hypotheses.some((hypothesis) => typeof hypothesis !== "object" || hypothesis === null || Array.isArray(hypothesis))) return undefined;
+  const typedHypotheses = hypotheses as ShrinkHandoffRejectedHypothesis[];
+  if (typedHypotheses.some((hypothesis) =>
+    !hasExactlyKeys(JSON.stringify(hypothesis), ["id", "claim", "evidence"]) ||
+    !isNonEmptyBoundedString(hypothesis.id) || !isNonEmptyBoundedString(hypothesis.claim) ||
+    !isNonEmptyBoundedString(hypothesis.evidence)) || !hasUniqueBoundedIds(typedHypotheses)) return undefined;
+
+  const tasks = record.tasks;
+  if (!Array.isArray(tasks) || tasks.length > STRUCTURED_HANDOFF_MAX_ITEMS ||
+    tasks.some((task) => typeof task !== "object" || task === null || Array.isArray(task))) return undefined;
+  const typedTasks = tasks as ShrinkHandoffTask[];
+  if (typedTasks.some((task) =>
+    !hasExactlyKeys(JSON.stringify(task), ["id", "status", "action", "depends-on", "blocker"]) ||
+    !isNonEmptyBoundedString(task.id) ||
+    (task.status !== "done" && task.status !== "pending" && task.status !== "blocked") ||
+    !isNonEmptyBoundedString(task.action) ||
+    !Array.isArray(task["depends-on"]) || task["depends-on"].length > STRUCTURED_HANDOFF_MAX_ITEMS ||
+    task["depends-on"].some((dependency) => typeof dependency !== "string" || !HANDOFF_ID_RE.test(dependency)) ||
+    typeof task.blocker !== "string" || !withinCodePointLimit(task.blocker, STRUCTURED_HANDOFF_MAX_ITEM_CODE_POINTS) ||
+    (task.status === "blocked" ? !task.blocker.trim() : task.blocker !== "")) ||
+    !hasUniqueBoundedIds(typedTasks)) return undefined;
+  const taskIds = new Set(typedTasks.map((task) => task.id));
+  if (typedTasks.some((task) => task["depends-on"].some((dependency) =>
+    dependency === task.id || !taskIds.has(dependency))) || hasCycle(typedTasks)) return undefined;
+
+  return {
+    version: 2,
+    objective: record.objective.trim(),
+    invariants: (invariants as string[]).map((item) => item.trim()),
+    decisions: typedDecisions.map(({ id, text, rationale }) => ({ id, text: text.trim(), rationale: rationale.trim() })),
+    "rejected-hypotheses": typedHypotheses.map(({ id, claim, evidence }) => ({ id, claim: claim.trim(), evidence: evidence.trim() })),
+    tasks: typedTasks.map(({ id, status, action, "depends-on": dependsOn, blocker }) => ({
+      id,
+      status,
+      action: action.trim(),
+      "depends-on": [...dependsOn],
+      blocker: blocker.trim(),
+    })),
+    "verification-needed": (verificationNeeded as string[]).map((item) => item.trim()),
+  };
+}
+
+/** Parse either supported strict handoff version; unknown versions remain opaque. */
+export function parseAnyStructuredShrinkHandoff(
+  text: string,
+): ParsedStructuredShrinkHandoff | undefined {
+  return parseStructuredShrinkHandoff(text) ?? parseStructuredShrinkHandoffV2(text);
 }
 
 export function handoffTextFromEntryData(data: unknown): string | undefined {

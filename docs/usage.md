@@ -83,6 +83,17 @@ Supported marker names include `resume-state`, `current-intent`, `resume-risks`,
 `active-tasks`, `resume-tasks`, `resume-index`, and `summary-omissions`. Other
 queries perform keyword search across supported parts.
 
+`resume-state` may come from the unchanged v1 envelope or from a strict
+`shrink-handoff-v2` graph. V2 validates all IDs, blockers, dependency references,
+and cycles before trusting any field, then derives ready tasks from pending nodes
+whose dependencies are done. Handoff task state does not count as verification.
+
+Oversized tool-output replacements include the artifact path, exact UTF-8 byte
+count, content SHA-256, and preview strategy. Strategy precedence is diagnostic,
+diff, whole-document JSON, test, search, then generic fallback. Recency affects
+only otherwise eligible conversation turns; explicit state and evidence-bearing
+failure, diff, latest verification, file, literal, and artifact records are exempt.
+
 ## Resume Evidence Semantics
 
 Read and modified file lists contain only successful, unambiguously paired tool

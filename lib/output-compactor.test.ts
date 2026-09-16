@@ -1,5 +1,6 @@
 import { afterEach, describe, expect, test } from "bun:test";
 import { mkdtemp, readFile, rm } from "node:fs/promises";
+import { createHash } from "node:crypto";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import {
@@ -7,6 +8,7 @@ import {
   countLines,
   createOutputCompactor,
   DEFAULT_OUTPUT_COMPACTOR_CONFIG,
+  previewOutput,
   shouldCompact,
 } from "./output-compactor.ts";
 
@@ -73,6 +75,39 @@ describe("output compactor helpers", () => {
     expect(result.text.length).toBeLessThan(160);
     expect(result.text).toContain("preview characters");
   });
+
+  test("classifies deterministic fixture previews and preserves strategy evidence", () => {
+    const policy = { headLines: 12, tailLines: 8, maxChars: 800 };
+    const fixtures = [
+      { strategy: "generic", text: Array.from({ length: 30 }, (_, i) => `plain-${i}`).join("\n"), anchors: ["plain-0", "plain-29"] },
+      { strategy: "diagnostic", text: `build start\nError TS2345 at lib/parser.ts:42:7\nexpected string\n${"context\n".repeat(30)}final failure`, anchors: ["TS2345", "lib/parser.ts:42:7", "final failure"] },
+      { strategy: "test", text: `bun test\nFAIL parser rejects cycles\nexpected true\n${"passing case\n".repeat(30)}12 pass\n1 fail\n2 skip`, anchors: ["FAIL parser rejects cycles", "12 pass", "1 fail", "2 skip"] },
+      { strategy: "diff", text: `diff --git a/lib/a.ts b/lib/a.ts\n--- a/lib/a.ts\n+++ b/lib/a.ts\n@@ -1,2 +1,2 @@\n-old literal\n+new literal\n${" context\n".repeat(30)}`, anchors: ["diff --git", "@@ -1,2 +1,2 @@", "+new literal"] },
+      { strategy: "json", text: JSON.stringify({ objective: "repair parser", tasks: Array.from({ length: 30 }, (_, i) => ({ id: `T${i}`, blocker: i === 4 ? "cycle" : "" })) }), anchors: ["objective", "repair parser", "tasks", "count"] },
+      { strategy: "search", text: Array.from({ length: 20 }, (_, i) => `lib/parser.ts:${i + 1}:literal-${i}`).join("\n"), anchors: ["lib/parser.ts:1:literal-0", "omitted", "lib/parser.ts"] },
+    ] as const;
+
+    for (const fixture of fixtures) {
+      const first = previewOutput(fixture.text, policy);
+      const second = previewOutput(fixture.text, policy);
+      expect(first).toEqual(second);
+      expect(first.previewStrategy).toBe(fixture.strategy);
+      expect(first.text.length).toBeLessThanOrEqual(policy.maxChars + 100);
+      for (const anchor of fixture.anchors) expect(first.text).toContain(anchor);
+    }
+  });
+
+  test("prioritizes late error-bearing fields in bounded JSON previews", () => {
+    const value = Object.fromEntries([
+      ...Array.from({ length: 40 }, (_, index) => [`ordinary-${index}`, `value-${index}`]),
+      ["errorMessage", "late parser failure TS9999 at lib/parser.ts:88"],
+    ]);
+
+    const result = previewOutput(JSON.stringify(value), { headLines: 20, tailLines: 10, maxChars: 2_000 });
+    expect(result.previewStrategy).toBe("json");
+    expect(result.text).toContain("errorMessage");
+    expect(result.text).toContain("late parser failure TS9999 at lib/parser.ts:88");
+  });
 });
 
 describe("output compactor", () => {
@@ -132,12 +167,22 @@ describe("output compactor", () => {
 
     const artifactPath = details.dcShrinkOutputCompactor.artifactPath as string;
     expect(await readFile(artifactPath, "utf8")).toBe(fullText);
+    const digest = createHash("sha256").update(fullText, "utf8").digest("hex");
+    expect(details.dcShrinkOutputCompactor.contentSha256).toBe(digest);
+    expect(details.dcShrinkOutputCompactor.bytes).toBe(Buffer.byteLength(fullText, "utf8"));
+    expect(details.dcShrinkOutputCompactor.previewStrategy).toBe("generic");
+    expect(text.text).toContain(`sha256=${digest}`);
+    expect(text.text).toContain(`bytes=${Buffer.byteLength(fullText, "utf8")}`);
+    expect(text.text).toContain("strategy=generic");
 
     const index = await readFile(join(root, "index.jsonl"), "utf8");
     const rows = index.trim().split("\n").map((line) => JSON.parse(line));
     expect(rows).toHaveLength(1);
     expect(rows[0].toolName).toBe("bash");
     expect(rows[0].artifactPath).toBe(artifactPath);
+    expect(rows[0].contentSha256).toBe(digest);
+    expect(rows[0].bytes).toBe(Buffer.byteLength(fullText, "utf8"));
+    expect(rows[0].previewStrategy).toBe("generic");
   });
 
   test("uses the larger error preview budget for failed tools", async () => {

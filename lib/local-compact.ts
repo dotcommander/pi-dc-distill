@@ -4,8 +4,10 @@ import { basename } from "node:path";
 import {
   SHRINK_HANDOFF_ENTRY_TYPE,
   handoffTextFromEntryData,
-  parseStructuredShrinkHandoff,
+  parseAnyStructuredShrinkHandoff,
+  readyShrinkHandoffTasks,
   type StructuredShrinkHandoff,
+  type StructuredShrinkHandoffV2,
 } from "./handoff.ts";
 
 const RECALL_NOTE =
@@ -56,6 +58,7 @@ interface ToolResultEntry {
   toolName: string;
   text: string;
   isError: boolean;
+  artifactReceipt?: boolean;
 }
 
 interface SessionMeta {
@@ -1039,9 +1042,18 @@ function isSubstantive(signals: Signals): boolean {
   return signalScore(signals) >= 3;
 }
 
-function trimTurn(text: string): string {
+function isRecencyExemptTurn(text: string, signals = extractSignals(text)): boolean {
+  return signals.hasDiff || signals.hasErrDiag || signals.hasFilePath ||
+    /(?:<resume-state>|<verification>|sha256=[a-f0-9]{64}|Full output saved;|artifactPath|`[^`]+`)/i.test(text);
+}
+
+function trimTurn(text: string, ageFromNewest = 0): string {
   const signals = extractSignals(text);
-  const limit = turnTrimLimit(signals);
+  const baseLimit = turnTrimLimit(signals);
+  const factor = ageFromNewest < 5 ? 1 : ageFromNewest < 20 ? 0.5 : 0.25;
+  const limit = isRecencyExemptTurn(text, signals)
+    ? baseLimit
+    : Math.max(160, Math.floor(baseLimit * factor));
   if (text.length <= limit) return text;
   const clipped = text.slice(0, limit);
   const cutAt = Math.max(clipped.lastIndexOf(" "), clipped.lastIndexOf("\n"));
@@ -1544,11 +1556,13 @@ function collectConversationToolResult(
     return { pendingError: isError, omittedErrorResults, omittedRecentResults, mutationEpoch };
   }
 
+  const artifactReceipt = extractOutputArtifactReceipt(text);
   const target = path ? `[target: ${path}] ` : "";
   const entry = {
     toolName: block.name ?? "",
-    text: sliceU16(`${target}${text}`, isError ? 500 : 300),
+    text: artifactReceipt ?? sliceU16(`${target}${text}`, isError ? 500 : 300),
     isError,
+    artifactReceipt: Boolean(artifactReceipt),
   };
   if (entry.isError) {
     if (HARNESS_ERROR_SKIP.some((needle) => text.includes(needle))) {
@@ -1562,11 +1576,22 @@ function collectConversationToolResult(
   } else {
     recentResults.push(entry);
     if (recentResults.length > 15) {
-      recentResults.shift();
-      omittedRecentResults += 1;
+      const removable = recentResults.findIndex((result) => !result.artifactReceipt);
+      if (removable >= 0) {
+        recentResults.splice(removable, 1);
+        omittedRecentResults += 1;
+      }
     }
   }
   return { pendingError: isError, omittedErrorResults, omittedRecentResults, mutationEpoch };
+}
+
+function extractOutputArtifactReceipt(text: string): string | undefined {
+  if (!text.startsWith("[dc-shrink] Compacted ")) return undefined;
+  const path = text.match(/^Full output saved; read this path if needed:\s*(.+)$/m)?.[1]?.trim();
+  const receipt = text.match(/^Receipt:\s*sha256=([a-f0-9]{64})\s+bytes=(\d+)\s+strategy=(diagnostic|diff|json|test|search|generic)$/m);
+  if (!path || !receipt) return undefined;
+  return `artifact: ${path} sha256=${receipt[1]} bytes=${receipt[2]} strategy=${receipt[3]}`;
 }
 
 function collectConversationTurn(
@@ -1582,7 +1607,7 @@ function collectConversationTurn(
   if (block.kind === KIND_USER) collectSourceAnchorsFromUserText(sourceAnchors, text);
   if (!text) return false;
   toolAdj.push({ tools: [...pendingTools], files: [...pendingFiles], hadError: pendingError });
-  turns.push({ role: block.kind, text: trimTurn(text) });
+  turns.push({ role: block.kind, text });
   return true;
 }
 
@@ -1699,12 +1724,24 @@ function extractConversation(blocks: NormalizedBlock[], sessionCwd?: string): Co
     });
   }
 
+  for (let index = 0; index < turns.length; index++) {
+    turns[index] = {
+      ...turns[index],
+      text: trimTurn(turns[index].text, turns.length - index - 1),
+    };
+  }
   let finalTurns = turns;
   let totalChars = finalTurns.reduce((sum, turn) => sum + turn.text.length, 0);
   while (finalTurns.length > 0 && totalChars > 16_000) {
-    totalChars -= finalTurns[0].text.length;
-    finalTurns = finalTurns.slice(1);
-    toolAdj.shift();
+    const candidates = finalTurns
+      .map((turn, index) => ({ turn, index, score: signalScore(extractSignals(turn.text)) }))
+      .filter(({ turn }) => !isRecencyExemptTurn(turn.text));
+    if (candidates.length === 0) break;
+    candidates.sort((a, b) => a.score - b.score || a.index - b.index);
+    const remove = candidates[0].index;
+    totalChars -= finalTurns[remove].text.length;
+    finalTurns = finalTurns.filter((_, index) => index !== remove);
+    toolAdj.splice(remove, 1);
   }
   finalTurns = compactAssistantTurns(finalTurns, toolAdj);
 
@@ -1782,6 +1819,42 @@ function renderStructuredHandoff(handoff: StructuredShrinkHandoff): string {
     if (items.length === 0) continue;
     lines.push(`${key}:`, ...items.map((item) => `- ${escapeResumeLine(item)}`));
   }
+  lines.push("</resume-state>");
+  return lines.join("\n");
+}
+
+function renderStructuredHandoffV2(handoff: StructuredShrinkHandoffV2): string {
+  const lines = [
+    "<resume-state>",
+    "provenance: explicit handoff; task state, not verification",
+    "version: 2",
+    `objective: ${escapeResumeLine(handoff.objective)}`,
+  ];
+  const renderStrings = (name: string, values: string[]) => {
+    if (values.length > 0) lines.push(`${name}:`, ...values.map((value) => `- ${escapeResumeLine(value)}`));
+  };
+  renderStrings("invariants", handoff.invariants);
+  if (handoff.decisions.length > 0) {
+    lines.push("decisions:", ...handoff.decisions.map((decision) =>
+      `- ${decision.id}: ${escapeResumeLine(decision.text)}; rationale: ${escapeResumeLine(decision.rationale)}`));
+  }
+  if (handoff["rejected-hypotheses"].length > 0) {
+    lines.push("rejected-hypotheses:", ...handoff["rejected-hypotheses"].map((hypothesis) =>
+      `- ${hypothesis.id}: ${escapeResumeLine(hypothesis.claim)}; evidence: ${escapeResumeLine(hypothesis.evidence)}`));
+  }
+  if (handoff.tasks.length > 0) {
+    lines.push("tasks:", ...handoff.tasks.flatMap((task) => {
+      const taskLines = [`- ${task.id} [${task.status}]: ${escapeResumeLine(task.action)}`];
+      if (task["depends-on"].length > 0) taskLines.push(`  depends-on: ${task["depends-on"].join(", ")}`);
+      if (task.blocker) taskLines.push(`  blocker: ${escapeResumeLine(task.blocker)}`);
+      return taskLines;
+    }));
+  }
+  const ready = readyShrinkHandoffTasks(handoff);
+  if (ready.length > 0) {
+    lines.push("ready-tasks:", ...ready.map((task) => `- ${task.id}: ${escapeResumeLine(task.action)}`));
+  }
+  renderStrings("verification-needed", handoff["verification-needed"]);
   lines.push("</resume-state>");
   return lines.join("\n");
 }
@@ -1973,10 +2046,12 @@ function formatSummary(meta: SessionMeta, conv: ConversationResult, userFocus?: 
   // other activity blocks. Absent → no part pushed → byte-identical output.
   const handoff = meta.handoff?.trim();
   if (handoff) {
-    const structured = parseStructuredShrinkHandoff(handoff);
+    const structured = parseAnyStructuredShrinkHandoff(handoff);
     parts.push(
       structured
-        ? renderStructuredHandoff(structured)
+        ? "version" in structured
+          ? renderStructuredHandoffV2(structured)
+          : renderStructuredHandoff(structured)
         : `<current-intent>\n${escapeAngles(handoff)}\n</current-intent>`,
       "",
     );
@@ -2048,7 +2123,9 @@ function enforceOperatingBudget(
   let guard = 0;
   while (Array.from(formatSummary(meta, conv, userFocus)).length > target && guard++ < 1_000) {
     if (conv.recentToolResults.length > 0) {
-      conv.recentToolResults.shift();
+      const removable = conv.recentToolResults.findIndex((result) => !result.artifactReceipt);
+      if (removable < 0) break;
+      conv.recentToolResults.splice(removable, 1);
       note("recent tool results");
     } else if (conv.sourceAnchors.length > 0) {
       conv.sourceAnchors.shift();
@@ -2063,7 +2140,12 @@ function enforceOperatingBudget(
       conv.activeTasks.shift();
       note("active tasks");
     } else if (conv.turns.length > 1) {
-      conv.turns.shift();
+      const candidates = conv.turns
+        .map((turn, index) => ({ turn, index, score: signalScore(extractSignals(turn.text)) }))
+        .filter(({ turn }) => !isRecencyExemptTurn(turn.text));
+      if (candidates.length === 0) break;
+      candidates.sort((a, b) => a.score - b.score || a.index - b.index);
+      conv.turns.splice(candidates[0].index, 1);
       note("conversation turns");
     } else if (conv.readFiles.length > 0) {
       conv.readFiles.shift();

@@ -30,6 +30,18 @@ export interface CompactResult {
   previewLines: number;
 }
 
+export type PreviewStrategy =
+  | "diagnostic"
+  | "diff"
+  | "json"
+  | "test"
+  | "search"
+  | "generic";
+
+export interface PreviewResult extends CompactResult {
+  previewStrategy: PreviewStrategy;
+}
+
 export interface OutputArtifactRecord {
   timestamp: string;
   toolName: string;
@@ -37,6 +49,9 @@ export interface OutputArtifactRecord {
   artifactPath: string;
   chars: number;
   lines: number;
+  contentSha256: string;
+  bytes: number;
+  previewStrategy: PreviewStrategy;
 }
 
 interface TextBlock extends ContentBlock {
@@ -154,6 +169,186 @@ export function compactText(
   };
 }
 
+function boundedSelectedPreview(
+  text: string,
+  selected: Array<{ index: number; text: string }>,
+  policy: CompactPolicy,
+): CompactResult | undefined {
+  if (selected.length === 0) return undefined;
+  const unique = [...new Map(selected.map((line) => [line.index, line])).values()]
+    .sort((a, b) => a.index - b.index);
+  const kept = unique.slice(0, Math.max(1, policy.headLines + policy.tailLines));
+  const sourceLineCount = text.split("\n").length;
+  const bodyLines: string[] = [];
+  let previous = -1;
+  for (const line of kept) {
+    const gap = line.index - previous - 1;
+    if (gap > 0) bodyLines.push(`... omitted ${gap} lines ...`);
+    bodyLines.push(line.text);
+    previous = line.index;
+  }
+  const tailGap = sourceLineCount - previous - 1;
+  if (tailGap > 0) bodyLines.push(`... omitted ${tailGap} lines ...`);
+  const body = bodyLines.join("\n");
+  const bounded = body.length <= policy.maxChars
+    ? {
+        text: body,
+        originalChars: body.length,
+        originalLines: countLines(body),
+        previewChars: body.length,
+        previewLines: countLines(body),
+      }
+    : compactText(body, policy);
+  return {
+    ...bounded,
+    originalChars: text.length,
+    originalLines: countLines(text),
+  };
+}
+
+function diagnosticPreview(text: string, policy: CompactPolicy, forced: boolean): CompactResult | undefined {
+  const lines = text.split("\n");
+  const selected: Array<{ index: number; text: string }> = [];
+  const diagnostic = /(?:^|\b)(?:error|fatal|exception|panic|traceback|warning|failed|failure)(?:\b|:)|\b[A-Z]{1,5}\d{3,5}\b|(?:^|[ (])[^\s:()]+:\d+(?::\d+)?/i;
+  for (let index = 0; index < lines.length; index++) {
+    if (!diagnostic.test(lines[index])) continue;
+    for (let nearby = Math.max(0, index - 1); nearby <= Math.min(lines.length - 1, index + 1); nearby++) {
+      selected.push({ index: nearby, text: lines[nearby] });
+    }
+  }
+  if (forced) {
+    for (let index = 0; index < Math.min(lines.length, policy.headLines); index++) {
+      selected.push({ index, text: lines[index] });
+    }
+  }
+  for (let index = Math.max(0, lines.length - policy.tailLines); index < lines.length; index++) {
+    selected.push({ index, text: lines[index] });
+  }
+  return boundedSelectedPreview(text, selected, policy);
+}
+
+function diffPreview(text: string, policy: CompactPolicy): CompactResult | undefined {
+  const lines = text.split("\n");
+  const selected: Array<{ index: number; text: string }> = [];
+  let sawFile = false;
+  let sawHunk = false;
+  for (let index = 0; index < lines.length; index++) {
+    const line = lines[index];
+    if (/^(?:diff --git |--- |\+\+\+ )/.test(line)) {
+      sawFile = true;
+      selected.push({ index, text: line });
+    } else if (/^@@ /.test(line)) {
+      sawHunk = true;
+      selected.push({ index, text: line });
+    } else if (sawHunk && /^[+-]/.test(line)) {
+      selected.push({ index, text: line });
+    }
+  }
+  return sawFile && sawHunk ? boundedSelectedPreview(text, selected, policy) : undefined;
+}
+
+function jsonPreview(text: string, policy: CompactPolicy): CompactResult | undefined {
+  let value: unknown;
+  try {
+    value = JSON.parse(text.trim());
+  } catch {
+    return undefined;
+  }
+  const diagnosticKey = (key: string) => /(?:error|errors|message|failure|failed|exception|panic|code|diagnostic)/i.test(key);
+  const boundedEntries = (input: Record<string, unknown>) => {
+    const entries = Object.entries(input);
+    const priority = entries.filter(([key]) => diagnosticKey(key));
+    const ordinary = entries.filter(([key]) => !diagnosticKey(key));
+    return [...priority, ...ordinary].slice(0, 32);
+  };
+  const describe = (input: unknown, depth: number): unknown => {
+    if (depth >= 3) {
+      if (Array.isArray(input)) return { type: "array", count: input.length };
+      if (input && typeof input === "object") {
+        const record = input as Record<string, unknown>;
+        const errorValues = boundedEntries(record)
+          .filter(([key]) => diagnosticKey(key))
+          .slice(0, 8)
+          .map(([key, value]) => [key, typeof value === "string" ? value.slice(0, 160) : value]);
+        return {
+          type: "object",
+          count: Object.keys(record).length,
+          ...(errorValues.length > 0 ? { errorValues: Object.fromEntries(errorValues) } : {}),
+        };
+      }
+      return typeof input === "string" ? input.slice(0, 160) : input;
+    }
+    if (Array.isArray(input)) {
+      return { count: input.length, values: input.slice(0, 8).map((item) => describe(item, depth + 1)) };
+    }
+    if (input && typeof input === "object") {
+      return Object.fromEntries(boundedEntries(input as Record<string, unknown>).map(([key, item]) => [key, describe(item, depth + 1)]));
+    }
+    return typeof input === "string" ? input.slice(0, 256) : input;
+  };
+  const root = Array.isArray(value)
+    ? { root: "array", count: value.length, preview: describe(value, 0) }
+    : value && typeof value === "object"
+      ? {
+          root: "object",
+          count: Object.keys(value).length,
+          preview: describe(value, 0),
+          keys: boundedEntries(value as Record<string, unknown>).map(([key]) => key),
+        }
+      : { root: typeof value, value: describe(value, 0) };
+  const preview = JSON.stringify(root, null, 2);
+  const bounded = compactText(preview, policy);
+  return { ...bounded, originalChars: text.length, originalLines: countLines(text) };
+}
+
+function testPreview(text: string, policy: CompactPolicy): CompactResult | undefined {
+  const lines = text.split("\n");
+  const runner = /(?:\b(?:bun test|vitest|jest|pytest|go test)\b|\btests?\s+(?:passed|failed|skipped)\b|\bPASS\b|\bFAIL\b)/i;
+  if (!runner.test(text)) return undefined;
+  const selected = lines
+    .map((line, index) => ({ index, text: line }))
+    .filter(({ text: line }) => /(?:\bFAIL\b|\bfailed\b|\berror\b|\bpanic\b|\btests?\b|\bpass(?:ed)?\b|\bskip(?:ped)?\b|\d+\s+(?:pass|fail|skip))/i.test(line));
+  return boundedSelectedPreview(text, selected, policy);
+}
+
+function searchPreview(text: string, policy: CompactPolicy): CompactResult | undefined {
+  const lines = text.split("\n");
+  const match = /^(.*?):(\d+)(?::\d+)?:/;
+  const matches = lines.map((line, index) => ({ line, index, match: match.exec(line) })).filter((item) => item.match);
+  if (matches.length < 2) return undefined;
+  const perPath = new Map<string, number>();
+  const selected: Array<{ index: number; text: string }> = [];
+  for (const item of matches) {
+    const path = item.match![1];
+    const count = perPath.get(path) ?? 0;
+    perPath.set(path, count + 1);
+    if (count < 8) selected.push({ index: item.index, text: item.line });
+  }
+  for (const [path, count] of perPath) {
+    if (count > 8) selected.push({ index: lines.length + selected.length, text: `... omitted ${count - 8} matches from ${path} ...` });
+  }
+  return boundedSelectedPreview(text, selected, policy);
+}
+
+export function previewOutput(
+  text: string,
+  policy: CompactPolicy,
+  isError = false,
+): PreviewResult {
+  const candidates: Array<[PreviewStrategy, () => CompactResult | undefined]> = [
+    ["diagnostic", () => isError || /(?:^|\n)(?:Error|ERROR|Fatal|Exception|Traceback|panic:)/.test(text) ? diagnosticPreview(text, policy, isError) : undefined],
+    ["diff", () => diffPreview(text, policy)],
+    ["json", () => jsonPreview(text, policy)],
+    ["test", () => testPreview(text, policy)],
+    ["search", () => searchPreview(text, policy)],
+  ];
+  for (const [previewStrategy, build] of candidates) {
+    const result = build();
+    if (result) return { ...result, previewStrategy };
+  }
+  return { ...compactText(text, policy), previewStrategy: "generic" };
+}
+
 function textBlocks(content: ContentBlock[] | undefined): TextBlock[] {
   return (content ?? []).filter(
     (part): part is TextBlock =>
@@ -189,6 +384,7 @@ async function writeArtifact(args: {
   toolCallId: string;
   text: string;
   lines: number;
+  previewStrategy: PreviewStrategy;
   artifactRoot: (cwd: string) => string;
   writeText: (path: string, text: string) => Promise<void>;
   appendIndex: (path: string, line: string) => Promise<void>;
@@ -217,6 +413,9 @@ async function writeArtifact(args: {
     artifactPath,
     chars: args.text.length,
     lines: args.lines,
+    contentSha256: createHash("sha256").update(args.text, "utf8").digest("hex"),
+    bytes: Buffer.byteLength(args.text, "utf8"),
+    previewStrategy: args.previewStrategy,
   };
 
   const indexPath = join(root, "index.jsonl");
@@ -252,9 +451,10 @@ export function createOutputCompactor(options: OutputCompactorOptions = {}) {
 
       const toolName = event.toolName || "tool";
       const toolCallId = event.toolCallId || "";
-      const compact = compactText(
+      const compact = previewOutput(
         fullText,
         policyFor(config, Boolean(event.isError)),
+        Boolean(event.isError),
       );
       const artifact = await writeArtifact({
         cwd: ctx.cwd || process.cwd(),
@@ -262,6 +462,7 @@ export function createOutputCompactor(options: OutputCompactorOptions = {}) {
         toolCallId,
         text: fullText,
         lines: compact.originalLines,
+        previewStrategy: compact.previewStrategy,
         artifactRoot,
         writeText,
         appendIndex,
@@ -273,6 +474,7 @@ export function createOutputCompactor(options: OutputCompactorOptions = {}) {
         `Original: ${compact.originalLines} lines, ${compact.originalChars} chars.`,
         `Preview: ${compact.previewLines} lines, ${compact.previewChars} chars.`,
         `Full output saved; read this path if needed: ${artifact.artifactPath}`,
+        `Receipt: sha256=${artifact.contentSha256} bytes=${artifact.bytes} strategy=${artifact.previewStrategy}`,
         "",
         compact.text,
       ].join("\n");
@@ -289,6 +491,9 @@ export function createOutputCompactor(options: OutputCompactorOptions = {}) {
             originalLines: compact.originalLines,
             previewChars: compact.previewChars,
             previewLines: compact.previewLines,
+            contentSha256: artifact.contentSha256,
+            bytes: artifact.bytes,
+            previewStrategy: artifact.previewStrategy,
           },
         },
       });
