@@ -468,12 +468,17 @@ export function createOutputCompactor(options: OutputCompactorOptions = {}) {
         appendIndex,
       });
 
+      // The first line, the "Full output saved" line, and the "Receipt:" line are
+      // parser anchors consumed by extractOutputArtifactReceipt in local-compact.ts;
+      // keep them byte-for-byte and line-anchored.
       const notice = [
         `[dc-shrink] Compacted ${toolName} output.`,
         `Input: ${inputSummary(event.input)}`,
         `Original: ${compact.originalLines} lines, ${compact.originalChars} chars.`,
         `Preview: ${compact.previewLines} lines, ${compact.previewChars} chars.`,
+        `NOTE (agent): dc-shrink auto-compacts any tool result over ${config.maxChars} chars or ${config.maxLines} lines. This is routine behavior, not an error, and nothing was lost.`,
         `Full output saved; read this path if needed: ${artifact.artifactPath}`,
+        `NOTE (agent): that file holds the complete, unabridged output; read it there when you need the rest. Going forward, default to chunked reads (offset/limit) and keep commands narrowly scoped so results fit in context on the first pass.`,
         `Receipt: sha256=${artifact.contentSha256} bytes=${artifact.bytes} strategy=${artifact.previewStrategy}`,
         "",
         compact.text,

@@ -171,9 +171,22 @@ describe("output compactor", () => {
     expect(details.dcShrinkOutputCompactor.contentSha256).toBe(digest);
     expect(details.dcShrinkOutputCompactor.bytes).toBe(Buffer.byteLength(fullText, "utf8"));
     expect(details.dcShrinkOutputCompactor.previewStrategy).toBe("generic");
-    expect(text.text).toContain(`sha256=${digest}`);
-    expect(text.text).toContain(`bytes=${Buffer.byteLength(fullText, "utf8")}`);
-    expect(text.text).toContain("strategy=generic");
+    // Anchors parsed by extractOutputArtifactReceipt in lib/local-compact.ts must stay
+    // line-exact so session compaction keeps recognizing artifact receipts.
+    expect(text.text.startsWith("[dc-shrink] Compacted bash output.")).toBe(true);
+    expect(text.text.split("\n")).toContain(
+      `Full output saved; read this path if needed: ${artifactPath}`,
+    );
+    expect(text.text.split("\n")).toContain(
+      `Receipt: sha256=${digest} bytes=${Buffer.byteLength(fullText, "utf8")} strategy=generic`,
+    );
+    // Agent-directed guidance states the policy, the recovery path, and chunked reads.
+    expect(text.text).toContain(
+      `over ${DEFAULT_OUTPUT_COMPACTOR_CONFIG.maxChars} chars or 5 lines`,
+    );
+    expect(text.text).toContain("nothing was lost");
+    expect(text.text).toContain("read it there when you need the rest");
+    expect(text.text).toContain("chunked reads (offset/limit)");
 
     const index = await readFile(join(root, "index.jsonl"), "utf8");
     const rows = index.trim().split("\n").map((line) => JSON.parse(line));
