@@ -58,7 +58,7 @@ describe("dc-shrink entrypoint", () => {
 
     expect(source).not.toMatch(/Notify\.user\(\s*(?:`|"|')/);
     expect(source).toContain("compaction: runtime.compactionSettings");
-    expect(source).toContain("if (!runtime.compactionSettings.enabled) return;");
+    expect(source).toContain("if (!runtime.compactionSettings.enabled) {");
   });
 
   test("does not register compact-status as a slash command", () => {
@@ -337,7 +337,7 @@ describe("dc-shrink subagent safety", () => {
     return stub.calls.filter((call) => call.api === "ctx.compact");
   }
 
-  test("agent_settled does not autonomously compact a non-primary (subagent) session", async () => {
+  test("autonomous hooks do not compact a non-primary (subagent) session", async () => {
     const stub = createStubCtx();
     extension(stub.pi);
 
@@ -350,8 +350,7 @@ describe("dc-shrink subagent safety", () => {
     stub.ctx.sessionManager.getSessionId = () => "subagent-session-id";
     stub.cmdCtx.sessionManager.getSessionId = () => "subagent-session-id";
 
-    // Even if the monitor were over threshold, a non-primary session must
-    // never reach ctx.compact() from agent_settled.
+    await simulate.hook(stub, "turn_end", {});
     await simulate.hook(stub, "agent_settled", {});
 
     expect(compactCalls(stub).length).toBe(0);
@@ -382,13 +381,12 @@ describe("dc-shrink subagent safety", () => {
     expect(compactCalls(stub)).toEqual([]);
   });
 
-  test("turn_end stays inert and agent_settled compacts the primary session once", async () => {
+  test("turn_end compacts the primary session and agent_settled does not duplicate it", async () => {
     const stub = createStubCtx();
     extension(stub.pi);
     await simulate.hook(stub, "session_start", {});
 
-    // Consume the warmup in both the old and new lifecycle locations so this
-    // regression fails if the autonomous decision moves back to turn_end.
+    // The first completed low-level run is the startup warmup.
     await simulate.hook(stub, "turn_end", {});
     await simulate.hook(stub, "agent_settled", {});
 
@@ -399,13 +397,35 @@ describe("dc-shrink subagent safety", () => {
     });
 
     await simulate.hook(stub, "turn_end", {});
-    expect(compactCalls(stub).length).toBe(0);
-
-    await simulate.hook(stub, "agent_settled", {});
     expect(compactCalls(stub).length).toBe(1);
 
     await simulate.hook(stub, "agent_settled", {});
     expect(compactCalls(stub).length).toBe(1);
+  });
+
+  test("session_compact_failed clears an autonomous attempt for a later retry", async () => {
+    const stub = createStubCtx();
+    extension(stub.pi);
+    await simulate.hook(stub, "session_start", {});
+    await simulate.hook(stub, "agent_settled", {});
+    stub.ctx.getContextUsage = () => ({
+      tokens: 200_000,
+      contextWindow: 200_000,
+      percent: 100,
+    });
+
+    await simulate.hook(stub, "turn_end", {});
+    expect(compactCalls(stub).length).toBe(1);
+
+    await simulate.hook(stub, "session_compact_failed", {
+      reason: "threshold",
+      errorMessage: "test failure",
+      aborted: false,
+      willRetry: false,
+      fromExtension: true,
+    });
+    await simulate.hook(stub, "turn_end", {});
+    expect(compactCalls(stub).length).toBe(2);
   });
 
   test("isolates hooks, tools, commands, shutdown, and owner recovery", async () => {

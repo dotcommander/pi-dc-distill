@@ -28,11 +28,11 @@ A manual compaction leaves the next action under your control. Autonomous compac
 dc-shrink has no extension settings. At primary-session start, it reads Pi's effective global and project `compaction.enabled` and `compaction.reserveTokens`. A project `.pi/settings.json` overrides individual global keys.
 
 - Pi trigger: `contextWindow - reserveTokens`
-- Auto: `Pi trigger - 20,000`
+- Auto: `min(120,000, Pi trigger - 20,000)`
 - Warn: `Pi trigger` (Pi's native trigger line)
 - Emergency: `contextWindow`
 
-When Pi has `compaction.enabled: false`, dc-shrink's autonomous monitor stands down; manual `/compact` remains deterministic and available. A fixed 120-second cooldown and small-window floors remain internal loop-safety mechanics. Normal automatic attempts also observe warmup, latch, Pi-sync, and post-compaction-growth guards; emergency bypasses cooldown and Pi-sync.
+When Pi has `compaction.enabled: false`, dc-shrink's autonomous monitor stands down; manual `/compact` remains deterministic and available. The monitor checks at Pi's documented `turn_end` boundary, after tool results are available, and checks again at `agent_settled` as an end-of-run fallback. A fixed 120-second cooldown and small-window floors remain internal loop-safety mechanics. Normal automatic attempts also observe warmup, latch, Pi-sync, and post-compaction-growth guards; emergency bypasses cooldown and Pi-sync. When usage is already above auto but a guard blocks compaction, dc-shrink writes one reason-deduplicated `auto-check blocked` record to `~/.pi/data/dc-shrink/diag.log`.
 
 | Location | Contents |
 | --- | --- |

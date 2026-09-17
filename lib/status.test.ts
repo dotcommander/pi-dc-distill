@@ -47,6 +47,25 @@ describe("formatShrinkStatus", () => {
     expect(text).toContain("Pending metric: 99,000 -> 12,000 tokens");
   });
 
+  test("shows the fixed 120k target when larger Pi geometry permits it", () => {
+    const text = formatShrinkStatus({
+      state: state(),
+      inFlight: false,
+      warmupTurnsRemaining: 0,
+      hasPiSynced: true,
+      pendingMetric: null,
+      lastEcho: null,
+      compaction: { enabled: true, reserveTokens: 50_000 },
+      dumpEnabled: false,
+      compactorAvailable: true,
+      contextWindow: 272_000,
+      now: 200_000,
+    });
+
+    expect(text).toContain("Auto threshold: 120,000 tokens (fixed 120,000 target; Pi trigger: 272,000 window − 50,000 reserve − fixed 20,000 lead)");
+    expect(text).toContain("Warn threshold: 222,000 tokens");
+  });
+
   test("shows fallback geometry and Pi stand-down state", () => {
     const text = formatShrinkStatus({
       state: state({ lastCompactionTime: 100_000, apiTokenCount: 0 }),

@@ -150,8 +150,12 @@ file, literal, and artifact records remain exempt.
 One setup-owned `ShrinkRuntime` contains the captured Pi API, owner session ID,
 monitor, latch, warnings, pending transaction, project/session identity, and
 last failure/focus state. Stateful hooks guard ownership before reading usage or
-mutating state. Non-primary hooks are no-ops, except `session_before_compact`,
-which cancels to prevent LLM fallback. Owner shutdown clears identity so a new,
+mutating state. `turn_end` owns the in-run autonomous check because Pi emits it
+after the response and tool calls; `agent_settled` repeats the check only as an
+end-of-run fallback. The latch prevents duplicate attempts across both hooks.
+`session_compact_failed` records the terminal outcome and clears pending/latch
+state. Non-primary hooks are no-ops, except `session_before_compact`, which
+cancels to prevent LLM fallback. Owner shutdown clears identity so a new,
 resumed, or forked primary session can claim cleanly.
 
 ## Trigger Bands
@@ -162,7 +166,7 @@ settings merge.
 
 - below auto: no action
 - Pi trigger = `contextWindow - reserveTokens`
-- auto = `Pi trigger - 20,000`: Mechanical compaction
+- auto = `min(120,000, Pi trigger - 20,000)`: Mechanical compaction
 - warn = `Pi trigger`: cooperative Warn
 - emergency = `contextWindow`: unconditional Mechanical compaction
 
@@ -170,7 +174,10 @@ settings merge.
 `/compact` still enters the deterministic `session_before_compact` hook. Fixed
 small-window floors preserve ordered bands. If Pi cannot report a context
 window, legacy 100K/140K/160K fallbacks apply. Emergency bypasses cooldown and
-sync; warmup and post-compaction growth protections otherwise remain.
+sync; warmup and post-compaction growth protections otherwise remain. Above the
+auto boundary, blocked checks write one reason-deduplicated diagnostic containing
+the hook source, usage, effective thresholds, sync state, cooldown, and repeat
+baseline.
 
 ## Continuation and Focus Echo
 

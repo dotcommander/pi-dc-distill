@@ -9,16 +9,24 @@ project compaction settings at primary-session start:
 ```
 
 The project file overrides individual keys from the global file, matching Pi's
-compaction settings merge.
+compaction settings merge. Legacy `extensionConfig["dc-shrink"]` values such as
+`autoThresholdTokens` are not read; remove them rather than relying on a dead
+parallel policy.
 
 ## Trigger Policy
 
 | Pi setting | Default | dc-shrink behavior |
 | --- | ---: | --- |
 | `compaction.enabled` | `true` | When `false`, dc-shrink's autonomous monitor stands down. Manual `/compact` remains available. |
-| `compaction.reserveTokens` | `16384` | Pi trigger is `contextWindow - reserveTokens`; dc-shrink auto-compacts 20,000 tokens before it. |
+| `compaction.reserveTokens` | `16384` | Pi trigger is `contextWindow - reserveTokens`; dc-shrink stays at least 20,000 tokens before it. |
 
 `compaction.keepRecentTokens` controls Pi's retained tail at cut selection, not its trigger, so it does not change dc-shrink's 20,000-token lead.
+
+dc-shrink prefers a fixed 120,000-token auto boundary and caps it lower when
+needed to preserve that 20,000-token lead. With the active 272,000-token model
+and `reserveTokens: 50000`, Pi's native trigger remains 222,000 while dc-shrink
+auto-compacts at 120,000. With a 128,000-token model and the same reserve, the
+safe dc-shrink boundary is 58,000 (`128000 - 50000 - 20000`).
 
 Emergency compaction is the reported Pi context-window limit. It bypasses
 cooldown and Pi-sync guards. Very small windows use fixed internal floors to

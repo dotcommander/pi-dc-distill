@@ -36,6 +36,7 @@ import { buildMetricLine } from "./lib/metric.ts";
 import { Monitor } from "./lib/monitor.ts";
 import { searchRecallEntries } from "./lib/recall.ts";
 import {
+  COMPACTION_COOLDOWN_MS,
   DUMP_RETENTION,
   DEFAULT_PI_COMPACTION_SETTINGS,
   dumpsEnabled,
@@ -45,7 +46,12 @@ import {
 import { formatShrinkStatus } from "./lib/status.ts";
 import { ShrinkStore, type StoredRecallEntry } from "./lib/store.ts";
 import { hasLocalCompactor, runStrategies } from "./lib/strategy.ts";
-import { shouldCompact } from "./lib/trigger.ts";
+import {
+  evaluateCompaction,
+  resolveTriggerThresholds,
+  type CompactBlockReason,
+  type ResolvedTriggerThresholds,
+} from "./lib/trigger.ts";
 import { Tier } from "./lib/types.ts";
 import { registerOutputCompactor } from "./lib/output-compactor.ts";
 
@@ -115,6 +121,7 @@ interface ShrinkRuntime {
   lastWarnTime: number;
   lastFocusEcho: string | null;
   lastFailure: string | null;
+  lastAutoBlockReason: string | null;
   contextWindow?: number;
   compactionCardDedupe: CompactionCardDedupeHandle | null;
 }
@@ -134,12 +141,129 @@ function isOwner(runtime: ShrinkRuntime, ctx: ExtensionContext): boolean {
 function clearAttempt(runtime: ShrinkRuntime): void {
   runtime.pending = null;
   runtime.nextAttemptAutonomous = false;
+  runtime.lastAutoBlockReason = null;
   runtime.latch.release();
 }
 
 function cancellation(error: unknown): boolean {
   return error instanceof CompactionCancelledError
     || (error instanceof Error && ["AbortError", "LoaderAbortError"].includes(error.name));
+}
+
+type AutoCheckSource = "turn_end" | "agent_settled";
+
+function syncContextUsage(runtime: ShrinkRuntime, ctx: ExtensionContext): boolean {
+  try {
+    const usage = ctx.getContextUsage();
+    const piSynced = runtime.monitor.syncFromPi(usage?.tokens);
+    runtime.contextWindow = usage?.contextWindow
+      ?? ctx.model?.contextWindow
+      ?? runtime.contextWindow;
+    return piSynced || runtime.monitor.hasPiSynced;
+  } catch (error) {
+    runtime.monitor.diagnostic(
+      `auto-check context usage failed: ${error instanceof Error ? error.message : String(error)}`,
+    );
+    runtime.contextWindow = ctx.model?.contextWindow ?? runtime.contextWindow;
+    return runtime.monitor.hasPiSynced;
+  }
+}
+
+function logAutoBlock(
+  runtime: ShrinkRuntime,
+  source: AutoCheckSource,
+  reason: CompactBlockReason | "warmup" | "in-flight",
+  thresholds: ResolvedTriggerThresholds,
+  piSynced: boolean,
+): void {
+  const tokens = runtime.monitor.state.tokenEstimate;
+  if (tokens < thresholds.auto.effective) {
+    runtime.lastAutoBlockReason = null;
+    return;
+  }
+  if (runtime.lastAutoBlockReason === reason) return;
+  runtime.lastAutoBlockReason = reason;
+  const cooldownRemaining = Math.max(
+    0,
+    COMPACTION_COOLDOWN_MS - (Date.now() - runtime.monitor.state.lastCompactionTime),
+  );
+  runtime.monitor.diagnostic([
+    "auto-check blocked",
+    `reason=${reason}`,
+    `source=${source}`,
+    `tokens=${tokens}`,
+    `piSynced=${piSynced}`,
+    `contextWindow=${runtime.contextWindow ?? "unknown"}`,
+    `auto=${thresholds.auto.effective}`,
+    `warn=${thresholds.warn.effective}`,
+    `emergency=${thresholds.emergency.effective}`,
+    `cooldownMs=${cooldownRemaining}`,
+    `repeatBaseline=${runtime.monitor.state.repeatBaselineTokens ?? "none"}`,
+  ].join(" "));
+}
+
+function checkAutonomousCompaction(
+  runtime: ShrinkRuntime,
+  ctx: ExtensionContext,
+  source: AutoCheckSource,
+): void {
+  if (!isOwner(runtime, ctx)) return;
+  const piSynced = syncContextUsage(runtime, ctx);
+  const triggerOptions = {
+    contextWindow: runtime.contextWindow,
+    compaction: runtime.compactionSettings,
+  };
+  const thresholds = resolveTriggerThresholds(triggerOptions);
+
+  if (runtime.latch.held) {
+    logAutoBlock(runtime, source, "in-flight", thresholds, piSynced);
+    return;
+  }
+  if (!runtime.compactionSettings.enabled) {
+    runtime.lastAutoBlockReason = null;
+    return;
+  }
+  if (runtime.warmupTurnsRemaining > 0) {
+    logAutoBlock(runtime, source, "warmup", thresholds, piSynced);
+    if (source === "agent_settled") runtime.warmupTurnsRemaining--;
+    return;
+  }
+
+  const evaluation = evaluateCompaction(runtime.monitor.state, piSynced, triggerOptions);
+  if (!evaluation.decision) {
+    if (evaluation.blockedBy === "below-auto" || evaluation.blockedBy === "disabled") {
+      runtime.lastAutoBlockReason = null;
+    } else if (evaluation.blockedBy) {
+      logAutoBlock(runtime, source, evaluation.blockedBy, evaluation.thresholds, piSynced);
+    }
+    return;
+  }
+
+  runtime.lastAutoBlockReason = null;
+  const decision = evaluation.decision;
+  if (decision.tier === Tier.Warn) {
+    if (Date.now() - runtime.lastWarnTime < WARN_COOLDOWN_MS) return;
+    runtime.lastWarnTime = Date.now();
+    Notify.toLLM(runtime.pi, WARN_STEER_PROMPT, {
+      customType: "dc-shrink-warn",
+      details: { reason: decision.reason },
+      triggerTurn: false,
+      deliverAs: "steer",
+    });
+    return;
+  }
+  if (!runtime.latch.acquire()) return;
+  runtime.nextAttemptAutonomous = true;
+  runtime.monitor.state.lastCompactionTime = Date.now();
+  ctx.compact({
+    onError: (error: Error) => {
+      // Pi emits session_compact_failed as the terminal lifecycle event; that
+      // hook owns durable failure state and releases the latch.
+      if (!cancellation(error) && ctx.hasUI) {
+        Notify.fail(ctx, `Shrink failed: ${error.message}`);
+      }
+    },
+  });
 }
 
 function summaryTokenEstimate(summary: string): number {
@@ -230,6 +354,7 @@ function createRuntime(pi: ExtensionAPI): ShrinkRuntime {
     lastWarnTime: 0,
     lastFocusEcho: null,
     lastFailure: null,
+    lastAutoBlockReason: null,
     compactionCardDedupe: null,
   };
 }
@@ -411,7 +536,8 @@ function createExtension(pi: ExtensionAPI, options: ShrinkExtensionOptions = {})
         runtime.warmupTurnsRemaining = 1;
         runtime.lastWarnTime = 0;
         runtime.lastFocusEcho = null;
-        runtime.contextWindow = undefined;
+        runtime.lastAutoBlockReason = null;
+        runtime.contextWindow = ctx.model?.contextWindow;
         if (ctx.mode === "tui") {
           try {
             runtime.compactionCardDedupe = await (
@@ -440,54 +566,12 @@ function createExtension(pi: ExtensionAPI, options: ShrinkExtensionOptions = {})
         }
       },
 
-      agent_settled: async (_event, ctx) => {
-        if (!isOwner(runtime, ctx)) return;
-        let piSynced = false;
-        try {
-          const usage = ctx.getContextUsage();
-          if (usage) {
-            piSynced = runtime.monitor.syncFromPi(usage.tokens);
-            runtime.contextWindow = usage.contextWindow ?? ctx.model?.contextWindow;
-          }
-        } catch { /* older Pi */ }
+      turn_end: async (_event, ctx) => {
+        checkAutonomousCompaction(runtime, ctx, "turn_end");
+      },
 
-        if (runtime.latch.held) return;
-        if (!runtime.compactionSettings.enabled) return;
-        if (runtime.warmupTurnsRemaining > 0) {
-          runtime.warmupTurnsRemaining--;
-          return;
-        }
-        const decision = shouldCompact(
-          runtime.monitor.state,
-          piSynced || runtime.monitor.hasPiSynced,
-          {
-            contextWindow: runtime.contextWindow,
-            compaction: runtime.compactionSettings,
-          },
-        );
-        if (!decision) return;
-        if (decision.tier === Tier.Warn) {
-          if (Date.now() - runtime.lastWarnTime < WARN_COOLDOWN_MS) return;
-          runtime.lastWarnTime = Date.now();
-          Notify.toLLM(runtime.pi, WARN_STEER_PROMPT, {
-            customType: "dc-shrink-warn",
-            details: { reason: decision.reason },
-            triggerTurn: false,
-            deliverAs: "steer",
-          });
-          return;
-        }
-        if (!runtime.latch.acquire()) return;
-        runtime.nextAttemptAutonomous = true;
-        runtime.monitor.state.lastCompactionTime = Date.now();
-        ctx.compact({
-          onError: (error: Error) => {
-            clearAttempt(runtime);
-            if (!cancellation(error) && ctx.hasUI) {
-              Notify.fail(ctx, `Shrink failed: ${error.message}`);
-            }
-          },
-        });
+      agent_settled: async (_event, ctx) => {
+        checkAutonomousCompaction(runtime, ctx, "agent_settled");
       },
 
       session_compact: async (event, ctx) => {
@@ -574,6 +658,25 @@ function createExtension(pi: ExtensionAPI, options: ShrinkExtensionOptions = {})
         } finally {
           clearAttempt(runtime);
         }
+      },
+
+      session_compact_failed: async (event, ctx) => {
+        if (!isOwner(runtime, ctx)) return;
+        if (!runtime.pending && !runtime.latch.held) return;
+        const outcome = event.aborted ? "aborted" : "failed";
+        const detail = event.errorMessage ?? "no error message";
+        runtime.monitor.diagnostic([
+          `compaction ${outcome}`,
+          `reason=${event.reason}`,
+          `fromExtension=${event.fromExtension}`,
+          `willRetry=${event.willRetry}`,
+          `detail=${detail}`,
+        ].join(" "));
+        if (!event.aborted) {
+          runtime.lastFailure = `Compaction ${outcome} (${event.reason}): ${detail}`;
+          await runtime.store?.appendFailure([runtime.lastFailure]);
+        }
+        clearAttempt(runtime);
       },
     },
 

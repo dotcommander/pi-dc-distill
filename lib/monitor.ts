@@ -125,10 +125,14 @@ export class Monitor {
     this.state.awaitingPostCompactionSample = true
   }
 
-  /** Diagnostic: append to ~/.pi/data/dc-shrink/diag.log for debugging event delivery */
+  /** Diagnostic: append to ~/.pi/data/dc-shrink/diag.log for debugging event delivery. */
+  diagnostic(msg: string): void {
+    this._diagLog(msg)
+  }
+
   private _dirEnsured = false
 
-  _diagLog(msg: string): void {
+  private _diagLog(msg: string): void {
     try {
     const dir = Path.data("dc-shrink").path
     if (!this._dirEnsured) {

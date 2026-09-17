@@ -111,6 +111,8 @@ released in `finally`.
 
 Session replacement, shutdown, autonomous errors, cancellation, foreign
 compaction, mismatches, and duplicate events cannot create success artifacts.
+`session_compact_failed` records the terminal outcome and releases pending/latch
+state so an aborted host attempt cannot disable later autonomous checks.
 
 ## Trigger Policy
 
@@ -119,7 +121,7 @@ project `compaction` settings at primary-session start:
 
 | Band | Pi-derived boundary | Action |
 | --- | --- | --- |
-| Auto | `(contextWindow - reserveTokens) - 20,000` | Mechanical compaction through warn-minus-one. |
+| Auto | `min(120,000, (contextWindow - reserveTokens) - 20,000)` | Mechanical compaction through warn-minus-one. |
 | Warn | `contextWindow - reserveTokens` | Pi's native trigger line; cooperative warning through emergency-minus-one. |
 | Emergency | `contextWindow` | Unconditional Mechanical compaction. |
 
@@ -127,8 +129,9 @@ project `compaction` settings at primary-session start:
 `/compact` remains available. Fixed small-window floors preserve ordered bands,
 and 100K/140K/160K are legacy fallbacks only when Pi cannot report a context
 window. Cooldown, post-compaction growth, Pi-sync, and warmup guards still
-apply. Emergency bypasses cooldown and sync. `/compact-status` reports Pi's
-inputs and the resolved boundaries.
+apply. Emergency bypasses cooldown and sync. The 120,000-token target is fixed
+policy, not extension configuration; smaller contexts are capped by Pi's safe
+geometry. `/compact-status` reports Pi's inputs and the resolved boundaries.
 
 ## Recall, Dumps, and Migration
 

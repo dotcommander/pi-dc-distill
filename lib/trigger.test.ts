@@ -1,5 +1,6 @@
 import { describe, expect, test } from "bun:test";
 import {
+  evaluateCompaction,
   resolveTriggerThresholds,
   shouldCompact,
   validateTriggerGeometry,
@@ -33,28 +34,37 @@ const pi = {
 };
 
 describe("resolveTriggerThresholds", () => {
-  test("compacts 20k before Pi's reserve-derived trigger", () => {
+  test("uses the fixed 120k target when Pi's safety geometry allows it", () => {
     expect(resolveTriggerThresholds({ contextWindow: 200_000, compaction: pi })).toEqual({
-      auto: { effective: 163_616, source: "pi-derived" },
+      auto: { effective: 120_000, source: "policy-capped" },
       warn: { effective: 183_616, source: "pi-derived" },
       emergency: { effective: 200_000, source: "pi-derived" },
     });
   });
 
-  test("keeps the fixed 20k lead when Pi's reserve changes", () => {
+  test("keeps the fixed target when Pi's reserve changes without constraining it", () => {
     const thresholds = resolveTriggerThresholds({
       contextWindow: 200_000,
       compaction: { ...pi, reserveTokens: 24_000 },
     });
-    expect(thresholds.auto.effective).toBe(156_000);
+    expect(thresholds.auto).toEqual({ effective: 120_000, source: "policy-capped" });
     expect(thresholds.warn.effective).toBe(176_000);
   });
 
   test("uses Pi geometry for a 128k context", () => {
     const thresholds = resolveTriggerThresholds({ contextWindow: 128_000, compaction: pi });
-    expect(thresholds.auto.effective).toBe(91_616);
+    expect(thresholds.auto).toEqual({ effective: 91_616, source: "pi-derived" });
     expect(thresholds.warn.effective).toBe(111_616);
     expect(thresholds.emergency.effective).toBe(128_000);
+  });
+
+  test("keeps a 128k model safe with the global 50k reserve", () => {
+    const thresholds = resolveTriggerThresholds({
+      contextWindow: 128_000,
+      compaction: { ...pi, reserveTokens: 50_000 },
+    });
+    expect(thresholds.auto).toEqual({ effective: 58_000, source: "pi-derived" });
+    expect(thresholds.warn.effective).toBe(78_000);
   });
 
   test("keeps ordered small-window thresholds with fixed safety floors", () => {
@@ -81,10 +91,10 @@ describe("shouldCompact", () => {
     expect(shouldCompact(atTokens(140_000))?.tier).toBe(Tier.Warn);
   });
 
-  test("fires mechanical at the Pi-derived auto threshold", () => {
+  test("fires mechanical at the fixed auto target", () => {
     const options = { contextWindow: 200_000, compaction: pi };
-    expect(shouldCompact(atTokens(163_615), true, options)).toBeNull();
-    expect(shouldCompact(atTokens(163_616), true, options)?.tier).toBe(Tier.Mechanical);
+    expect(shouldCompact(atTokens(119_999), true, options)).toBeNull();
+    expect(shouldCompact(atTokens(120_000), true, options)?.tier).toBe(Tier.Mechanical);
   });
 
   test("warns at Pi's own native trigger line", () => {
@@ -106,17 +116,25 @@ describe("shouldCompact", () => {
     })).toBeNull();
   });
 
-  test("does not fire before Pi sync outside the emergency band", () => {
-    expect(shouldCompact(atTokens(170_000), false, {
+  test("reports missing Pi sync when an auto-threshold trigger is blocked", () => {
+    const evaluation = evaluateCompaction(atTokens(170_000), false, {
       contextWindow: 200_000,
       compaction: pi,
-    })).toBeNull();
+    });
+    expect(evaluation.decision).toBeNull();
+    expect(evaluation.blockedBy).toBe("missing-pi-sync");
+    expect(evaluation.thresholds.auto.effective).toBe(120_000);
   });
 
-  test("honors cooldown before warning or mechanical compaction", () => {
+  test("reports cooldown when an auto-threshold trigger is blocked", () => {
     const options = { contextWindow: 200_000, compaction: pi };
-    expect(shouldCompact(atTokens(170_000, { lastCompactionTime: Date.now() }), true, options))
-      .toBeNull();
+    const evaluation = evaluateCompaction(
+      atTokens(170_000, { lastCompactionTime: Date.now() }),
+      true,
+      options,
+    );
+    expect(evaluation.decision).toBeNull();
+    expect(evaluation.blockedBy).toBe("cooldown");
   });
 
   test("requires new growth after a post-compaction sample", () => {

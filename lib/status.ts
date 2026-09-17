@@ -8,6 +8,7 @@ import {
   type PiCompactionSettings,
 } from "./settings.ts";
 import {
+  AUTO_TARGET_TOKENS,
   resolveTriggerThresholds,
   SHRINK_LEAD_TOKENS,
   type ResolvedThreshold,
@@ -98,7 +99,10 @@ function formatThreshold(
 
   const window = formatTokens(contextWindow!);
   if (band === "auto") {
-    return `${formatTokens(threshold.effective)} tokens (Pi trigger: ${window} window − ${formatTokens(compaction.reserveTokens)} reserve − fixed ${formatTokens(SHRINK_LEAD_TOKENS)} lead)`;
+    const geometry = `Pi trigger: ${window} window − ${formatTokens(compaction.reserveTokens)} reserve − fixed ${formatTokens(SHRINK_LEAD_TOKENS)} lead`;
+    return threshold.source === "policy-capped"
+      ? `${formatTokens(threshold.effective)} tokens (fixed ${formatTokens(AUTO_TARGET_TOKENS)} target; ${geometry})`
+      : `${formatTokens(threshold.effective)} tokens (${geometry})`;
   }
   if (band === "warn") {
     return `${formatTokens(threshold.effective)} tokens (Pi: ${window} window − ${formatTokens(compaction.reserveTokens)} reserve)`;

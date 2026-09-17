@@ -16,7 +16,7 @@ failure/focus echo.
 | --- | --- | --- |
 | Manual `/compact` appears to do nothing | Pi found no eligible discarded context, another attempt owns the latch, or deterministic compilation cancelled. | Run `/compact-status` and inspect the failure log. |
 | `/compact status` compacted the session | Pi treats `status` as focus text. | Use `/compact-status`. |
-| Autonomous compaction does not fire at auto | Pi disabled auto-compaction, warmup, cooldown, missing Pi sync, or repeat-growth guard. | Check Pi auto-compaction and the resolved auto boundary in `/compact-status`. |
+| Autonomous compaction does not fire at auto | Pi disabled auto-compaction, warmup, cooldown, missing Pi sync, repeat-growth guard, or an in-flight attempt. | Check `/compact-status`, then inspect the latest `auto-check blocked` line in `diag.log`; it records the exact guard and effective geometry. |
 | A cooperative warning appears | The context reached Pi's `contextWindow - reserveTokens` line. | Finish the atomic unit; compaction becomes unconditional at the context limit. |
 | Compaction fires at emergency despite cooldown | Emergency bypasses cooldown and sync by design. | Investigate why earlier Mechanical compaction did not reduce context. |
 | Summary lacks retained-tail content | Retained content is deliberately excluded from the discarded-input summary and remains in rebuilt context. | Inspect rebuilt context rather than expecting duplication in the summary. |
@@ -38,7 +38,10 @@ tail -n 20 ~/.pi/data/dc-shrink/compact-log.jsonl
 Failure entries contain `kind: "failure"` and reasons. Committed success entries
 distinguish rebuilt-message after tokens from optional post-hook full-context
 tokens and record the token source. A prepared but uncommitted attempt produces
-no success entry.
+no success entry. Autonomous checks blocked above the auto boundary are written
+to `~/.pi/data/dc-shrink/diag.log` once per changing reason. Terminal
+`session_compact_failed` events are also recorded there and release stale
+pending/latch state.
 
 ## Dumps
 

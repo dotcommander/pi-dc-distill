@@ -37,11 +37,13 @@ notification.
 
 ## Autonomous Compaction
 
-At `agent_settled`, after the active turn is fully idle, dc-shrink derives
-boundaries from Pi's effective `compaction` settings:
+At Pi's documented `turn_end` boundary, after the response and its tool calls,
+dc-shrink derives boundaries from Pi's effective `compaction` settings and can
+compact before the next assistant turn. It checks again at `agent_settled` as
+an end-of-run fallback:
 
 - Pi trigger: `contextWindow - reserveTokens`
-- auto: `Pi trigger - 20,000` → Mechanical compaction
+- auto: `min(120,000, Pi trigger - 20,000)` → Mechanical compaction
 - warn: `Pi trigger` → cooperative Warn
 - emergency: `contextWindow` → Mechanical compaction regardless of cooldown or Pi sync
 
@@ -49,7 +51,9 @@ If Pi has `compaction.enabled: false`, the autonomous monitor stands down;
 manual `/compact` remains available. Fixed small-window floors and legacy
 100K/140K/160K fallbacks cover degenerate or unavailable context windows.
 Warmup, latch, cooldown, post-compaction growth, and Pi-sync guards protect
-normal autonomous attempts.
+normal autonomous attempts. If usage is above auto while a guard blocks the
+attempt, `~/.pi/data/dc-shrink/diag.log` records a reason-deduplicated
+`auto-check blocked` line with the effective thresholds and current usage.
 
 After Pi appends a matching autonomous compaction, dc-shrink may queue a hidden
 `dc-shrink-continuation` turn if the session is idle. It does not render as user
