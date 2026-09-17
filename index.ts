@@ -150,7 +150,7 @@ function cancellation(error: unknown): boolean {
     || (error instanceof Error && ["AbortError", "LoaderAbortError"].includes(error.name));
 }
 
-type AutoCheckSource = "turn_end" | "agent_settled";
+type AutoCheckSource = "agent_settled";
 
 function syncContextUsage(runtime: ShrinkRuntime, ctx: ExtensionContext): boolean {
   try {
@@ -564,10 +564,6 @@ function createExtension(pi: ExtensionAPI, options: ShrinkExtensionOptions = {})
         if (event.message.role === "assistant" && "usage" in event.message) {
           runtime.monitor.recordApiUsage((event.message as { usage?: ApiUsage }).usage);
         }
-      },
-
-      turn_end: async (_event, ctx) => {
-        checkAutonomousCompaction(runtime, ctx, "turn_end");
       },
 
       agent_settled: async (_event, ctx) => {

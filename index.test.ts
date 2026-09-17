@@ -381,7 +381,7 @@ describe("dc-shrink subagent safety", () => {
     expect(compactCalls(stub)).toEqual([]);
   });
 
-  test("turn_end compacts the primary session and agent_settled does not duplicate it", async () => {
+  test("waits for agent_settled before compacting the primary session", async () => {
     const stub = createStubCtx();
     extension(stub.pi);
     await simulate.hook(stub, "session_start", {});
@@ -397,7 +397,7 @@ describe("dc-shrink subagent safety", () => {
     });
 
     await simulate.hook(stub, "turn_end", {});
-    expect(compactCalls(stub).length).toBe(1);
+    expect(compactCalls(stub).length).toBe(0);
 
     await simulate.hook(stub, "agent_settled", {});
     expect(compactCalls(stub).length).toBe(1);
@@ -414,7 +414,7 @@ describe("dc-shrink subagent safety", () => {
       percent: 100,
     });
 
-    await simulate.hook(stub, "turn_end", {});
+    await simulate.hook(stub, "agent_settled", {});
     expect(compactCalls(stub).length).toBe(1);
 
     await simulate.hook(stub, "session_compact_failed", {
@@ -424,7 +424,7 @@ describe("dc-shrink subagent safety", () => {
       willRetry: false,
       fromExtension: true,
     });
-    await simulate.hook(stub, "turn_end", {});
+    await simulate.hook(stub, "agent_settled", {});
     expect(compactCalls(stub).length).toBe(2);
   });
 
