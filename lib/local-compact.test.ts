@@ -168,6 +168,26 @@ describe("compileSessionJsonl", () => {
     expect(summary).toContain("bun  test lib/parser.test.ts");
   });
 
+  test("verification and resume-task lines keep exact command bytes (no entity escaping)", () => {
+    const mk = (command: string) =>
+      compileSessionJsonl([
+        sessionLine,
+        userMsg("test it"),
+        toolCall("bash", { command }),
+        toolResult("bash", "12 pass, 0 failed"),
+      ].join("\n")).summary;
+
+    // <verification> is byte-exact: runner + command bytes are contractual.
+    const exact = mk("bun test lib/ 2>&1 | tail -3 && git diff --check");
+    expect(exact).toContain("PASS [bash cwd=/tmp/proj]: bun test lib/ 2>&1 | tail -3 && git diff --check");
+    expect(exact).not.toContain("&amp;");
+
+    // Marker blocks keep `&&` verbatim; only < and > are entity-escaped.
+    const resumed = mk("bun test lib/ && git diff --check");
+    expect(resumed).toContain("Verify: bun test lib/ && git diff --check");
+    expect(resumed).not.toContain("&amp;");
+  });
+
   test("keeps prior verification identities separate across working directories", () => {
     const prior = [
       "<verification>",
@@ -876,5 +896,89 @@ describe("compileSessionJsonl literal anchors", () => {
     const result = compileSessionJsonl(lines.join("\n"));
     expect(result.summary).toContain(`artifact: ${artifactPath}`);
     expect(result.summary).toContain(`sha256=${digest} bytes=10000 strategy=diagnostic`);
+  });
+
+  test("U1: budget cascade continues to lower tiers when recent tool results contain only protected receipts", () => {
+    const digest = "b".repeat(64);
+    const artifactPath = "/tmp/project/.pi/dc-shrink/tool-output/000002-bash.txt";
+    const receipt = [
+      "[dc-shrink] Compacted bash output.",
+      `Full output saved; read this path if needed: ${artifactPath}`,
+      `Receipt: sha256=${digest} bytes=12000 strategy=diagnostic`,
+      "tail error info",
+    ].join("\n");
+
+    const lines = [sessionLine, userMsg("overflow test")];
+    lines.push(toolCall("bash", { command: "artifact-cmd" }));
+    lines.push(toolResult("bash", receipt));
+    for (let i = 0; i < 70; i++) {
+      lines.push(userMsg(`## Section ${i}\n` + `item_${i} token_val_${i}=123 /path/to/source/file_${i}.ts `.repeat(10)));
+    }
+    const result = compileSessionJsonl(lines.join("\n"));
+    expect(result.summary).toContain("<summary-omissions>");
+    expect(result.summary).toContain(`artifact: ${artifactPath}`);
+  });
+
+  test("U2: consecutive identical tool errors fold into occurrence count (xN)", () => {
+    const lines = [sessionLine, userMsg("trigger repeat errors")];
+    for (let i = 0; i < 4; i++) {
+      lines.push(toolCall("read", { path: "src/locked.ts" }));
+      lines.push(toolResult("read", "dc-model-router: code mutation blocked", true));
+    }
+    const result = compileSessionJsonl(lines.join("\n"));
+    expect(result.summary).toContain("read [ERROR]: [target: src/locked.ts] dc-model-router: code mutation blocked (x4)");
+  });
+
+  test("U2: error folding resets on intervening conversation turn or non-error result", () => {
+    const lines = [
+      sessionLine,
+      userMsg("run 1"),
+      toolCall("read", { path: "src/a.ts" }),
+      toolResult("read", "mutation blocked", true),
+      toolCall("read", { path: "src/a.ts" }),
+      toolResult("read", "mutation blocked", true),
+      userMsg("intervening user message"),
+      toolCall("read", { path: "src/a.ts" }),
+      toolResult("read", "mutation blocked", true),
+    ];
+    const result = compileSessionJsonl(lines.join("\n"));
+    const toolResults = result.summary.match(/<recent-tool-results>[\s\S]*?<\/recent-tool-results>/)?.[0] ?? "";
+    expect(toolResults).toContain("read [ERROR]: [target: src/a.ts] mutation blocked (x2)");
+    expect(toolResults).toContain("read [ERROR]: [target: src/a.ts] mutation blocked");
+    expect(toolResults).not.toContain("(x3)");
+  });
+
+  test("U4: milestone and completion turns are protected from recency pruning", () => {
+    const lines = [sessionLine, userMsg("implement phase")];
+    for (let i = 0; i < 25; i++) {
+      lines.push(assistantMsg(`Ordinary procedural step ${i}: ${"checking status ".repeat(50)}`));
+    }
+    const milestone = assistantMsg("Phase 2 is implemented.\n\n### Verification\n- Passed: 28/28 tests.\n- Cleaned: disposable cluster.");
+    lines.push(milestone);
+    lines.push(assistantMsg("Next choice: Implement Phase 3."));
+
+    const result = compileSessionJsonl(lines.join("\n"));
+    expect(result.summary).toContain("Phase 2 is implemented");
+    expect(result.summary).toContain("Passed: 28/28 tests");
+  });
+
+  test("U5: filters bookkeeping pairs while preserving valid config and issue anchors", () => {
+    const lines = [
+      sessionLine,
+      userMsg("status update: in-progress: 0, open: 0, blocked: 0, done: 0, tools: 27, Use offset=521 to continue"),
+      userMsg("valid config: port: 5432, timeout: 30, retries: 0, issue=4921"),
+    ];
+    const result = compileSessionJsonl(lines.join("\n"));
+    const anchors = literalBlock(result.summary);
+    expect(anchors).not.toContain("in-progress: 0");
+    expect(anchors).not.toContain("open: 0");
+    expect(anchors).not.toContain("blocked: 0");
+    expect(anchors).not.toContain("done: 0");
+    expect(anchors).not.toContain("tools: 27");
+    expect(anchors).not.toContain("offset=521");
+    expect(anchors).toContain("port: 5432");
+    expect(anchors).toContain("timeout: 30");
+    expect(anchors).toContain("retries: 0");
+    expect(anchors).toContain("issue=4921");
   });
 });

@@ -59,6 +59,7 @@ interface ToolResultEntry {
   text: string;
   isError: boolean;
   artifactReceipt?: boolean;
+  count?: number;
 }
 
 interface SessionMeta {
@@ -616,6 +617,11 @@ function addMarkerLine(set: OrderedSet, line: string): void {
   if (normalized) set.add(sliceU16(normalized, 180));
 }
 
+function addExactMarkerLine(set: OrderedSet, line: string, limit = 512): void {
+  const sanitized = sanitize(line).trim();
+  if (sanitized) set.add(sliceU16(sanitized, limit));
+}
+
 function limitedSetSlice(set: OrderedSet, limit: number, label: string): string[] {
   const values = set.slice();
   if (values.length <= limit) return values;
@@ -891,6 +897,22 @@ interface LiteralAnchorCandidate {
   kind: "uuid" | "long-hex" | "short-hex" | "path" | "issue" | "pair";
 }
 
+function isBookkeepingPair(value: string, fullText: string, matchIndex: number): boolean {
+  const norm = value.trim().toLowerCase();
+  if (/^(?:in-progress|open|blocked|done|tools):\s*\d+$/i.test(norm)) {
+    return true;
+  }
+  if (/^offset=\d+$/i.test(norm)) {
+    const windowStart = Math.max(0, matchIndex - 40);
+    const windowEnd = Math.min(fullText.length, matchIndex + value.length + 40);
+    const windowText = fullText.slice(windowStart, windowEnd);
+    if (/use\s+offset=|offset=\d+\s+to\s+continue/i.test(windowText)) {
+      return true;
+    }
+  }
+  return false;
+}
+
 function literalAnchorCandidates(text: string): LiteralAnchorCandidate[] {
   const candidates: LiteralAnchorCandidate[] = [];
   for (const [kind, re] of [
@@ -904,6 +926,9 @@ function literalAnchorCandidates(text: string): LiteralAnchorCandidate[] {
     re.lastIndex = 0;
     for (const match of text.matchAll(re)) {
       const index = match.index ?? 0;
+      if (kind === "pair" && isBookkeepingPair(match[0], text, index)) {
+        continue;
+      }
       candidates.push({ value: match[0], index, end: index + match[0].length, kind });
     }
   }
@@ -1042,8 +1067,13 @@ function isSubstantive(signals: Signals): boolean {
   return signalScore(signals) >= 3;
 }
 
+function isCompletionReport(text: string): boolean {
+  return /(?:<!--\s*EXECUTION:\s*COMPLETE\s*-->|Phase\s+\d+\s+is\s+implemented|\b(?:all\s+tests\s+passed|is\s+implemented|tasks?\s+completed)\b)/i.test(text);
+}
+
 function isRecencyExemptTurn(text: string, signals = extractSignals(text)): boolean {
   return signals.hasDiff || signals.hasErrDiag || signals.hasFilePath ||
+    isCompletionReport(text) ||
     /(?:<resume-state>|<verification>|sha256=[a-f0-9]{64}|Full output saved;|artifactPath|`[^`]+`)/i.test(text);
 }
 
@@ -1404,7 +1434,7 @@ function compactAssistantTurns(turns: ConversationTurn[], toolAdj: ToolAdjacent[
 
   for (const item of scored) {
     if (item.drop) continue;
-    if (item.turn.role !== "assistant" || isSubstantive(item.signals) || item.keep) {
+    if (item.turn.role !== "assistant" || isSubstantive(item.signals) || item.keep || isCompletionReport(item.turn.text)) {
       flush();
       result.push(item.turn);
       continue;
@@ -1450,7 +1480,7 @@ function buildResumeTasks(input: {
   const gate = verificationLines.find((line) => /^(?:FAIL|INCOMPLETE|BLOCKED)\b/.test(line))
     ?? verificationLines.at(-1);
   const verify = gate ? verificationCommand(gate) : "";
-  if (verify) addMarkerLine(out, `Verify: ${verify}`);
+  if (verify) addExactMarkerLine(out, `Verify: ${verify}`, 512);
   const activeBases = new Set(activeFiles.map(recallQueryFromAnchor));
   const querySources = [
     ...input.sourceAnchors.map(recallQueryFromAnchor),
@@ -1526,6 +1556,7 @@ function collectConversationToolResult(
   omittedRecentResults: number,
   sessionCwd: string | undefined,
   mutationEpoch: number,
+  lastErrorRun?: { current?: ToolResultEntry },
 ): { pendingError: boolean; omittedErrorResults: number; omittedRecentResults: number; mutationEpoch: number } {
   const text = (block.text ?? "").trim();
   const { call, matched } = popPendingToolCall(pendingCalls, block.name ?? "", block.callId);
@@ -1558,22 +1589,33 @@ function collectConversationToolResult(
 
   const artifactReceipt = extractOutputArtifactReceipt(text);
   const target = path ? `[target: ${path}] ` : "";
-  const entry = {
+  const entry: ToolResultEntry = {
     toolName: block.name ?? "",
     text: artifactReceipt ?? sliceU16(`${target}${text}`, isError ? 500 : 300),
     isError,
     artifactReceipt: Boolean(artifactReceipt),
+    count: 1,
   };
   if (entry.isError) {
     if (HARNESS_ERROR_SKIP.some((needle) => text.includes(needle))) {
       return { pendingError: true, omittedErrorResults, omittedRecentResults, mutationEpoch };
     }
-    errorResults.push(entry);
-    if (errorResults.length > 10) {
-      errorResults.shift();
-      omittedErrorResults += 1;
+    if (
+      lastErrorRun?.current &&
+      lastErrorRun.current.toolName === entry.toolName &&
+      lastErrorRun.current.text === entry.text
+    ) {
+      lastErrorRun.current.count = (lastErrorRun.current.count ?? 1) + 1;
+    } else {
+      errorResults.push(entry);
+      if (lastErrorRun) lastErrorRun.current = entry;
+      if (errorResults.length > 10) {
+        errorResults.shift();
+        omittedErrorResults += 1;
+      }
     }
   } else {
+    if (lastErrorRun) lastErrorRun.current = undefined;
     recentResults.push(entry);
     if (recentResults.length > 15) {
       const removable = recentResults.findIndex((result) => !result.artifactReceipt);
@@ -1634,6 +1676,7 @@ function extractConversation(blocks: NormalizedBlock[], sessionCwd?: string): Co
   let pendingFiles: string[] = [];
   let pendingError = false;
   let mutationEpoch = 0;
+  const lastErrorRun: { current?: ToolResultEntry } = {};
 
   for (const block of blocks) {
     if (block.kind === KIND_TOOL_CALL) {
@@ -1666,6 +1709,7 @@ function extractConversation(blocks: NormalizedBlock[], sessionCwd?: string): Co
         omittedRecentResults,
         sessionCwd,
         mutationEpoch,
+        lastErrorRun,
       );
       if (collected.pendingError) pendingError = true;
       omittedErrorResults = collected.omittedErrorResults;
@@ -1676,6 +1720,7 @@ function extractConversation(blocks: NormalizedBlock[], sessionCwd?: string): Co
 
     if (block.kind === KIND_THINKING || block.kind === KIND_COMPACTION) continue;
     if (block.kind === KIND_USER || block.kind === KIND_ASSISTANT || block.kind === KIND_BARD) {
+      lastErrorRun.current = undefined;
       const recorded = collectConversationTurn(
         block as NormalizedBlock & { kind: "user" | "assistant" | "bard" },
         sourceAnchors,
@@ -1733,9 +1778,12 @@ function extractConversation(blocks: NormalizedBlock[], sessionCwd?: string): Co
   let finalTurns = turns;
   let totalChars = finalTurns.reduce((sum, turn) => sum + turn.text.length, 0);
   while (finalTurns.length > 0 && totalChars > 16_000) {
+    const latestSubstantiveIdx = finalTurns.findLastIndex(
+      (t) => t.role === "assistant" && (isCompletionReport(t.text) || isSubstantive(extractSignals(t.text))),
+    );
     const candidates = finalTurns
       .map((turn, index) => ({ turn, index, score: signalScore(extractSignals(turn.text)) }))
-      .filter(({ turn }) => !isRecencyExemptTurn(turn.text));
+      .filter(({ turn, index }) => !isRecencyExemptTurn(turn.text) && index !== latestSubstantiveIdx);
     if (candidates.length === 0) break;
     candidates.sort((a, b) => a.score - b.score || a.index - b.index);
     const remove = candidates[0].index;
@@ -1792,19 +1840,22 @@ function extractConversation(blocks: NormalizedBlock[], sessionCwd?: string): Co
   };
 }
 
+// `&` is never entity-escaped in summary lines: `&` cannot forge a marker, and
+// escaping it corrupts exact shell bytes (`&&`, URLs) in receipts and commands.
+// `<`/`>` stay escaped except where exact command bytes are contractual.
 function escapeResumeLine(line: string): string {
-  return sanitize(line).trim().split(/\s+/).filter(Boolean).join(" ").replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
+  return sanitize(line).trim().split(/\s+/).filter(Boolean).join(" ").replace(/</g, "&lt;").replace(/>/g, "&gt;");
 }
 
 function markerBlock(name: string, lines: string[]): string {
-  const escaped = lines.map(escapeResumeLine).filter(Boolean);
+  const escaped = lines.map((line) => sanitize(line).trim().replace(/</g, "&lt;").replace(/>/g, "&gt;")).filter(Boolean);
   return escaped.length > 0 ? [`<${name}>`, ...escaped, `</${name}>`].join("\n") : "";
 }
 
+// Verification identity is exact runner, command bytes: emit lines verbatim
+// after sanitize() (ANSI/control-char stripping) and outer trim only.
 function exactLineMarkerBlock(name: string, lines: string[]): string {
-  const escaped = lines
-    .map((line) => sanitize(line).trim().replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;"))
-    .filter(Boolean);
+  const escaped = lines.map((line) => sanitize(line).trim()).filter(Boolean);
   return escaped.length > 0 ? [`<${name}>`, ...escaped, `</${name}>`].join("\n") : "";
 }
 
@@ -1908,7 +1959,10 @@ function formatRecentToolResults(results: ToolResultEntry[]): string {
   if (results.length === 0) return "";
   return [
     "<recent-tool-results>",
-    ...results.map((result) => escapeAngles(`${result.toolName}${result.isError ? " [ERROR]" : ""}: ${result.text.replace(/\n/g, " ").split(/\s+/).filter(Boolean).join(" ")}`)),
+    ...results.map((result) => {
+      const countSuffix = (result.count ?? 1) > 1 ? ` (x${result.count})` : "";
+      return escapeAngles(`${result.toolName}${result.isError ? " [ERROR]" : ""}: ${result.text.replace(/\n/g, " ").split(/\s+/).filter(Boolean).join(" ")}${countSuffix}`);
+    }),
     "</recent-tool-results>",
   ].join("\n");
 }
@@ -2122,9 +2176,8 @@ function enforceOperatingBudget(
   const target = TARGET_RESUME_SUMMARY_CODE_POINTS - 1_024;
   let guard = 0;
   while (Array.from(formatSummary(meta, conv, userFocus)).length > target && guard++ < 1_000) {
-    if (conv.recentToolResults.length > 0) {
+    if (conv.recentToolResults.length > 0 && conv.recentToolResults.some((result) => !result.artifactReceipt)) {
       const removable = conv.recentToolResults.findIndex((result) => !result.artifactReceipt);
-      if (removable < 0) break;
       conv.recentToolResults.splice(removable, 1);
       note("recent tool results");
     } else if (conv.sourceAnchors.length > 0) {
@@ -2140,13 +2193,31 @@ function enforceOperatingBudget(
       conv.activeTasks.shift();
       note("active tasks");
     } else if (conv.turns.length > 1) {
+      const latestSubstantiveIdx = conv.turns.findLastIndex(
+        (t) => t.role === "assistant" && (isCompletionReport(t.text) || isSubstantive(extractSignals(t.text))),
+      );
       const candidates = conv.turns
         .map((turn, index) => ({ turn, index, score: signalScore(extractSignals(turn.text)) }))
-        .filter(({ turn }) => !isRecencyExemptTurn(turn.text));
-      if (candidates.length === 0) break;
-      candidates.sort((a, b) => a.score - b.score || a.index - b.index);
-      conv.turns.splice(candidates[0].index, 1);
-      note("conversation turns");
+        .filter(({ turn, index }) => !isRecencyExemptTurn(turn.text) && index !== latestSubstantiveIdx);
+      if (candidates.length > 0) {
+        candidates.sort((a, b) => a.score - b.score || a.index - b.index);
+        conv.turns.splice(candidates[0].index, 1);
+        note("conversation turns");
+      } else if (conv.readFiles.length > 0) {
+        conv.readFiles.shift();
+        conv.omittedReadFiles += 1;
+      } else if (conv.modifiedFiles.length > 0) {
+        conv.modifiedFiles.shift();
+        conv.omittedModifiedFiles += 1;
+      } else if (conv.workingTree.length > 1) {
+        conv.workingTree.shift();
+        note("working-tree receipts");
+      } else if (conv.verification.length > 1) {
+        conv.verification.shift();
+        note("verification receipts");
+      } else {
+        break;
+      }
     } else if (conv.readFiles.length > 0) {
       conv.readFiles.shift();
       conv.omittedReadFiles += 1;
@@ -2164,8 +2235,12 @@ function enforceOperatingBudget(
     }
     refreshResume();
   }
-  conv.budgetOmissions = [...omitted.entries()].map(([label, count]) =>
+  const omissions = [...omitted.entries()].map(([label, count]) =>
     `${count} ${label} omitted for the ${TARGET_RESUME_SUMMARY_CODE_POINTS.toLocaleString()}-code-point operating target`);
+  if (Array.from(formatSummary(meta, conv, userFocus)).length > target) {
+    omissions.push("protected-content overflow; operating target exceeded");
+  }
+  conv.budgetOmissions = omissions;
 }
 
 export function compileSessionJsonl(content: string, userFocus?: string, signal?: AbortSignal): LocalCompileResult {
