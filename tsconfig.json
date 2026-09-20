@@ -10,7 +10,7 @@
     "skipLibCheck": true,
     "esModuleInterop": true,
     "isolatedModules": true,
-    "lib": ["ES2022", "DOM"],
+    "lib": ["ES2023", "DOM"],
     "types": ["node", "bun"],
     "typeRoots": ["./node_modules/@types"],
     "paths": {
