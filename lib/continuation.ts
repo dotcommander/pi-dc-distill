@@ -16,12 +16,22 @@ export function queueAutonomousContinuation(
   ctx: ExtensionContext,
 ): boolean {
   if (!pi) return false;
-  if (!(ctx.isIdle?.() ?? true)) return false;
+  try {
+    if (!(ctx.isIdle?.() ?? true)) return false;
 
-  Notify.toLLM(pi, SHRINK_CONTINUATION_PROMPT, {
-    customType: SHRINK_CONTINUATION_MESSAGE_TYPE,
-    details: { reason: "autonomous_compaction" },
-    triggerTurn: true,
-  });
-  return true;
+    Notify.toLLM(pi, SHRINK_CONTINUATION_PROMPT, {
+      customType: SHRINK_CONTINUATION_MESSAGE_TYPE,
+      details: { reason: "autonomous_compaction" },
+      triggerTurn: true,
+    });
+    return true;
+  } catch {
+    // The captured pi/ctx can go stale when another extension replaces or
+    // reloads the session (newSession, fork, switchSession, reload) between
+    // the compaction event and this deferred callback — e.g. /btw forking the
+    // session while the autonomous continuation is still pending. The
+    // continuation belonged to the replaced session, so drop it instead of
+    // throwing from an unowned setImmediate callback and crashing Pi.
+    return false;
+  }
 }

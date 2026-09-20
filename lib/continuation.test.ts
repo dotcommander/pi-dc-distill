@@ -36,4 +36,18 @@ describe("shrink continuation delivery", () => {
       false,
     );
   });
+
+  test("drops the continuation instead of throwing when the captured ctx is stale", () => {
+    const stub = createStubCtx();
+    (stub.ctx as any).isIdle = () => {
+      throw new Error(
+        "This extension ctx is stale after session replacement or reload. Do not use a captured pi or command ctx after ctx.newSession(), ctx.fork(), ctx.switchSession(), or ctx.reload().",
+      );
+    };
+
+    expect(queueAutonomousContinuation(stub.pi, stub.ctx)).toBe(false);
+    expect(stub.calls.some((call) => call.api === "pi.sendMessage")).toBe(
+      false,
+    );
+  });
 });
