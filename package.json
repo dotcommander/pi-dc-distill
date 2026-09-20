@@ -7,12 +7,14 @@
   "main": "./index.ts",
   "keywords": ["pi-package", "pi-extension"],
   "pi": { "extensions": ["./index.ts"] },
+  "bin": { "dc-shrink-session": "./bin/dc-shrink-session.ts" },
   "imports": {
     "#shrink-framework": "./lib/framework/index.ts",
     "#shrink-framework/*": "./lib/framework/*.ts"
   },
-  "files": ["index.ts", "lib/**", "docs/**", "README.md", "CLAUDE.md", "LICENSE", "tsconfig.json", "!**/*.test.ts"],
+  "files": ["index.ts", "bin/**", "lib/**", "docs/**", "README.md", "CLAUDE.md", "LICENSE", "tsconfig.json", "!**/*.test.ts"],
   "scripts": {
+    "shrink:session": "bun ./bin/dc-shrink-session.ts",
     "test": "bun test",
     "typecheck": "bun x tsc --noEmit"
   },

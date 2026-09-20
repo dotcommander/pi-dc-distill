@@ -10,6 +10,45 @@
 | Preserve explicit near-limit state | `save_shrink_handoff` | Stores a handoff entry that the next eligible compaction can include. |
 | Find committed prior summaries | `recall_compaction` | Searches the current project’s recall first; cross-project search is explicit. |
 | Keep oversized tool output recoverable | automatic `tool_result` hook | Saves full text and leaves a bounded preview in the conversation. |
+| Replay an old session | `bun run shrink:session -- <session.jsonl>` | Runs historical JSONL through the current compiler and writes inspectable artifacts. |
+
+## Replay a past session
+
+Use the repository CLI to test the current shrink logic against any old Pi
+session JSONL file:
+
+```sh
+bun run shrink:session -- ~/.pi/agent/sessions/example.jsonl \
+  --compaction last \
+  --out .work/shrink-evaluations/example
+```
+
+The evaluator writes `input.jsonl`, `current.md`, and `report.json`. When it
+selects a historical compaction, it also writes `historical.md` and reports
+whether the historical summary body exactly matches the current output. Choose
+`--compaction first`, `--compaction last` (the default), or a one-based ordinal.
+For a file with no compaction entries, it compiles the entire session. Pass
+`--whole` for canonical `*-before.jsonl` dumps so a carried previous-summary
+record is treated as compiler input rather than a replay boundary. Existing
+artifacts are preserved unless `--force` is supplied.
+
+To compare a retained diagnostic pair directly, supply the matching after dump:
+
+```sh
+bun run shrink:session -- 20260621-144642-before.jsonl \
+  --whole \
+  --historical 20260621-144642-after.txt \
+  --out .work/shrink-evaluations/20260621-144642
+```
+
+The historical file is copied to `historical.md`, and its source path and exact
+body comparison are recorded in `report.json`.
+
+This is a raw-session replay tool. For exact live-hook input fidelity, pass a
+`*-before.jsonl` diagnostic dump; a full append-only Pi session cannot recreate
+Pi's discarded-message preparation boundaries exactly. Legacy dumps containing
+bare Pi message objects are canonicalized automatically before compilation;
+`report.json` records the detected input format.
 
 ## Compact with a focus hint
 

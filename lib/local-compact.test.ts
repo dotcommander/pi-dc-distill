@@ -91,6 +91,86 @@ describe("compileSessionJsonl", () => {
     expect(renderedQueries).not.toContain("app");
   });
 
+  test("recall omission notices never become executable resume queries", () => {
+    const lines = [sessionLine, userMsg("investigate the provider parser")];
+    for (let i = 0; i < 12; i++) {
+      lines.push(toolCall("Read", { path: `packages/provider-${i}/parser-${i}.ts` }));
+      lines.push(toolResult("Read", `parser ${i}`));
+    }
+    const summary = compileSessionJsonl(lines.join("\n")).summary;
+    const resumeTasks = summary.match(/<resume-tasks>\n([\s\S]*?)\n<\/resume-tasks>/)?.[1] ?? "";
+
+    expect(summary).toContain("recall queries omitted");
+    expect(resumeTasks).not.toMatch(/Recall:.*recall queries omitted/);
+  });
+
+  test("custom context cannot replace the latest human intent", () => {
+    const customContext = JSON.stringify({
+      type: "custom_message",
+      customType: "dc-rtk-context",
+      content: "Before reading a file, check whether this session has already read the same path.",
+    });
+    const summary = compileSessionJsonl([
+      sessionLine,
+      userMsg("spec the live task activity panel"),
+      customContext,
+    ].join("\n")).summary;
+
+    expect(summary).toContain("[User] spec the live task activity panel");
+    expect(summary).toContain("[Context: dc-rtk-context]");
+    const resumeIndex = summary.match(/<resume-index>\n([\s\S]*?)\n<\/resume-index>/)?.[1] ?? "";
+    expect(resumeIndex).toContain("recent-user-intent:\n- spec the live task activity panel");
+    expect(resumeIndex).not.toMatch(/recent-user-intents?:[\s\S]*Before reading a file/);
+  });
+
+  test("preserves the latest structured goal objective and status", () => {
+    const goal = (content: string) => JSON.stringify({
+      type: "custom_message",
+      customType: "goal-ui",
+      content,
+    });
+    const summary = compileSessionJsonl([
+      sessionLine,
+      userMsg("spec it"),
+      goal("Goal active\n\nGoal\nStatus: active\nIteration: 1\nObjective: implement spec until done\nTurns: 0"),
+    ].join("\n")).summary;
+
+    expect(summary).toContain("<goal-state>\nStatus: active\nObjective: implement spec until done\n</goal-state>");
+    expect(summary).toContain("[User] spec it");
+  });
+
+  test("a waiting goal updates status without losing its objective", () => {
+    const summary = compileSessionJsonl([
+      sessionLine,
+      JSON.stringify({
+        type: "custom_message",
+        customType: "goal-ui",
+        content: "Status: active\nObjective: improve shrink quality",
+      }),
+      JSON.stringify({ type: "custom_message", customType: "goal-ui", content: "Goal waiting for user input" }),
+    ].join("\n")).summary;
+
+    expect(summary).toContain("Status: waiting-for-user");
+    expect(summary).toContain("Objective: improve shrink quality");
+  });
+
+  test("a cleared goal removes previously recorded goal state", () => {
+    const goal = (content: string) => JSON.stringify({
+      type: "custom_message",
+      customType: "goal-ui",
+      content,
+    });
+    const summary = compileSessionJsonl([
+      sessionLine,
+      goal("Goal active\n\nGoal\nStatus: active\nObjective: obsolete objective"),
+      goal("Goal cleared"),
+      userMsg("work on the current request"),
+    ].join("\n")).summary;
+
+    expect(summary).not.toContain("<goal-state>");
+    expect(summary).not.toContain("obsolete objective");
+  });
+
   test("error tool-results are capped at 10, newest kept", () => {
     const lines = [sessionLine, userMsg("run everything")];
     for (let i = 0; i < 30; i++) {
@@ -188,6 +268,92 @@ describe("compileSessionJsonl", () => {
     expect(resumed).not.toContain("&amp;");
   });
 
+  test("resume tasks retain a long verification command instead of replacing it with a digest", () => {
+    const command = `bun test ${Array.from({ length: 18 }, (_, index) => `lib/feature-${index}.test.ts`).join(" ")}`;
+    expect(command.length).toBeGreaterThan(300);
+    const result = compileSessionJsonl([
+      sessionLine,
+      userMsg("run the complete focused verification set"),
+      toolCall("bash", { command }),
+      toolResult("bash", "18 pass\n0 fail"),
+    ].join("\n"));
+
+    expect(result.summary).toContain(`Verify: ${command}`);
+    expect(result.summary).not.toContain("[command sha256:");
+  });
+
+  test("does not classify verification text inside an edit heredoc as a verification command", () => {
+    const editCommand = [
+      "python3 - <<'PY'",
+      "from pathlib import Path",
+      "Path('AGENTS.md').write_text('Run bun test lib/parser.test.ts after editing.')",
+      "PY",
+    ].join("\n");
+    const verifyCommand = "bun test lib/parser.test.ts";
+    const result = compileSessionJsonl([
+      sessionLine,
+      userMsg("update the instructions and verify them"),
+      toolCall("bash", { command: editCommand }),
+      toolResult("bash", "updated"),
+      toolCall("bash", { command: verifyCommand }),
+      toolResult("bash", "1 pass\n0 fail"),
+    ].join("\n"));
+
+    expect(result.summary).toContain(`Verify: ${verifyCommand}`);
+    expect(result.summary).not.toContain("Verify: python3");
+  });
+
+  test("resume tasks omit excess active files instead of slicing a path", () => {
+    const paths = Array.from({ length: 4 }, (_, index) =>
+      `/Users/example/very-long-project-name/packages/feature-${index}/src/components/${"deeply-nested-component/".repeat(4)}very-specific-component-${index}.test.ts`);
+    const lines = [sessionLine, userMsg("inspect these files")];
+    for (const path of paths) {
+      lines.push(toolCall("Read", { path }));
+      lines.push(toolResult("Read", "contents"));
+    }
+    const result = compileSessionJsonl(lines.join("\n"));
+    const resumeTasks = result.summary.match(/<resume-tasks>\n([\s\S]*?)\n<\/resume-tasks>/)?.[1] ?? "";
+
+    expect(result.summary).toContain("<path-root>/Users/example/very-long-project-name/packages</path-root>");
+    expect(resumeTasks).toContain("./feature-0/src/components/");
+    expect(resumeTasks).toMatch(/active files omitted/);
+    for (const rendered of resumeTasks.match(/\.\/[^,\n]+/g) ?? []) {
+      expect(paths).toContain(`/Users/example/very-long-project-name/packages/${rendered.slice(2)}`);
+    }
+  });
+
+  test("declares a path root and uses one active-file selection everywhere", () => {
+    const summary = compileSessionJsonl([
+      sessionLine,
+      userMsg("update both parser implementations"),
+      toolCall("Edit", { path: "/tmp/proj/src/parser.ts" }),
+      toolResult("Edit", "updated"),
+      toolCall("Read", { path: "/tmp/proj/test/parser.ts" }),
+      toolResult("Read", "test parser"),
+      toolCall("Read", { path: "/tmp/external/parser.ts" }),
+      toolResult("Read", "external parser"),
+    ].join("\n")).summary;
+
+    expect(summary).toContain("<path-root>/tmp/proj</path-root>");
+    expect(summary).toContain("<modified-files>\n./src/parser.ts\n</modified-files>");
+    expect(summary).toContain("<read-files>\n./test/parser.ts\n/tmp/external/parser.ts\n</read-files>");
+    expect(summary).toContain("Reread active files: ./src/parser.ts, ./test/parser.ts, /tmp/external/parser.ts");
+    expect(summary).toContain("active-files:\n- ./src/parser.ts\n- ./test/parser.ts\n- /tmp/external/parser.ts");
+  });
+
+  test("a later assistant state clears an older blocker continuation", () => {
+    const result = compileSessionJsonl([
+      sessionLine,
+      userMsg("finish the runtime smoke"),
+      assistantMsg("Blocked: nested runtime does not expose the taskagent tool."),
+      assistantMsg("Runtime smoke passed through the extension harness. All requested checks passed."),
+    ].join("\n"));
+
+    const resumeTasks = result.summary.match(/<resume-tasks>\n([\s\S]*?)\n<\/resume-tasks>/)?.[1] ?? "";
+    expect(resumeTasks).not.toContain("Blocked:");
+    expect(result.summary).toContain("Runtime smoke passed");
+  });
+
   test("keeps prior verification identities separate across working directories", () => {
     const prior = [
       "<verification>",
@@ -243,6 +409,35 @@ describe("compileSessionJsonl", () => {
     ].join("\n")).summary;
 
     expect(summary).toContain("freshness: not established after later potentially modifying work");
+    expect(summary).toContain("[stale command sha256:");
+    expect(summary).not.toContain(": bun test lib/parser.test.ts — 8 pass");
+  });
+
+  test("keeps stale unresolved verification commands exact", () => {
+    const command = "bun test lib/parser.test.ts --filter 'preserves quoted operators && heredocs'";
+    const summary = compileSessionJsonl([
+      sessionLine,
+      userMsg("verify then patch"),
+      toolCall("bash", { command }),
+      toolResult("bash", "1 failed, 7 passed", true),
+      toolCall("edit", { path: "lib/parser.ts" }),
+      toolResult("edit", "updated"),
+    ].join("\n")).summary;
+
+    expect(summary).toContain(`FAIL [bash cwd=/tmp/proj]: ${command}`);
+    expect(summary).toContain("freshness: not established after later potentially modifying work");
+  });
+
+  test("prefers explicit test totals over wrapper banners", () => {
+    const summary = compileSessionJsonl([
+      sessionLine,
+      userMsg("verify parser"),
+      toolCall("bash", { command: "bun test lib/parser.test.ts" }),
+      toolResult("bash", "[dc-hooks] Compacted bash output\n251 pass\n0 fail\nRan 251 tests across 4 files"),
+    ].join("\n")).summary;
+
+    expect(summary).toContain("— Ran 251 tests across 4 files");
+    expect(summary).not.toContain("— [dc-hooks] Compacted bash output");
   });
 
   test("does not promote a failed Git probe to a working-tree receipt", () => {
@@ -449,7 +644,8 @@ describe("compileSessionJsonl output bounds", () => {
     expect(result.summary).toContain("... (9950 read files omitted)");
     expect(result.summary.match(/<read-files>/g)).toHaveLength(1);
     expect(result.summary.match(/<\/read-files>/g)).toHaveLength(1);
-    for (const path of result.readFiles) expect(result.summary).toContain(path);
+    expect(result.summary).toContain("<path-root>/tmp/generated</path-root>");
+    for (const path of result.readFiles) expect(result.summary).toContain(`./${path.slice("/tmp/generated/".length)}`);
   });
 
   test("rejects empty, malformed, and noise-only diagnostic input", () => {
@@ -960,6 +1156,72 @@ describe("compileSessionJsonl literal anchors", () => {
     const result = compileSessionJsonl(lines.join("\n"));
     expect(result.summary).toContain("Phase 2 is implemented");
     expect(result.summary).toContain("Passed: 28/28 tests");
+  });
+
+  test("U4: old protected evidence yields to the live frontier and stale verification does not become the resume gate", () => {
+    const lines = [sessionLine, userMsg("Implement the review findings")];
+    lines.push(toolCall("bash", { command: "git diff --check" }, "old-check"));
+    lines.push(toolResult("bash", "Process exited with code 0\nFinal output:", false, "old-check"));
+    lines.push(toolCall("edit", { path: "lib/algorithm.ts", oldText: "old", newText: "new" }, "later-edit"));
+    lines.push(toolResult("edit", "Updated lib/algorithm.ts", false, "later-edit"));
+    for (let i = 0; i < 45; i++) {
+      lines.push(assistantMsg(
+        `### Historical plan ${i}\nInspect \`src/legacy-${i}.ts\` and /tmp/project/archive/${i}.json. ` +
+        `Preserve this obsolete implementation detail ${i}. `.repeat(35),
+      ));
+    }
+    lines.push(userMsg("go"));
+    lines.push(assistantMsg([
+      "**→ Now — Pass the three review findings through the implementation.**",
+      "✓ Reproduced the oversized protected-content overflow.",
+      "○ Next: Fix key-material exposure, algorithm dispatch, and transaction documentation; then rerun regression tests.",
+    ].join("\n")));
+
+    const result = compileSessionJsonl(lines.join("\n"));
+    expect(result.summary).toContain("Fix key-material exposure, algorithm dispatch");
+    expect(result.summary).not.toContain("protected-content overflow; operating target exceeded");
+    expect(result.summary).not.toContain("Historical plan 0");
+    const resumeTasks = result.summary.match(/<resume-tasks>\n([\s\S]*?)\n<\/resume-tasks>/)?.[1] ?? "";
+    expect(resumeTasks).toContain("Continue:");
+    expect(resumeTasks).toContain("key-material exposure");
+    expect(resumeTasks).not.toContain("Verify: git diff --check");
+  });
+
+  test("budget pressure drops stale verification before the latest user request", () => {
+    const lines = [sessionLine];
+    for (let i = 0; i < 10; i++) {
+      lines.push(toolCall("bash", { command: `bun test test/legacy-${i}.test.ts --filter '${"old-scope-".repeat(30)}${i}'` }));
+      lines.push(toolResult("bash", `${i + 1} pass, 0 fail`));
+      lines.push(toolCall("edit", { path: `src/legacy-${i}.ts` }));
+      lines.push(toolResult("edit", "updated"));
+    }
+    for (let i = 0; i < 30; i++) {
+      lines.push(assistantMsg(`### Old milestone ${i}\nDecision for src/legacy-${i}.ts: ${"historical detail ".repeat(90)}`));
+    }
+    const latestRequest = "Fix the current parser regression and preserve the quoted operator behavior.";
+    lines.push(userMsg(latestRequest));
+    lines.push(assistantMsg("Investigating the current parser regression now."));
+
+    const summary = compileSessionJsonl(lines.join("\n")).summary;
+    expect(summary).toContain(`[User] ${latestRequest}`);
+    expect(summary).toContain("stale verification receipts omitted");
+    expect(summary).not.toContain("protected-content overflow");
+  });
+
+  test("U4: terminal no-response completion survives repetition collapse and emits no stale resume task", () => {
+    const lines = [sessionLine, userMsg("finish the cleanup")];
+    lines.push(toolCall("edit", { path: "src/old-task.ts", oldText: "open", newText: "done" }));
+    lines.push(toolResult("edit", "Updated src/old-task.ts"));
+    for (let i = 0; i < 20; i++) lines.push(assistantMsg(`○ Next — historical procedural status ${i}`));
+    lines.push(assistantMsg(
+      "Resolved all three stale records. No application files were changed.\n\n" +
+      "Next choice: None — stale task cleanup complete; no response needed.",
+    ));
+
+    const result = compileSessionJsonl(lines.join("\n"));
+    expect(result.summary).toContain("Resolved all three stale records");
+    expect(result.summary).toContain("no response needed");
+    expect(result.summary).not.toContain("<resume-tasks>");
   });
 
   test("U5: filters bookkeeping pairs while preserving valid config and issue anchors", () => {

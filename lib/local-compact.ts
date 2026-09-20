@@ -1,6 +1,6 @@
 import { open, readFile, stat } from "node:fs/promises";
 import { createHash } from "node:crypto";
-import { basename } from "node:path";
+import { basename, dirname, isAbsolute, relative } from "node:path";
 import {
   SHRINK_HANDOFF_ENTRY_TYPE,
   handoffTextFromEntryData,
@@ -41,11 +41,15 @@ interface NormalizedBlock {
   args?: Record<string, unknown>;
   isError?: boolean;
   redacted?: boolean;
+  origin?: "human" | "custom";
+  customType?: string;
 }
 
 interface ConversationTurn {
   role: "user" | "assistant" | "bard";
   text: string;
+  origin?: "human" | "custom";
+  customType?: string;
 }
 
 interface ToolCallFingerprint {
@@ -72,6 +76,8 @@ interface SessionMeta {
    *  the agent emitted no handoff — summary then degrades byte-identically. */
   handoff?: string;
   handoffSource?: "assistant" | "saved";
+  goalStatus?: string;
+  goalObjective?: string;
   priorSummaries: string[];
 }
 
@@ -101,6 +107,7 @@ interface ConversationResult {
   budgetOmissions: string[];
   resumeTasks: string[];
   resumeIndex: ResumeIndex;
+  pathRoot?: string;
 }
 
 export interface LocalCompileResult {
@@ -250,14 +257,14 @@ function normalizeUser(blocks: Array<Record<string, unknown>>): NormalizedBlock[
   const text = sanitize(raw).trim();
   if (text) {
     if (isSystemUserContent(text)) return [];
-    out.push({ kind: KIND_USER, text });
+    out.push({ kind: KIND_USER, text, origin: "human" });
   }
   for (const block of blocks) {
     if (block.type === "image") {
-      out.push({ kind: KIND_USER, text: `[image: ${String(block.mimeType ?? "")}]` });
+      out.push({ kind: KIND_USER, text: `[image: ${String(block.mimeType ?? "")}]`, origin: "human" });
     }
   }
-  return out.length > 0 ? out : [{ kind: KIND_USER, text: "" }];
+  return out.length > 0 ? out : [{ kind: KIND_USER, text: "", origin: "human" }];
 }
 
 function normalizeAssistant(blocks: Array<Record<string, unknown>>): NormalizedBlock[] {
@@ -369,11 +376,36 @@ function normalizeCustomMessage(entry: Record<string, unknown>, meta: SessionMet
   if (customType === "bard-context") {
     return normalizeBardContext(contentText);
   }
+  if (customType === "goal-ui") {
+    captureGoalState(contentText, meta);
+    return { ...emptyNormalizedEntry, usefulRecordCount: contentText ? 1 : 0 };
+  }
   if (noiseCustomTypes.has(customType)) return emptyNormalizedEntry;
   const hasImage = content.some((block) => block.type === "image");
-  return contentText || hasImage
-    ? { main: normalizeUser(content), bard: [], usefulRecordCount: 1 }
-    : emptyNormalizedEntry;
+  if (!contentText && !hasImage) return emptyNormalizedEntry;
+  const main = normalizeUser(content).map((block) => ({
+    ...block,
+    origin: "custom" as const,
+    customType,
+  }));
+  return { main, bard: [], usefulRecordCount: 1 };
+}
+
+function captureGoalState(contentText: string, meta: SessionMeta): void {
+  const trimmed = contentText.trim();
+  if (/^Goal cleared\b/i.test(trimmed)) {
+    meta.goalStatus = undefined;
+    meta.goalObjective = undefined;
+    return;
+  }
+  if (/^Goal waiting for user input\b/i.test(trimmed)) {
+    meta.goalStatus = "waiting-for-user";
+    return;
+  }
+  const status = contentText.match(/^Status:\s*(.+)$/mi)?.[1]?.trim();
+  const objective = contentText.match(/^Objective:\s*(.+)$/mi)?.[1]?.trim();
+  if (status) meta.goalStatus = sliceU16(status, 80);
+  if (objective) meta.goalObjective = sliceU16(objective, 1_024);
 }
 
 function normalizeCustomEntry(entry: Record<string, unknown>, meta: SessionMeta): NormalizedEntry {
@@ -497,7 +529,7 @@ function filterNoise(blocks: NormalizedBlock[]): NormalizedBlock[] {
       for (const wrapper of noiseXMLWrappers) cleaned = cleaned.replace(wrapper, "");
       cleaned = cleaned.trim();
       if (!cleaned) continue;
-      out.push({ kind: KIND_USER, text: cleaned });
+      out.push({ ...block, kind: KIND_USER, text: cleaned });
       continue;
     }
     out.push(block);
@@ -622,6 +654,20 @@ function addExactMarkerLine(set: OrderedSet, line: string, limit = 512): void {
   if (sanitized) set.add(sliceU16(sanitized, limit));
 }
 
+function boundedListMarker(prefix: string, values: string[], limit = 512): string {
+  let best = "";
+  for (let kept = 1; kept <= values.length; kept++) {
+    const omitted = values.length - kept;
+    const suffix = omitted > 0 ? `, ... (${omitted} active files omitted)` : "";
+    const candidate = `${prefix}${values.slice(0, kept).join(", ")}${suffix}`;
+    if (Array.from(candidate).length > limit) break;
+    best = candidate;
+  }
+  if (best) return best;
+  const abbreviated = `…/${basename(values[0])}`;
+  return `${prefix}${abbreviated}${values.length > 1 ? `, ... (${values.length - 1} active files omitted)` : ""}`;
+}
+
 function limitedSetSlice(set: OrderedSet, limit: number, label: string): string[] {
   const values = set.slice();
   if (values.length <= limit) return values;
@@ -637,11 +683,13 @@ function renderVerificationReceipt(
     ? rawCwd
     : `[cwd sha256:${digest(rawCwd).slice(0, 16)}]`;
   const scope = `${receipt.tool || "shell"} cwd=${cwd}`;
-  const command = Array.from(receipt.command).length <= 300
+  const isStale = receipt.mutationEpoch < currentMutationEpoch;
+  const preserveExactCommand = !isStale || receipt.status === "FAIL" || receipt.status === "INCOMPLETE";
+  const command = preserveExactCommand && Array.from(receipt.command).length <= 1_024
     ? receipt.command
-    : `[command sha256:${digest(receipt.command).slice(0, 16)}]`;
+    : `[stale command sha256:${digest(receipt.command).slice(0, 16)}]`;
   const evidence = sliceU16(receipt.evidence, 300);
-  const stale = receipt.mutationEpoch < currentMutationEpoch
+  const stale = isStale
     ? " [freshness: not established after later potentially modifying work]"
     : "";
   return `${receipt.status} [${scope}]: ${command} — ${evidence}${stale}`;
@@ -723,7 +771,18 @@ function shellCommand(call: PendingToolCall): string | undefined {
 }
 
 function isVerificationCommand(command: string): boolean {
-  const lower = command.toLowerCase().replace(/\s+/g, " ");
+  const controlLines: string[] = [];
+  let heredocEnd: string | undefined;
+  for (const line of command.split("\n")) {
+    if (heredocEnd) {
+      if (line.trim() === heredocEnd) heredocEnd = undefined;
+      continue;
+    }
+    controlLines.push(line);
+    const match = line.match(/<<-?\s*['"]?([A-Za-z_][A-Za-z0-9_]*)['"]?/);
+    if (match) heredocEnd = match[1];
+  }
+  const lower = controlLines.join(" ").toLowerCase().replace(/\s+/g, " ");
   return [
     "go test",
     "go build",
@@ -763,12 +822,13 @@ function isWorkingTreeCommand(command: string): boolean {
 }
 
 function resultEvidence(result: string): string {
-  for (const line of result.split("\n").map((value) => value.trim()).filter(Boolean)) {
-    if (/^(ok\s+|PASS\b|FAIL\b|--- FAIL|\?\s+)/.test(line) || line.toLowerCase().includes("command exited with code")) {
-      return line;
-    }
-  }
-  return result.split("\n").map((value) => value.trim()).find(Boolean) ?? "no output";
+  const lines = result.split("\n").map((value) => value.trim()).filter(Boolean);
+  const explicitSummary = lines.findLast((line) =>
+    /(?:\b\d+\s+(?:pass(?:ed)?|fail(?:ed)?|skip(?:ped)?|tests?)\b|\btests?:\s*\d+\b|\b(?:pass|fail|skip)(?:ed)?:\s*\d+\b)/i.test(line));
+  if (explicitSummary) return explicitSummary;
+  const statusLine = lines.findLast((line) =>
+    /^(ok\s+|PASS\b|FAIL\b|--- FAIL|\?\s+)/.test(line) || line.toLowerCase().includes("command exited with code"));
+  return statusLine ?? lines[0] ?? "no output";
 }
 
 function verificationStatus(result: string, isError: boolean): "PASS" | "FAIL" | "SKIP" {
@@ -1077,6 +1137,30 @@ function isRecencyExemptTurn(text: string, signals = extractSignals(text)): bool
     /(?:<resume-state>|<verification>|sha256=[a-f0-9]{64}|Full output saved;|artifactPath|`[^`]+`)/i.test(text);
 }
 
+function conversationEvictionCandidates(turns: ConversationTurn[]): Array<{ index: number; priority: number; score: number }> {
+  const pinned = new Set<number>();
+  const latestUser = turns.findLastIndex((turn) => turn.role === "user" && turn.origin !== "custom");
+  const latestAssistant = turns.findLastIndex((turn) => turn.role === "assistant");
+  const latestSubstantive = turns.findLastIndex(
+    (turn) => turn.role === "assistant" && (isCompletionReport(turn.text) || isSubstantive(extractSignals(turn.text))),
+  );
+  for (const index of [latestUser, latestAssistant, latestSubstantive]) {
+    if (index >= 0) pinned.add(index);
+  }
+
+  const recentFloor = Math.max(0, turns.length - 8);
+  return turns
+    .map((turn, index) => ({
+      index,
+      // Age dominates evidence shape: an old path/diff remains valuable, but it
+      // cannot make the budget impossible or displace the live frontier.
+      priority: (index >= recentFloor ? 1_000 : 0) + (isRecencyExemptTurn(turn.text) ? 100 : 0),
+      score: signalScore(extractSignals(turn.text)),
+    }))
+    .filter(({ index }) => !pinned.has(index))
+    .sort((a, b) => a.priority - b.priority || a.score - b.score || a.index - b.index);
+}
+
 function trimTurn(text: string, ageFromNewest = 0): string {
   const signals = extractSignals(text);
   const baseLimit = turnTrimLimit(signals);
@@ -1102,7 +1186,7 @@ function trimResumeLine(text: string): string {
 
 function looksLikeContinuation(text: string): boolean {
   const lower = text.toLowerCase();
-  return ["[next]", "[in progress]", "[blocked]", "next step", "next:", "todo", "remaining", "continue", "blocked", "follow up", "follow-up"].some((marker) =>
+  return ["[next]", "[in progress]", "[blocked]", "next step", "next:", "next choice", "todo", "remaining", "continue", "blocked", "follow up", "follow-up"].some((marker) =>
     lower.includes(marker),
   );
 }
@@ -1176,11 +1260,15 @@ function isBareConfirmation(text: string): boolean {
   return /^(?:\s*\d+[.)]\s*(?:recommended|stand down|yes|no|approve|approved|skip|stop|continue|go)[.!]?\s*)+$/i.test(text);
 }
 
+function selectActiveFiles(readFiles: string[], modifiedFiles: string[]): string[] {
+  return boundedValues([...modifiedFiles, ...readFiles], 10, "active files");
+}
+
 function buildResumeIndex(turns: ConversationTurn[], readFiles: string[], modifiedFiles: string[], recentToolCalls: ToolCallFingerprint[]): ResumeIndex {
-  const activeFiles = boundedValues([...modifiedFiles, ...readFiles], 10, "active files");
+  const activeFiles = selectActiveFiles(readFiles, modifiedFiles);
   const allRecentUserIntents: string[] = [];
   for (let i = 0; i < turns.length; i++) {
-    if (turns[i].role === "user") {
+    if (turns[i].role === "user" && turns[i].origin !== "custom") {
       if (isBareConfirmation(turns[i].text)) continue;
       const line = trimResumeLine(turns[i].text);
       if (line) allRecentUserIntents.push(line);
@@ -1188,10 +1276,13 @@ function buildResumeIndex(turns: ConversationTurn[], readFiles: string[], modifi
   }
   const recentUserIntents = boundedValues(allRecentUserIntents, 3, "recent user intents");
   const allContinuationHints: string[] = [];
-  for (let i = 0; i < turns.length; i++) {
-    if (turns[i].role !== "assistant") continue;
-    const line = trimResumeLine(turns[i].text);
-    if (line && looksLikeContinuation(line)) allContinuationHints.push(line);
+  const latestAssistant = turns.findLastIndex((turn) =>
+    turn.role === "assistant" && !extractSignals(turn.text).pureAck);
+  if (latestAssistant >= 0 && looksLikeContinuation(turns[latestAssistant].text)) {
+    const continuationLine = turns[latestAssistant].text.split("\n").findLast((line) => looksLikeContinuation(line))
+      ?? turns[latestAssistant].text;
+    const line = trimResumeLine(continuationLine);
+    if (line) allContinuationHints.push(line);
   }
   const continuationHints = boundedValues(allContinuationHints, 5, "continuation hints");
   const recallCandidates = [
@@ -1408,12 +1499,20 @@ function collapseDenseRepetition(scored: ScoredTurn[]): void {
 }
 
 function compactAssistantTurns(turns: ConversationTurn[], toolAdj: ToolAdjacent[]): ConversationTurn[] {
+  const pinned = new Set([
+    turns.findLastIndex((turn) => turn.role === "user" && turn.origin !== "custom"),
+    turns.findLastIndex((turn) => turn.role === "assistant"),
+    turns.findLastIndex(
+      (turn) => turn.role === "assistant" && (isCompletionReport(turn.text) || isSubstantive(extractSignals(turn.text))),
+    ),
+  ]);
   const scored = turns.map((turn, index): ScoredTurn => ({
     turn,
     signals: turn.role === "assistant" ? extractSignals(turn.text) : extractSignals(""),
     tools: toolAdj[index]?.tools ?? [],
     files: toolAdj[index]?.files ?? [],
     hadError: toolAdj[index]?.hadError ?? false,
+    keep: pinned.has(index),
   })).filter((item) => item.turn.role !== "assistant" || !item.signals.pureAck);
 
   collapseEditLoops(scored);
@@ -1465,29 +1564,40 @@ function quoteRecallQuery(query: string): string {
 }
 
 function buildResumeTasks(input: {
-  readFiles: string[];
-  modifiedFiles: string[];
   recentToolCalls: ToolCallFingerprint[];
   verification: string[];
   workingTree: string[];
   sourceAnchors: string[];
   resumeIndex: ResumeIndex;
+  pathRoot?: string;
 }): string[] {
   const out = new OrderedSet();
-  const activeFiles = appendUniqueLimited([], new Set(), 4, [...input.modifiedFiles, ...input.readFiles]);
-  if (activeFiles.length > 0) addMarkerLine(out, `Reread active files: ${activeFiles.join(", ")}`);
-  const verificationLines = input.verification.filter((line) => !line.startsWith("... ("));
-  const gate = verificationLines.find((line) => /^(?:FAIL|INCOMPLETE|BLOCKED)\b/.test(line))
+  const continuation = input.resumeIndex.continuationHints.at(-1);
+  if (continuation && /Next choice:\s*None\b.*no response needed/i.test(continuation)) return [];
+  const activeFiles = input.resumeIndex.activeFiles.filter((file) => !file.startsWith("... (")).slice(0, 4);
+  if (activeFiles.length > 0) {
+    addExactMarkerLine(out, boundedListMarker("Reread active files: ", activeFiles.map((file) => displayPath(file, input.pathRoot))));
+  }
+  if (continuation) addMarkerLine(out, `Continue: ${continuation}`);
+  const verificationLines = input.verification.filter((line) =>
+    !line.startsWith("... (") && !line.includes("[freshness: not established"),
+  );
+  const gate = verificationLines.findLast((line) => /^(?:FAIL|INCOMPLETE|BLOCKED)\b/.test(line))
     ?? verificationLines.at(-1);
   const verify = gate ? verificationCommand(gate) : "";
-  if (verify) addExactMarkerLine(out, `Verify: ${verify}`, 512);
+  if (verify) addExactMarkerLine(out, `Verify: ${verify}`, 1_200);
   const activeBases = new Set(activeFiles.map(recallQueryFromAnchor));
   const querySources = [
     ...input.sourceAnchors.map(recallQueryFromAnchor),
     ...input.recentToolCalls.map((call) => call.key),
     ...(activeFiles.length === 0 && input.sourceAnchors.length === 0 ? [] : input.resumeIndex.recallQueries),
   ];
-  const queries = querySources.filter((query) => query && !activeBases.has(query) && !isVerificationCommand(query) && !isWorkingTreeCommand(query));
+  const queries = querySources.filter((query) =>
+    query &&
+    !query.startsWith("... (") &&
+    !activeBases.has(query) &&
+    !isVerificationCommand(query) &&
+    !isWorkingTreeCommand(query));
   if (queries[0]) addMarkerLine(out, `Recall: recall_compaction ${quoteRecallQuery(queries[0])}`);
   if (input.workingTree.length > 0) addMarkerLine(out, "Check working tree: git status --short");
   return out.slice().slice(0, 4);
@@ -1649,7 +1759,12 @@ function collectConversationTurn(
   if (block.kind === KIND_USER) collectSourceAnchorsFromUserText(sourceAnchors, text);
   if (!text) return false;
   toolAdj.push({ tools: [...pendingTools], files: [...pendingFiles], hadError: pendingError });
-  turns.push({ role: block.kind, text });
+  turns.push({
+    role: block.kind,
+    text,
+    origin: block.origin,
+    customType: block.customType,
+  });
   return true;
 }
 
@@ -1778,14 +1893,8 @@ function extractConversation(blocks: NormalizedBlock[], sessionCwd?: string): Co
   let finalTurns = turns;
   let totalChars = finalTurns.reduce((sum, turn) => sum + turn.text.length, 0);
   while (finalTurns.length > 0 && totalChars > 16_000) {
-    const latestSubstantiveIdx = finalTurns.findLastIndex(
-      (t) => t.role === "assistant" && (isCompletionReport(t.text) || isSubstantive(extractSignals(t.text))),
-    );
-    const candidates = finalTurns
-      .map((turn, index) => ({ turn, index, score: signalScore(extractSignals(turn.text)) }))
-      .filter(({ turn, index }) => !isRecencyExemptTurn(turn.text) && index !== latestSubstantiveIdx);
+    const candidates = conversationEvictionCandidates(finalTurns);
     if (candidates.length === 0) break;
-    candidates.sort((a, b) => a.score - b.score || a.index - b.index);
     const remove = candidates[0].index;
     totalChars -= finalTurns[remove].text.length;
     finalTurns = finalTurns.filter((_, index) => index !== remove);
@@ -1803,6 +1912,7 @@ function extractConversation(blocks: NormalizedBlock[], sessionCwd?: string): Co
   const finalActiveTasks = limitedSetSlice(activeTasks, 10, "active tasks");
   const finalResumeRisks = limitedSetSlice(resumeRisks, 8, "resume risks");
   const resumeIndex = buildResumeIndex(finalTurns, finalReadFiles, finalModifiedFiles, recentToolCalls);
+  const pathRoot = choosePathRoot([...finalReadFiles, ...finalModifiedFiles, ...resumeIndex.activeFiles], sessionCwd);
 
   return {
     turns: finalTurns,
@@ -1829,14 +1939,14 @@ function extractConversation(blocks: NormalizedBlock[], sessionCwd?: string): Co
     budgetOmissions: [],
     resumeIndex,
     resumeTasks: buildResumeTasks({
-      readFiles: finalReadFiles,
-      modifiedFiles: finalModifiedFiles,
       recentToolCalls,
       verification: finalVerification,
       workingTree: finalWorkingTree,
       sourceAnchors: finalSourceAnchors,
       resumeIndex,
+      pathRoot,
     }),
+    pathRoot,
   };
 }
 
@@ -1918,11 +2028,47 @@ function escapeMarkerText(text: string): string {
   return text.replace(/</g, "&lt;").replace(/>/g, "&gt;");
 }
 
+function displayPath(path: string, root?: string): string {
+  if (!root || !isAbsolute(root) || !isAbsolute(path)) return path;
+  const child = relative(root, path);
+  if (!child) return ".";
+  if (child === ".." || child.startsWith(`..${process.platform === "win32" ? "\\" : "/"}`) || isAbsolute(child)) return path;
+  return `./${child}`;
+}
+
+function choosePathRoot(paths: string[], sessionCwd?: string): string | undefined {
+  const absolutePaths = uniqueValues(paths.filter(isAbsolute));
+  if (sessionCwd && isAbsolute(sessionCwd) && absolutePaths.some((path) => displayPath(path, sessionCwd) !== path)) {
+    return sessionCwd;
+  }
+  const candidates = new Set<string>();
+  for (const path of absolutePaths) {
+    let candidate = dirname(path);
+    while (dirname(candidate) !== candidate) {
+      candidates.add(candidate);
+      candidate = dirname(candidate);
+    }
+  }
+  let best: { root: string; savings: number } | undefined;
+  for (const root of candidates) {
+    const covered = absolutePaths.filter((path) => displayPath(path, root) !== path);
+    if (covered.length < 2) continue;
+    const savings = covered.reduce((sum, path) => sum + path.length - displayPath(path, root).length, 0)
+      - `<path-root>${root}</path-root>\n`.length;
+    if (savings <= 0) continue;
+    if (!best || savings > best.savings || (savings === best.savings && root.length > best.root.length)) {
+      best = { root, savings };
+    }
+  }
+  return best?.root;
+}
+
 function formatFileMarkers(
   readFiles: string[],
   modifiedFiles: string[],
   omittedReadFiles = 0,
   omittedModifiedFiles = 0,
+  pathRoot?: string,
 ): string {
   const parts: string[] = [];
   if (readFiles.length > 0 || modifiedFiles.length > 0) {
@@ -1934,12 +2080,12 @@ function formatFileMarkers(
     );
   }
   if (readFiles.length > 0 || omittedReadFiles > 0) {
-    parts.push("<read-files>", ...readFiles.map(escapeAngles));
+    parts.push("<read-files>", ...readFiles.map((path) => escapeAngles(displayPath(path, pathRoot))));
     if (omittedReadFiles > 0) parts.push(`... (${omittedReadFiles} read files omitted)`);
     parts.push("</read-files>");
   }
   if (modifiedFiles.length > 0 || omittedModifiedFiles > 0) {
-    parts.push("<modified-files>", ...modifiedFiles.map(escapeAngles));
+    parts.push("<modified-files>", ...modifiedFiles.map((path) => escapeAngles(displayPath(path, pathRoot))));
     if (omittedModifiedFiles > 0) parts.push(`... (${omittedModifiedFiles} modified files omitted)`);
     parts.push("</modified-files>");
   }
@@ -1967,7 +2113,7 @@ function formatRecentToolResults(results: ToolResultEntry[]): string {
   ].join("\n");
 }
 
-function formatResumeIndex(index: ResumeIndex): string {
+function formatResumeIndex(index: ResumeIndex, pathRoot?: string): string {
   const lines = ["<resume-index>"];
   for (const [label, values] of [
     ["active-files", index.activeFiles],
@@ -1976,7 +2122,8 @@ function formatResumeIndex(index: ResumeIndex): string {
     ["recall-queries", index.recallQueries],
   ] as const) {
     if (values.length === 0) continue;
-    lines.push(`${label}:`, ...values.map((value) => `- ${escapeResumeLine(value)}`));
+    const rendered = label === "active-files" ? values.map((value) => displayPath(value, pathRoot)) : values;
+    lines.push(`${label}:`, ...rendered.map((value) => `- ${escapeResumeLine(value)}`));
   }
   if (lines.length === 1) return "";
   lines.push("</resume-index>");
@@ -2110,18 +2257,35 @@ function formatSummary(meta: SessionMeta, conv: ConversationResult, userFocus?: 
       "",
     );
   }
+  if (meta.goalStatus || meta.goalObjective) {
+    const goalLines = [
+      meta.goalStatus ? `Status: ${escapeMarkerText(meta.goalStatus)}` : "",
+      meta.goalObjective ? `Objective: ${escapeMarkerText(meta.goalObjective)}` : "",
+    ].filter(Boolean);
+    parts.push(`<goal-state>\n${goalLines.join("\n")}\n</goal-state>`, "");
+  }
   const metaLines = [
     meta.cwd ? `CWD: ${meta.cwd}` : "",
     meta.model ? `Model: ${meta.model}` : "",
     meta.timestamp ? `Started: ${meta.timestamp}` : "",
   ].filter(Boolean);
   if (metaLines.length > 0) parts.push(`## Session\n${metaLines.join("\n")}`, "");
+  if (conv.pathRoot) {
+    parts.push(`<path-root>${escapeMarkerText(conv.pathRoot)}</path-root>`, "");
+  }
   const prior = formatPriorSummaries(meta.priorSummaries);
   if (prior) parts.push(prior, "");
   if (userFocus?.trim()) parts.push(`## User Focus\n${escapeMarkerText(sliceU16(userFocus.trim(), 2_048))}`, "");
   parts.push(
     conv.turns.length > 0
-      ? `## Conversation\n${conv.turns.map((turn) => `[${turn.role === "bard" ? "BARD" : turn.role[0].toUpperCase() + turn.role.slice(1)}] ${turn.text}`).join("\n")}`
+      ? `## Conversation\n${conv.turns.map((turn) => {
+        const label = turn.role === "bard"
+          ? "BARD"
+          : turn.role === "user" && turn.origin === "custom"
+            ? `Context${turn.customType ? `: ${turn.customType}` : ""}`
+            : turn.role[0].toUpperCase() + turn.role.slice(1);
+        return `[${label}] ${turn.text}`;
+      }).join("\n")}`
       : "## Conversation",
   );
   for (const block of [
@@ -2130,6 +2294,7 @@ function formatSummary(meta: SessionMeta, conv: ConversationResult, userFocus?: 
       conv.modifiedFiles,
       conv.omittedReadFiles,
       conv.omittedModifiedFiles,
+      conv.pathRoot,
     ),
     formatRecentToolCalls(conv.recentToolCalls),
     formatRecentToolResults(conv.recentToolResults),
@@ -2140,7 +2305,7 @@ function formatSummary(meta: SessionMeta, conv: ConversationResult, userFocus?: 
     markerBlock("active-tasks", conv.activeTasks),
     markerBlock("literal-anchors", conv.literalAnchors),
     markerBlock("resume-tasks", conv.resumeTasks),
-    formatResumeIndex(conv.resumeIndex),
+    formatResumeIndex(conv.resumeIndex, conv.pathRoot),
     markerBlock("summary-omissions", conv.budgetOmissions),
   ]) {
     if (block) parts.push("", block);
@@ -2162,14 +2327,17 @@ function enforceOperatingBudget(
       conv.modifiedFiles,
       conv.recentToolCalls,
     );
+    conv.pathRoot = choosePathRoot(
+      [...conv.readFiles, ...conv.modifiedFiles, ...conv.resumeIndex.activeFiles],
+      meta.cwd,
+    );
     conv.resumeTasks = buildResumeTasks({
-      readFiles: conv.readFiles,
-      modifiedFiles: conv.modifiedFiles,
       recentToolCalls: conv.recentToolCalls,
       verification: conv.verification,
       workingTree: conv.workingTree,
       sourceAnchors: conv.sourceAnchors,
       resumeIndex: conv.resumeIndex,
+      pathRoot: conv.pathRoot,
     });
   };
   // Reserve room for the omission receipt, separator, recall note, and metric prefix.
@@ -2192,15 +2360,13 @@ function enforceOperatingBudget(
     } else if (conv.activeTasks.length > 0) {
       conv.activeTasks.shift();
       note("active tasks");
+    } else if (conv.verification.some((line) => line.includes("[freshness: not established"))) {
+      const stale = conv.verification.findIndex((line) => line.includes("[freshness: not established"));
+      conv.verification.splice(stale, 1);
+      note("stale verification receipts");
     } else if (conv.turns.length > 1) {
-      const latestSubstantiveIdx = conv.turns.findLastIndex(
-        (t) => t.role === "assistant" && (isCompletionReport(t.text) || isSubstantive(extractSignals(t.text))),
-      );
-      const candidates = conv.turns
-        .map((turn, index) => ({ turn, index, score: signalScore(extractSignals(turn.text)) }))
-        .filter(({ turn, index }) => !isRecencyExemptTurn(turn.text) && index !== latestSubstantiveIdx);
+      const candidates = conversationEvictionCandidates(conv.turns);
       if (candidates.length > 0) {
-        candidates.sort((a, b) => a.score - b.score || a.index - b.index);
         conv.turns.splice(candidates[0].index, 1);
         note("conversation turns");
       } else if (conv.readFiles.length > 0) {

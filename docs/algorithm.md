@@ -105,13 +105,13 @@ one recall query, and `git status --short`.
 
 ## Verification Receipts
 
-`renderVerificationReceipt` (line 622) renders each pass as
+`renderVerificationReceipt` renders each result as
 `STATUS [tool cwd=…]: command — evidence`. Oversized cwd or command
-values are replaced by 16-hex sha256 prefixes. Receipts carry a
-mutation-epoch freshness stamp: any potentially modifying operation
-after the pass marks it `[freshness: not established after later
-potentially modifying work]`. Eviction always keeps at least one
-verification row.
+values are replaced by 16-hex sha256 prefixes. Fresh receipts and unresolved
+FAIL/INCOMPLETE receipts retain exact commands. A successful or skipped receipt
+made stale by later potentially modifying work uses a compact command digest;
+it remains useful history but is not presented as an executable current gate.
+Evidence selection prefers explicit test totals over wrapper banners.
 
 ## Budget and Eviction Order
 
@@ -119,12 +119,31 @@ Two-stage:
 
 1. **Operating target** — `TARGET_RESUME_SUMMARY_CODE_POINTS = 13_024`
    (line 15); eviction runs while the summary exceeds target − 1,024.
-   Whole records drop in fixed priority order (line 2022): recent tool
+   Whole records drop in fixed priority order: recent tool
    results, source anchors, literal anchors, recent tool calls, active
-   tasks, oldest conversation turns, read files, modified files,
+   tasks, stale verification receipts, conversation turns, read files, modified files,
    working-tree receipts, verification receipts. The resume index and
    resume tasks rebuild after every drop. Every eviction class writes an
-   omission count into `<summary-omissions>`.
+   omission count into `<summary-omissions>`. Conversation eviction pins
+   the latest human request, latest assistant turn, and latest substantive
+   assistant turn. Among the rest, age outranks evidence shape so an old
+   path, diff, or completion report cannot force protected-content overflow.
+   These frontier turns are also pinned through repetition collapsing. A
+   terminal `Next choice: None ... no response needed` completion suppresses
+   stale file, verification, and working-tree resume tasks. Continuation hints
+   come only from the latest non-acknowledgement assistant state. Resume file
+   lists retain whole paths and mark omissions rather than slicing a path.
+   User-origin provenance is retained separately from injected custom context,
+   so policy/context messages cannot displace or masquerade as the latest human
+   request. Structured `goal-ui` updates render as a compact `<goal-state>`
+   block; a cleared goal removes the prior state. Omission notices remain
+   display-only metadata and are never emitted as executable recall queries.
+   Repeated absolute file paths may be rendered relative to an explicit
+   `<path-root>` display root. The session CWD is preferred when known;
+   legacy inputs may use the highest-saving absolute-path cluster instead.
+   Paths outside that root remain absolute, and exact commands are never
+   rewritten. Resume tasks and the resume index share one active-file
+   selection so their frontier cannot drift.
 2. **Hard cap** — `MAX_STRUCTURED_SUMMARY_CODE_POINTS = 65_300`
    (line 14); the cap pass drops read/modified files
    (larger list first) until fit, then fails closed rather than truncate.

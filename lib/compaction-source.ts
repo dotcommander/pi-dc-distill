@@ -61,7 +61,7 @@ export function buildCompactionSource(input: {
   };
 }
 
-function messageRecord(message: AgentMessage): Record<string, unknown> | undefined {
+export function canonicalRecordFromMessage(message: AgentMessage): Record<string, unknown> | undefined {
   const value = message as unknown as Record<string, unknown>;
   switch (value.role) {
     case "user":
@@ -109,7 +109,7 @@ export function canonicalizeCompactionSource(
   const ordered = [...source.messagesToSummarize, ...source.turnPrefixMessages];
   for (let index = 0; index < ordered.length; index++) {
     if (index % 128 === 0) check(signal);
-    const record = messageRecord(ordered[index]);
+    const record = canonicalRecordFromMessage(ordered[index]);
     if (record) discarded.push(JSON.stringify(record));
   }
   if (source.handoff) {
