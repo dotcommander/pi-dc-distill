@@ -32,12 +32,31 @@ describe("compileSessionJsonl", () => {
     ].join("\n");
     const result = compileSessionJsonl(jsonl);
     expect(result.summary).toContain("## Session");
+    expect(result.summary).toContain("Session ID: s1");
     expect(result.summary).toContain("CWD: /tmp/proj");
     expect(result.summary).toContain("## Conversation");
     expect(result.summary).toContain("<read-files>");
     expect(result.summary).toContain("<modified-files>");
     expect(result.readFiles).toContain("lib/parse.ts");
     expect(result.modifiedFiles).toContain("lib/parse.ts");
+  });
+
+  test("points the next model to the full Pi transcript and source JSONL", () => {
+    const result = compileSessionJsonl([sessionLine, userMsg("continue the current task")].join("\n"));
+
+    expect(result.summary).toContain(
+      "<full-session-recovery>\n" +
+      "Full transcript: `ctxgo show session --provider pi --provider-session 's1'`\n" +
+      "Source JSONL: `ctxgo locate session --provider pi --provider-session 's1'`\n" +
+      "</full-session-recovery>",
+    );
+  });
+
+  test("omits full-session recovery when no provider session ID is available", () => {
+    const result = compileSessionJsonl(userMsg("continue the current task"));
+
+    expect(result.summary).not.toContain("<full-session-recovery>");
+    expect(result.summary).not.toContain("ctxgo show session");
   });
 
   test("recall note references the registered tool name", () => {
@@ -117,10 +136,33 @@ describe("compileSessionJsonl", () => {
     ].join("\n")).summary;
 
     expect(summary).toContain("[User] spec the live task activity panel");
-    expect(summary).toContain("[Context: dc-rtk-context]");
+    expect(summary).not.toContain("dc-rtk-context");
     const resumeIndex = summary.match(/<resume-index>\n([\s\S]*?)\n<\/resume-index>/)?.[1] ?? "";
     expect(resumeIndex).toContain("recent-user-intent:\n- spec the live task activity panel");
     expect(resumeIndex).not.toMatch(/recent-user-intents?:[\s\S]*Before reading a file/);
+  });
+
+  test("drops reinjected runtime context and obsolete advisory analysis", () => {
+    const custom = (customType: string, content: string) => JSON.stringify({
+      type: "custom_message",
+      customType,
+      content,
+    });
+    const summary = compileSessionJsonl([
+      sessionLine,
+      custom("repomap-brief", "A very large startup repository map"),
+      userMsg("implement the task activity panel"),
+      custom("dc-hooks-read-cache", "Previously read paths and cache policy"),
+      custom("bard-context", "Old advisory analysis with discarded alternatives"),
+      assistantMsg("The panel should expose the currently running tool and elapsed time."),
+      userMsg("spec it"),
+    ].join("\n")).summary;
+
+    expect(summary).not.toContain("startup repository map");
+    expect(summary).not.toContain("read paths and cache policy");
+    expect(summary).not.toContain("Old advisory analysis");
+    expect(summary).not.toContain("[BARD]");
+    expect(summary).toContain("spec it — refers to: The panel should expose the currently running tool and elapsed time.");
   });
 
   test("preserves the latest structured goal objective and status", () => {
@@ -242,7 +284,8 @@ describe("compileSessionJsonl", () => {
     ].join("\n")).summary;
 
     expect(summary).not.toContain("--- FAIL: parser");
-    expect(summary.match(/PASS \[bash cwd=\/tmp\/proj\]/g)).toHaveLength(2);
+    expect(summary.match(/PASS \[bash cwd=\/tmp\/proj\]/g)).toHaveLength(1);
+    expect(summary).toContain("stale verification receipts omitted");
     expect(summary).toContain("PASS [bash cwd=/tmp/other]: bun test lib/parser.test.ts");
     expect(summary).toContain("bun test lib/parser.test.ts");
     expect(summary).toContain("bun  test lib/parser.test.ts");
@@ -338,7 +381,7 @@ describe("compileSessionJsonl", () => {
     expect(summary).toContain("<modified-files>\n./src/parser.ts\n</modified-files>");
     expect(summary).toContain("<read-files>\n./test/parser.ts\n/tmp/external/parser.ts\n</read-files>");
     expect(summary).toContain("Reread active files: ./src/parser.ts, ./test/parser.ts, /tmp/external/parser.ts");
-    expect(summary).toContain("active-files:\n- ./src/parser.ts\n- ./test/parser.ts\n- /tmp/external/parser.ts");
+    expect(summary).not.toContain("active-files:");
   });
 
   test("a later assistant state clears an older blocker continuation", () => {
@@ -522,6 +565,36 @@ describe("compileSessionJsonl", () => {
     expect(result).not.toContain("wrong-path.ts");
     expect(result).not.toContain("obsolete investigation");
     expect(result).not.toContain("obsolete failed script");
+  });
+
+  test("keeps only the newest prior summary as authoritative", () => {
+    const older = "<resume-risks>\nFailed edit for old.ts may have partial effects.\n</resume-risks>";
+    const newer = "<resume-index>\ncontinuation:\n- Finish the current parser repair.\n</resume-index>";
+    const result = compileSessionJsonl([
+      sessionLine,
+      line({ type: "compaction", summary: older }),
+      line({ type: "compaction", summary: newer }),
+      userMsg("continue the parser repair"),
+    ].join("\n")).summary;
+
+    expect(result).toContain("Finish the current parser repair");
+    expect(result).toContain("1 older summaries superseded");
+    expect(result).not.toContain("Failed edit for old.ts");
+  });
+
+  test("a successful later write clears the matching partial-write risk", () => {
+    const result = compileSessionJsonl([
+      sessionLine,
+      userMsg("repair the parser"),
+      toolCall("edit", { path: "src/parser.ts" }, "failed-write"),
+      toolResult("edit", "old text did not match", true, "failed-write"),
+      toolCall("edit", { path: "src/parser.ts" }, "successful-write"),
+      toolResult("edit", "Updated src/parser.ts", false, "successful-write"),
+      assistantMsg("The parser repair still needs verification."),
+    ].join("\n")).summary;
+
+    expect(result).not.toContain("Failed edit for src/parser.ts may have partial effects");
+    expect(result).toContain("src/parser.ts");
   });
 
   test("keeps projected resume semantics stable across repeated compactions", () => {
@@ -1055,7 +1128,7 @@ describe("compileSessionJsonl literal anchors", () => {
     expect(anchors.filter((anchor) => /^a1b2c3[0-9a-f]{2}$/.test(anchor)).length).toBeLessThanOrEqual(6);
   });
 
-  test("scales ordinary turn detail by recency while preserving old diff evidence", () => {
+  test("retains the latest three requests and does not discard older unresolved context", () => {
     const ordinary = Array.from({ length: 24 }, (_, index) =>
       userMsg(`record ${index} ${"word ".repeat(140)} END-${index}`));
     const oldDiff = assistantMsg(`diff --git a/a b/a\n@@ -1 +1 @@\n-${"old ".repeat(220)}\n+${"new ".repeat(220)}\nDIFF-END`);
@@ -1065,9 +1138,161 @@ describe("compileSessionJsonl literal anchors", () => {
 
     expect(conversation).toContain("DIFF-END");
     expect(conversation).toContain("NEWEST-END");
+    expect(conversation).toContain("[User] record 23");
+    expect(conversation).toContain("[User] record 22");
     expect(conversation).not.toContain("END-0");
     expect(conversation).not.toContain("END-10");
-    expect(result.summary).toContain("END-0");
+    expect(result.summary).not.toContain("END-0");
+  });
+
+  test("removes completed historical request-response pairs but keeps unresolved work", () => {
+    const result = compileSessionJsonl([
+      sessionLine,
+      userMsg("add the obsolete completed widget"),
+      assistantMsg("Done — the obsolete completed widget is implemented and all tests passed."),
+      userMsg("investigate the unresolved parser race"),
+      assistantMsg("The race appears to involve cancellation ordering; investigation is still open."),
+      userMsg("finish the recent formatter task"),
+      assistantMsg("Done — the formatter task is complete."),
+      userMsg("review the recent cache behavior"),
+      assistantMsg("Done — the cache review is complete."),
+      userMsg("now fix the newest rendering bug"),
+    ].join("\n"));
+    const conversation = result.summary.match(/## Conversation\n([\s\S]*?)(?:\n\n<|$)/)?.[1] ?? "";
+
+    expect(conversation).not.toContain("obsolete completed widget");
+    expect(conversation).toContain("unresolved parser race");
+    expect(conversation).toContain("investigation is still open");
+    expect(conversation).toContain("recent formatter task");
+    expect(conversation).toContain("recent cache behavior");
+    expect(conversation).toContain("newest rendering bug");
+    expect(result.summary).not.toContain("obsolete completed widget");
+  });
+
+  test("treats an answered explanation as complete even when it describes failures", () => {
+    const result = compileSessionJsonl([
+      sessionLine,
+      userMsg("explain why the historical G4 check failed"),
+      assistantMsg("G4 failed because the proposal was unresolved and recovery remained blocked. The requested diagnosis is complete."),
+      userMsg("recent request one"),
+      assistantMsg("Done — recent one."),
+      userMsg("recent request two"),
+      assistantMsg("Done — recent two."),
+      userMsg("recent request three"),
+    ].join("\n")).summary;
+
+    expect(result).not.toContain("historical G4 check");
+    expect(result).not.toContain("proposal was unresolved");
+  });
+
+  test("drops stale assistant context before the earliest retained request", () => {
+    const summary = compileSessionJsonl([
+      sessionLine,
+      assistantMsg("Old completion report from before the retained user requests."),
+      userMsg("recent request one"),
+      assistantMsg("Done — recent one."),
+      userMsg("recent request two"),
+      assistantMsg("Done — recent two."),
+      userMsg("recent request three"),
+    ].join("\n")).summary;
+
+    expect(summary).not.toContain("Old completion report");
+    expect(summary).toContain("recent request one");
+  });
+
+  test("retains a running singleton task and removes it after a terminal update", () => {
+    const runningOnly = compileSessionJsonl([
+      sessionLine,
+      userMsg("implement the preservation patch"),
+      toolCall("task_wait", { id: "a1b21cfd" }, "task-running"),
+      toolResult("task_wait", JSON.stringify({
+        id: "a1b21cfd",
+        status: "running",
+        agentId: "471f5042-71fb-416",
+        cwd: "/Users/vampire/code/ts/pi-dc-memory",
+        objective: "implement preservation and recovery patch",
+      }), false, "task-running"),
+    ].join("\n")).summary;
+    expect(runningOnly).toContain("Task a1b21cfd; agent 471f5042-71fb-416; running at snapshot");
+    expect(runningOnly).toContain("/Users/vampire/code/ts/pi-dc-memory");
+
+    const completed = compileSessionJsonl([
+      sessionLine,
+      userMsg("implement the preservation patch"),
+      toolCall("task_wait", { id: "a1b21cfd" }, "task-running"),
+      toolResult("task_wait", JSON.stringify({ id: "a1b21cfd", status: "running" }), false, "task-running"),
+      toolCall("task_wait", { id: "a1b21cfd" }, "task-done"),
+      toolResult("task_wait", JSON.stringify({ id: "a1b21cfd", status: "completed" }), false, "task-done"),
+    ].join("\n")).summary;
+    expect(completed).not.toContain("<active-tasks>");
+  });
+
+  test("removes a task completed by a TaskAgent notification", () => {
+    const summary = compileSessionJsonl([
+      sessionLine,
+      userMsg("delegate the investigation"),
+      toolCall("TaskAgent", { prompt: "Explore the parser" }, "task-start"),
+      toolResult("TaskAgent", "TaskAgent 17323eb3 started\n38aad0ca-c4d6-4c0 running explore · Inspect parser behavior", false, "task-start"),
+      line({
+        type: "custom_message",
+        customType: "taskagent-notification",
+        content: "Task agent 38aad0ca-c4d6-4c0 completed successfully",
+      }),
+    ].join("\n")).summary;
+
+    expect(summary).not.toContain("<active-tasks>");
+    expect(summary).not.toContain("taskagent-notification");
+  });
+
+  test("attributes Git receipts to a leading literal cd directory", () => {
+    const summary = compileSessionJsonl([
+      sessionLine,
+      userMsg("inspect the delegated repository"),
+      toolCall("bash", { command: "cd /Users/vampire/knowledge && git status --short" }, "git-status"),
+      toolResult("bash", " M INDEX.md", false, "git-status"),
+    ].join("\n")).summary;
+
+    expect(summary).toContain("[git receipt, cwd=/Users/vampire/knowledge]");
+    expect(summary).not.toContain("[git receipt, cwd=/tmp/proj]");
+  });
+
+  test("a later reopening prevents an older group from being classified complete", () => {
+    const result = compileSessionJsonl([
+      sessionLine,
+      userMsg("repair the historical migration"),
+      assistantMsg("Done — the migration is implemented and all tests passed."),
+      assistantMsg("Correction: the rollback remains broken and needs work."),
+      userMsg("recent request one"),
+      assistantMsg("Done — recent one."),
+      userMsg("recent request two"),
+      assistantMsg("Done — recent two."),
+      userMsg("recent request three"),
+    ].join("\n"));
+
+    expect(result.summary).toContain("repair the historical migration");
+    expect(result.summary).toContain("rollback remains broken");
+  });
+
+  test("protects the latest three requests and final states through budget eviction", () => {
+    const lines = [
+      sessionLine,
+      userMsg("old completed request"),
+      assistantMsg("Done — old completed request."),
+    ];
+    for (let request = 1; request <= 3; request++) {
+      lines.push(userMsg(`PROTECTED-REQUEST-${request} ${"request detail ".repeat(40)}`));
+      for (let turn = 0; turn < 12; turn++) {
+        lines.push(assistantMsg(`intermediate ${request}.${turn} ${"procedural detail ".repeat(100)}`));
+      }
+      lines.push(assistantMsg(`PROTECTED-FINAL-${request}: ${request === 1 ? "work remains open" : "complete"}.`));
+    }
+    const result = compileSessionJsonl(lines.join("\n"));
+
+    for (let request = 1; request <= 3; request++) {
+      expect(result.summary).toContain(`PROTECTED-REQUEST-${request}`);
+      expect(result.summary).toContain(`PROTECTED-FINAL-${request}`);
+    }
+    expect(result.summary).not.toContain("old completed request");
   });
 
   test("preserves exact output-artifact receipts ahead of ordinary recent results", () => {
@@ -1094,7 +1319,7 @@ describe("compileSessionJsonl literal anchors", () => {
     expect(result.summary).toContain(`sha256=${digest} bytes=10000 strategy=diagnostic`);
   });
 
-  test("U1: budget cascade continues to lower tiers when recent tool results contain only protected receipts", () => {
+  test("protected artifact receipts survive latest-request focusing", () => {
     const digest = "b".repeat(64);
     const artifactPath = "/tmp/project/.pi/dc-shrink/tool-output/000002-bash.txt";
     const receipt = [
@@ -1111,8 +1336,9 @@ describe("compileSessionJsonl literal anchors", () => {
       lines.push(userMsg(`## Section ${i}\n` + `item_${i} token_val_${i}=123 /path/to/source/file_${i}.ts `.repeat(10)));
     }
     const result = compileSessionJsonl(lines.join("\n"));
-    expect(result.summary).toContain("<summary-omissions>");
     expect(result.summary).toContain(`artifact: ${artifactPath}`);
+    expect(result.summary).toContain("## Section 69");
+    expect(result.summary).not.toContain("## Section 0");
   });
 
   test("U2: consecutive identical tool errors fold into occurrence count (xN)", () => {
@@ -1222,6 +1448,44 @@ describe("compileSessionJsonl literal anchors", () => {
     expect(result.summary).toContain("Resolved all three stale records");
     expect(result.summary).toContain("no response needed");
     expect(result.summary).not.toContain("<resume-tasks>");
+    expect(result.summary).not.toContain("<modified-files>");
+    expect(result.summary).not.toContain("<recent-tool-calls>");
+  });
+
+  test("terminal completion supersedes prior operational state", () => {
+    const prior = [
+      "<verification>\nFAIL: bun test — old failure\n</verification>",
+      "<resume-risks>\nFailed edit for src/old.ts may have partial effects.\n</resume-risks>",
+      "<resume-tasks>\nRun bun test\n</resume-tasks>",
+    ].join("\n\n");
+    const result = compileSessionJsonl([
+      sessionLine,
+      line({ type: "compaction", summary: prior }),
+      userMsg("finish the repair"),
+      assistantMsg("Committed the verified repair. Remaining work: none.\n\nNext choice: None — task complete; no response needed."),
+    ].join("\n")).summary;
+
+    expect(result).not.toContain("## Prior Summaries");
+    expect(result).not.toContain("old failure");
+    expect(result).not.toContain("Failed edit for src/old.ts");
+    expect(result).toContain("Remaining work: none");
+    expect(result).not.toContain("<resume-index>");
+  });
+
+  test("terminal completion drops assistant context before the retained requests", () => {
+    const summary = compileSessionJsonl([
+      sessionLine,
+      assistantMsg("Old implementation plan that predates the retained request."),
+      userMsg("finish the implementation"),
+      assistantMsg("Implemented and verified."),
+      userMsg("commit it"),
+      assistantMsg("Committed. Remaining work: none.\n\nNext choice: None — task complete; no response needed."),
+    ].join("\n")).summary;
+
+    expect(summary).not.toContain("Old implementation plan");
+    expect(summary).toContain("[User] finish the implementation");
+    expect(summary).toContain("[User] commit it");
+    expect(summary).not.toContain("<resume-index>");
   });
 
   test("U5: filters bookkeeping pairs while preserving valid config and issue anchors", () => {

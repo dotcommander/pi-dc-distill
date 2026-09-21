@@ -116,6 +116,11 @@ topological order. The v1 format remains unchanged and supported.
 recall_compaction(query="modified-files", limit=3)
 ```
 
+Each compacted summary also retains the Pi provider session ID and gives the
+next model exact `ctxgo show session --provider pi --provider-session '<id>'`
+and `ctxgo locate session --provider pi --provider-session '<id>'` commands for
+recovering the full indexed transcript or its source JSONL when needed.
+
 To merge project stores and ownerless historical recall, make the wider scope explicit:
 
 ```text

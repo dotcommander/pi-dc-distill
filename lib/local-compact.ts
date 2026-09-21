@@ -14,7 +14,8 @@ const RECALL_NOTE =
   "Use `recall_compaction` to search for prior work, decisions, and context from before this summary. Do not redo work already completed.";
 const COMPILE_SEPARATOR = "\n\n---\n\n";
 const MAX_STRUCTURED_SUMMARY_CODE_POINTS = 65_300;
-const TARGET_RESUME_SUMMARY_CODE_POINTS = 13_024;
+const TARGET_RESUME_SUMMARY_CODE_POINTS = 8_192;
+const RECENT_REQUEST_GROUPS_TO_KEEP = 3;
 
 const KIND_USER = "user";
 const KIND_ASSISTANT = "assistant";
@@ -50,6 +51,8 @@ interface ConversationTurn {
   text: string;
   origin?: "human" | "custom";
   customType?: string;
+  requestGroup?: number;
+  protectedRequest?: boolean;
 }
 
 interface ToolCallFingerprint {
@@ -167,8 +170,11 @@ const noiseCustomTypes = new Set([
   "skilldex-context",
   "knowledge-context",
   "knowledge-overview",
-  // dc-rtk-context is injected once per session by pi-dc-jinn; keep it OUT of this
-  // set so compaction preserves the single copy instead of dropping it.
+  // Runtime primers and read-cache hints are useful while the original session
+  // is live, but they are not work product and will be reinjected on resume.
+  "dc-rtk-context",
+  "dc-hooks-read-cache",
+  "repomap-brief",
   "dc-memory-context",
   "dc-scope-context",
   "session-primer",
@@ -182,7 +188,6 @@ const noiseCustomTypes = new Set([
   "pi-session-continuity",
   "vybe-continuity",
   "dc-analyze/scorecard",
-  "taskagent-notification",
   "dc-plan-steer",
   "pm-dispatch",
   "dc-plan-contract-snapshot",
@@ -374,7 +379,10 @@ function normalizeCustomMessage(entry: Record<string, unknown>, meta: SessionMet
     return saveHandoff(meta, handoff);
   }
   if (customType === "bard-context") {
-    return normalizeBardContext(contentText);
+    // BARD is advisory scratch analysis. Decisions and implementation evidence
+    // belong in the ordinary conversation/tool record; replaying the analysis
+    // itself wastes context and can pull a resumed model back to an old task.
+    return emptyNormalizedEntry;
   }
   if (customType === "goal-ui") {
     captureGoalState(contentText, meta);
@@ -609,6 +617,11 @@ function stripCdPrefix(command: string): string {
   return basename(after.trim());
 }
 
+function effectiveShellCwd(command: string, fallback?: string): string | undefined {
+  const match = command.trim().match(/^cd\s+(?:'([^']+)'|"([^"]+)"|([^;&|\s]+))\s+&&\s+/);
+  return match ? (match[1] ?? match[2] ?? match[3]) : fallback;
+}
+
 function fingerprintKey(name: string, args: Record<string, unknown> | undefined): string {
   const path = extractPath(args);
   if (path) return path;
@@ -647,6 +660,11 @@ class OrderedSet {
 function addMarkerLine(set: OrderedSet, line: string): void {
   const normalized = sanitize(line).trim().split(/\s+/).filter(Boolean).join(" ");
   if (normalized) set.add(sliceU16(normalized, 180));
+}
+
+function removeMarkerLine(set: OrderedSet, line: string): void {
+  const normalized = sanitize(line).trim().split(/\s+/).filter(Boolean).join(" ");
+  if (normalized) set.remove(sliceU16(normalized, 180));
 }
 
 function addExactMarkerLine(set: OrderedSet, line: string, limit = 512): void {
@@ -700,8 +718,16 @@ function limitedVerificationSlice(
   mutationEpoch: number,
   limit = 10,
 ): string[] {
-  const values = [...receipts.values()].map((receipt) =>
-    renderVerificationReceipt(receipt, mutationEpoch));
+  const all = [...receipts.values()];
+  const current = all.filter((receipt) =>
+    receipt.mutationEpoch >= mutationEpoch || receipt.status === "FAIL" || receipt.status === "INCOMPLETE");
+  const stalePasses = all.filter((receipt) =>
+    receipt.mutationEpoch < mutationEpoch && receipt.status === "PASS");
+  const retained = [...current, ...stalePasses.slice(-1)];
+  const values = retained.map((receipt) => renderVerificationReceipt(receipt, mutationEpoch));
+  if (stalePasses.length > 1) {
+    values.unshift(`... (${stalePasses.length - 1} stale verification receipts omitted)`);
+  }
   if (values.length <= limit) return values;
   return [...values.slice(values.length - limit), `... (${values.length - limit} verification rows omitted)`];
 }
@@ -863,6 +889,7 @@ function collectShellMarkers(
 ): boolean {
   const command = shellCommand(call);
   if (!command) return false;
+  const cwd = effectiveShellCwd(command, argString(call.args, "cwd") ?? sessionCwd);
   let captured = false;
   if (isVerificationCommand(command)) {
     const identity = verificationIdentity(call, sessionCwd);
@@ -872,7 +899,7 @@ function collectShellMarkers(
         status: verificationStatus(result, isError),
         tool: call.name,
         command,
-        cwd: argString(call.args, "cwd") ?? sessionCwd,
+        cwd,
         evidence: resultEvidence(result),
         mutationEpoch,
       });
@@ -881,7 +908,7 @@ function collectShellMarkers(
   }
   if (isWorkingTreeCommand(command) && !isError) {
     const empty = command.toLowerCase().includes("diff") && !command.toLowerCase().includes("check") ? "no diff" : "clean";
-    addMarkerLine(workingTree, `[git receipt, cwd=${argString(call.args, "cwd") ?? sessionCwd ?? "unknown"}] ${stripCdPrefix(command)}: ${summarizeResultLines(result, empty)}`);
+    addMarkerLine(workingTree, `[git receipt, cwd=${cwd ?? "unknown"}] ${stripCdPrefix(command)}: ${summarizeResultLines(result, empty)}`);
     captured = true;
   }
   return captured;
@@ -1042,31 +1069,97 @@ function collectLiteralAnchorsFromValue(set: OrderedSet, value: unknown): void {
   }
 }
 
-function collectActiveTasks(toolName: string, result: string, tasks: OrderedSet): void {
+function collectActiveTasks(call: PendingToolCall, result: string, isError: boolean, tasks: OrderedSet): void {
+  const toolName = call.name;
   if (!toolName.toLowerCase().includes("task")) return;
+  if (isError) return;
+  const terminal = new Set(["done", "complete", "completed", "failed", "cancelled", "canceled"]);
+  const removeTask = (id: string) => {
+    for (const line of tasks.slice()) {
+      if (line.startsWith(`${id} `) || line.includes(`Task ${id};`)) tasks.remove(line);
+    }
+  };
+  const recordTask = (record: Record<string, unknown>) => {
+    const id = String(record.id ?? record.taskId ?? record.task_id ?? "").trim();
+    const status = String(record.status ?? record.state ?? "").toLowerCase().trim();
+    if (!id) return;
+    removeTask(id);
+    if (!status || terminal.has(status)) return;
+    const agent = String(record.agentId ?? record.agent_id ?? record.agent ?? "").trim();
+    const repo = String(record.cwd ?? record.repo ?? record.repository ?? "").trim();
+    const title = String(record.title ?? record.task ?? record.objective ?? record.description ?? "").trim();
+    addMarkerLine(tasks, [
+      `Task ${id};`,
+      agent && `agent ${agent};`,
+      `${status} at snapshot;`,
+      repo && `${repo};`,
+      title,
+    ].filter(Boolean).join(" "));
+  };
   try {
     const parsed = JSON.parse(result);
-    const records = Array.isArray(parsed) ? parsed : Array.isArray(parsed?.tasks) ? parsed.tasks : undefined;
+    const clearTerminalUpdates = (value: unknown): void => {
+      if (Array.isArray(value)) {
+        for (const item of value) clearTerminalUpdates(item);
+      } else if (isRecord(value)) {
+        const id = String(value.taskId ?? value.task_id ?? "").trim();
+        const status = String(value.newStatus ?? value.status ?? value.state ?? "").toLowerCase().trim();
+        if (id && terminal.has(status)) removeTask(id);
+        for (const nested of Object.values(value)) clearTerminalUpdates(nested);
+      }
+    };
+    clearTerminalUpdates(parsed);
+    const records = Array.isArray(parsed) ? parsed : Array.isArray(parsed?.tasks) ? parsed.tasks : isRecord(parsed) ? [parsed] : undefined;
     if (records) {
       for (const record of records) {
         if (!isRecord(record)) continue;
-        const status = typeof record.status === "string" ? record.status.toLowerCase().trim() : "";
-        if (!status || ["done", "complete", "completed"].includes(status)) continue;
-        addMarkerLine(tasks, `${String(record.id ?? "").trim()} ${status} ${String(record.title ?? "").trim()}`);
+        recordTask(record);
       }
       return;
     }
   } catch {
     // Fall through to line parser.
   }
+  for (const match of result.matchAll(/"taskId"\s*:\s*"([0-9a-f]{8})"[\s\S]{0,300}?"newStatus"\s*:\s*"(done|complete|completed|failed|cancelled|canceled)"/gi)) {
+    removeTask(match[1]);
+  }
+  const started = result.match(/TaskAgent\s+([0-9a-f]{8})\s+started[\s\S]*?\n\s*([0-9a-f-]{12,})\s+(running|in-progress|open|blocked)\s+[^·\n]*·\s*([^·\n]+)/i);
+  if (started) {
+    const [, id, agent, status, title] = started;
+    removeTask(id);
+    const prompt = argString(call.args, "prompt") ?? "";
+    const repo = prompt.match(/(?:patch in|working directory|repo(?:sitory)?)\s+(`?)(\/(?:Users|home|tmp)\/[^\s`),;]+)/i)?.[2] ?? "";
+    addMarkerLine(tasks, [
+      `Task ${id};`,
+      `agent ${agent};`,
+      `${status.toLowerCase()} at snapshot;`,
+      repo && `${repo};`,
+      title.trim(),
+    ].filter(Boolean).join(" "));
+    return;
+  }
   for (const raw of result.split("\n")) {
     const line = raw.trim();
     const lower = line.toLowerCase();
-    if (lower.includes("done") || lower.includes("complete")) continue;
-    const status = /\b(in-progress|open|blocked)\b/.exec(lower)?.[1];
+    const status = /\b(running|in-progress|open|blocked|done|complete|completed|failed|cancelled|canceled)\b/.exec(lower)?.[1];
     const id = /\b[0-9a-f]{8}\b/.exec(line)?.[0];
-    if (status && id) addMarkerLine(tasks, `${id} ${status} ${line}`);
+    if (status && id) {
+      removeTask(id);
+      if (!terminal.has(status)) addMarkerLine(tasks, `Task ${id}; ${status} at snapshot; ${line}`);
+    }
   }
+}
+
+function collectTaskAgentNotification(block: NormalizedBlock, tasks: OrderedSet): boolean {
+  if (block.origin !== "custom" || block.customType !== "taskagent-notification") return false;
+  const text = block.text ?? "";
+  const completedAgent = text.match(/\bTask agent\s+([0-9a-f-]{12,})\s+(?:completed|failed|cancelled|canceled)\b/i)?.[1];
+  if (completedAgent) {
+    for (const line of tasks.slice()) {
+      if (line.includes(`agent ${completedAgent};`)) tasks.remove(line);
+    }
+  }
+  return true;
 }
 
 function extractSignals(text: string): {
@@ -1093,7 +1186,7 @@ function extractSignals(text: string): {
     hasArchTerm: /(schema|invariant|contract|interface|architecture|tradeoff|because|chose|instead of|root cause|constraint|assumption|decision|deprecated)/i.test(text),
     hasErrDiag: /(fails because|the issue is|panic:|error:|stack|traceback|segfault|root cause)/i.test(text),
     longForm: lines.filter((line) => line.trim()).length >= 5 || text.length >= 800,
-    startsWithFiller: /^(let me|now (let me|i'?ll|i will|update|check|run|fix|try)|i'?ll (just |now )?(check|run|try|update|fix|look)|let'?s (check|see|run|try)|next,? |good[.,!\s]|great[.,!\s]|perfect[.,!\s]|alright[.,!\s])/i.test(trimmed),
+    startsWithFiller: /^(let me|stop and breathe|now (let me|i'?ll|i will|update|check|run|fix|try)|i'?ll (just |now )?(check|run|try|update|fix|look)|let'?s (check|see|run|try)|next,? |good[.,!\s]|great[.,!\s]|perfect[.,!\s]|alright[.,!\s])/i.test(trimmed),
     pureAck: (/^\s*(good|great|perfect|excellent|nice|done|fixed)[.!,]?\s*(now|next|.{0,40})?\s*$/i.test(trimmed) ||
       /^\s*(all tests pass|tests pass|build (passes|succeeds|works|is green)|works now|passing now|that works)[.!,]?\s*$/i.test(trimmed)) &&
       trimmed.length < 200,
@@ -1128,7 +1221,9 @@ function isSubstantive(signals: Signals): boolean {
 }
 
 function isCompletionReport(text: string): boolean {
-  return /(?:<!--\s*EXECUTION:\s*COMPLETE\s*-->|Phase\s+\d+\s+is\s+implemented|\b(?:all\s+tests\s+passed|is\s+implemented|tasks?\s+completed)\b)/i.test(text);
+  const trimmed = text.trim();
+  return /(?:<!--\s*EXECUTION:\s*COMPLETE\s*-->|Phase\s+\d+\s+is\s+implemented|\b(?:all\s+tests\s+passed|is\s+implemented|tasks?\s+completed|requested work is complete)\b)/i.test(trimmed) ||
+    /^(?:done|fixed|implemented|completed|shipped)\b[\s\p{P}]/iu.test(trimmed);
 }
 
 function isRecencyExemptTurn(text: string, signals = extractSignals(text)): boolean {
@@ -1157,7 +1252,7 @@ function conversationEvictionCandidates(turns: ConversationTurn[]): Array<{ inde
       priority: (index >= recentFloor ? 1_000 : 0) + (isRecencyExemptTurn(turn.text) ? 100 : 0),
       score: signalScore(extractSignals(turn.text)),
     }))
-    .filter(({ index }) => !pinned.has(index))
+    .filter(({ index }) => !pinned.has(index) && !turns[index].protectedRequest)
     .sort((a, b) => a.priority - b.priority || a.score - b.score || a.index - b.index);
 }
 
@@ -1260,6 +1355,29 @@ function isBareConfirmation(text: string): boolean {
   return /^(?:\s*\d+[.)]\s*(?:recommended|stand down|yes|no|approve|approved|skip|stop|continue|go)[.!]?\s*)+$/i.test(text);
 }
 
+function isReferentialRequest(text: string): boolean {
+  const normalized = text.trim();
+  if (normalized.length > 100) return false;
+  return /^(?:please\s+)?(?:spec|fix|do|implement|review|test|run|ship|commit|explain|summarize|update|change|remove|add|try|finish)\s+(?:it|this|that|them|those)(?:[.!?]|\s+please)?$/i.test(normalized);
+}
+
+function resolvedUserIntent(turns: ConversationTurn[], index: number): string {
+  const request = trimResumeLine(turns[index].text);
+  if (!request || !isReferentialRequest(request)) return request;
+
+  for (let i = index - 1; i >= 0; i--) {
+    const turn = turns[i];
+    if (turn.role === "assistant" && !extractSignals(turn.text).pureAck) {
+      const subject = turn.text
+        .split("\n")
+        .map((line) => line.replace(/^#{1,6}\s+/, "").trim())
+        .find((line) => line.length >= 12);
+      if (subject) return trimResumeLine(`${request} — refers to: ${subject}`);
+    }
+  }
+  return request;
+}
+
 function selectActiveFiles(readFiles: string[], modifiedFiles: string[]): string[] {
   return boundedValues([...modifiedFiles, ...readFiles], 10, "active files");
 }
@@ -1270,7 +1388,7 @@ function buildResumeIndex(turns: ConversationTurn[], readFiles: string[], modifi
   for (let i = 0; i < turns.length; i++) {
     if (turns[i].role === "user" && turns[i].origin !== "custom") {
       if (isBareConfirmation(turns[i].text)) continue;
-      const line = trimResumeLine(turns[i].text);
+      const line = resolvedUserIntent(turns, i);
       if (line) allRecentUserIntents.push(line);
     }
   }
@@ -1279,7 +1397,17 @@ function buildResumeIndex(turns: ConversationTurn[], readFiles: string[], modifi
   const latestAssistant = turns.findLastIndex((turn) =>
     turn.role === "assistant" && !extractSignals(turn.text).pureAck);
   if (latestAssistant >= 0 && looksLikeContinuation(turns[latestAssistant].text)) {
-    const continuationLine = turns[latestAssistant].text.split("\n").findLast((line) => looksLikeContinuation(line))
+    const lines = turns[latestAssistant].text.split("\n").map((line) => line.trim()).filter(Boolean);
+    const operational = lines.find((line) =>
+      /^(?:What happens when|Implementation is running)/i.test(line) &&
+      /\b(?:await|review|verify|rerun|inspect|implement|fix|finish|report|when it(?:'s| is) done|then)\b/i.test(line))
+      ?? lines.findLast((line) =>
+      !/^Next choice:/i.test(line) &&
+      !/^Nothing is committed/i.test(line) &&
+      /\b(?:await|review|verify|rerun|inspect|implement|fix|finish|report|when it(?:'s| is) done|then)\b/i.test(line));
+    const continuationLine = operational
+      ?? lines.findLast((line) => looksLikeContinuation(line) && !/^Next choice:/i.test(line))
+      ?? lines.findLast((line) => looksLikeContinuation(line))
       ?? turns[latestAssistant].text;
     const line = trimResumeLine(continuationLine);
     if (line) allContinuationHints.push(line);
@@ -1512,7 +1640,7 @@ function compactAssistantTurns(turns: ConversationTurn[], toolAdj: ToolAdjacent[
     tools: toolAdj[index]?.tools ?? [],
     files: toolAdj[index]?.files ?? [],
     hadError: toolAdj[index]?.hadError ?? false,
-    keep: pinned.has(index),
+    keep: pinned.has(index) || turn.protectedRequest === true,
   })).filter((item) => item.turn.role !== "assistant" || !item.signals.pureAck);
 
   collapseEditLoops(scored);
@@ -1544,6 +1672,101 @@ function compactAssistantTurns(turns: ConversationTurn[], toolAdj: ToolAdjacent[
   return result;
 }
 
+type RequestState = "complete" | "open" | "unknown";
+
+function terminalText(text: string): string {
+  return text
+    .replace(/```[\s\S]*?```/g, "")
+    .split("\n")
+    .filter((line) => !/^\s*>/.test(line))
+    .join("\n")
+    .trim();
+}
+
+function requestState(turns: ConversationTurn[], group: number): RequestState {
+  const userText = turns.find((turn) => turn.requestGroup === group && turn.role === "user")?.text ?? "";
+  const assistants = turns.filter((turn) => turn.requestGroup === group && turn.role === "assistant");
+  const latest = assistants.at(-1);
+  if (!latest) return "unknown";
+  const text = terminalText(latest.text);
+  const informationalRequest = /\b(?:explain|review|audit|analy[sz]e|summari[sz]e|assess|inspect|investigate|diagnose|report)\b/i.test(userText) &&
+    !/\b(?:fix|implement|change|update|remove|add|write|build|finish|complete|resolve|repair)\b/i.test(userText);
+  const explicitContinuation = /\b(?:still\s+(?:working|investigating)|i(?:'m| am)\s+(?:working|investigating)|investigation\s+is\s+still\s+open|work\s+remains?\s+open|next\s+[—:-]|todo:|remaining\s+(?:work|task|step)|needs?\s+(?:work|verification))\b/i.test(text);
+  if (explicitContinuation || (!informationalRequest && /\b(?:blocked|incomplete|unfinished|unresolved|still\s+(?:open|failing|needed)|remains?\s+(?:broken|open|unfinished|unimplemented)|not\s+(?:implemented|verified|complete)|needs?\s+(?:fix)|remaining\s+issue)\b/i.test(text))) {
+    return "open";
+  }
+  if (isCompletionReport(text) || /<!--\s*(?:DISPOSITION:\s*IMPLEMENT|EXECUTION:\s*COMPLETE)\s*-->/i.test(text)) {
+    return "complete";
+  }
+  return informationalRequest && text.length >= 24 ? "complete" : "unknown";
+}
+
+function hasTerminalNoWorkCompletion(turns: ConversationTurn[]): boolean {
+  const latest = turns.findLast((turn) => turn.role === "assistant");
+  if (!latest) return false;
+  const text = terminalText(latest.text);
+  return /Next choice:\s*None\b[^\n]*(?:no response needed|task complete)/i.test(text) ||
+    /\b(?:remaining work:\s*none|nothing to pick up)\b/i.test(text);
+}
+
+function classifyRequestGroups(turns: ConversationTurn[]): Set<number> {
+  let group = -1;
+  for (const turn of turns) {
+    if (turn.role === "user" && turn.origin !== "custom") group += 1;
+    if (group >= 0) turn.requestGroup = group;
+  }
+  if (group < 0) return new Set();
+  const firstProtected = Math.max(0, group - RECENT_REQUEST_GROUPS_TO_KEEP + 1);
+  const protectedGroups = new Set<number>();
+  for (let value = firstProtected; value <= group; value++) protectedGroups.add(value);
+  for (const protectedGroup of protectedGroups) {
+    const userIndex = turns.findIndex((turn) => turn.requestGroup === protectedGroup && turn.role === "user");
+    const latestAssistant = turns.findLast((turn) =>
+      turn.requestGroup === protectedGroup && turn.role === "assistant");
+    if (userIndex >= 0) turns[userIndex].protectedRequest = true;
+    if (latestAssistant) latestAssistant.protectedRequest = true;
+    if (userIndex >= 0 && isBareConfirmation(turns[userIndex].text)) {
+      for (let index = userIndex - 1; index >= 0; index--) {
+        const candidate = turns[index];
+        if (candidate.role !== "assistant") continue;
+        if (/\b(?:proposal|plan|implement|change|fix|contract|scope|next step|will)\b/i.test(candidate.text)) {
+          candidate.protectedRequest = true;
+        }
+        break;
+      }
+    }
+  }
+  return protectedGroups;
+}
+
+function removeCompletedHistoricalRequests(
+  turns: ConversationTurn[],
+  toolAdj: ToolAdjacent[],
+  protectedGroups: Set<number>,
+): void {
+  const completed = new Set<number>();
+  const groups = new Set(turns.flatMap((turn) => turn.requestGroup === undefined ? [] : [turn.requestGroup]));
+  for (const group of groups) {
+    if (!protectedGroups.has(group) && requestState(turns, group) === "complete") completed.add(group);
+  }
+  for (let index = turns.length - 1; index >= 0; index--) {
+    const group = turns[index].requestGroup;
+    if (group !== undefined && completed.has(group)) {
+      turns.splice(index, 1);
+      toolAdj.splice(index, 1);
+    }
+  }
+  const firstUser = turns.findIndex((turn) => turn.role === "user" && turn.origin !== "custom");
+  if (firstUser > 0 && !isBareConfirmation(turns[firstUser].text)) {
+    for (let index = firstUser - 1; index >= 0; index--) {
+      const signals = extractSignals(turns[index].text);
+      if (!signals.startsWithFiller && (signals.hasDiff || signals.hasCodeFence)) continue;
+      turns.splice(index, 1);
+      toolAdj.splice(index, 1);
+    }
+  }
+}
+
 function recallQueryFromAnchor(anchor: string): string {
   const trimmed = anchor.trim().replace(/\/+$/g, "");
   if (!trimmed || trimmed.startsWith("http://") || trimmed.startsWith("https://")) return trimmed;
@@ -1568,6 +1791,7 @@ function buildResumeTasks(input: {
   verification: string[];
   workingTree: string[];
   sourceAnchors: string[];
+  activeTasks: string[];
   resumeIndex: ResumeIndex;
   pathRoot?: string;
 }): string[] {
@@ -1575,6 +1799,8 @@ function buildResumeTasks(input: {
   const continuation = input.resumeIndex.continuationHints.at(-1);
   if (continuation && /Next choice:\s*None\b.*no response needed/i.test(continuation)) return [];
   const activeFiles = input.resumeIndex.activeFiles.filter((file) => !file.startsWith("... (")).slice(0, 4);
+  const activeTask = input.activeTasks.findLast((line) => !line.startsWith("... ("));
+  if (activeTask) addMarkerLine(out, `Await/check existing delegated task; do not launch a duplicate: ${activeTask}`);
   if (activeFiles.length > 0) {
     addExactMarkerLine(out, boundedListMarker("Reread active files: ", activeFiles.map((file) => displayPath(file, input.pathRoot))));
   }
@@ -1678,7 +1904,13 @@ function collectConversationToolResult(
     if (command && !isKnownReadOnlyShellCommand(command)) mutationEpoch += 1;
     if (path) {
       recordToolFileAccess(call.name, path, readFiles, modifiedFiles, createdFiles);
-      if (fileWriteTools.has(call.name.toLowerCase())) mutationEpoch += 1;
+      if (fileWriteTools.has(call.name.toLowerCase())) {
+        mutationEpoch += 1;
+        removeMarkerLine(
+          resumeRisks,
+          `Failed ${call.name} for ${path} may have partial effects; inspect before retry.`,
+        );
+      }
     }
   } else if (matched && isError && path && fileWriteTools.has(call.name.toLowerCase())) {
     addMarkerLine(resumeRisks, `Failed ${call.name} for ${path} may have partial effects; inspect before retry.`);
@@ -1692,7 +1924,7 @@ function collectConversationToolResult(
     sessionCwd,
     mutationEpoch,
   );
-  collectActiveTasks(call.name, text, activeTasks);
+  collectActiveTasks(call, text, isError, activeTasks);
   if (!text || capturedAsMarker) {
     return { pendingError: isError, omittedErrorResults, omittedRecentResults, mutationEpoch };
   }
@@ -1782,7 +2014,6 @@ function extractConversation(blocks: NormalizedBlock[], sessionCwd?: string): Co
   const verification = new Map<string, VerificationReceipt>();
   const workingTree = new OrderedSet();
   const sourceAnchors = new OrderedSet();
-  const literalAnchors = collectLiteralAnchors(blocks);
   const activeTasks = new OrderedSet();
   const resumeRisks = new OrderedSet();
   const pendingCalls: PendingToolCall[] = [];
@@ -1794,6 +2025,7 @@ function extractConversation(blocks: NormalizedBlock[], sessionCwd?: string): Co
   const lastErrorRun: { current?: ToolResultEntry } = {};
 
   for (const block of blocks) {
+    if (collectTaskAgentNotification(block, activeTasks)) continue;
     if (block.kind === KIND_TOOL_CALL) {
       const pending = collectConversationToolCall(
         block,
@@ -1884,10 +2116,15 @@ function extractConversation(blocks: NormalizedBlock[], sessionCwd?: string): Co
     });
   }
 
+  const protectedGroups = classifyRequestGroups(turns);
+  removeCompletedHistoricalRequests(turns, toolAdj, protectedGroups);
+
   for (let index = 0; index < turns.length; index++) {
     turns[index] = {
       ...turns[index],
-      text: trimTurn(turns[index].text, turns.length - index - 1),
+      text: turns[index].protectedRequest
+        ? trimTurn(turns[index].text, 0)
+        : trimTurn(turns[index].text, turns.length - index - 1),
     };
   }
   let finalTurns = turns;
@@ -1901,17 +2138,48 @@ function extractConversation(blocks: NormalizedBlock[], sessionCwd?: string): Co
     toolAdj.splice(remove, 1);
   }
   finalTurns = compactAssistantTurns(finalTurns, toolAdj);
+  const firstFinalUser = finalTurns.findIndex((turn) => turn.role === "user" && turn.origin !== "custom");
+  if (firstFinalUser > 0 && !isBareConfirmation(finalTurns[firstFinalUser].text)) {
+    finalTurns = finalTurns.filter((turn, index) => {
+      if (index >= firstFinalUser) return true;
+      const signals = extractSignals(turn.text);
+      return signals.hasDiff || signals.hasCodeFence;
+    });
+  }
+  const terminalComplete = hasTerminalNoWorkCompletion(finalTurns);
+  if (terminalComplete) {
+    finalTurns = finalTurns.filter((turn) =>
+      turn.requestGroup !== undefined && protectedGroups.has(turn.requestGroup));
+  }
+  const literalAnchors = terminalComplete ? [] : collectLiteralAnchors(finalTurns.map((turn) => ({
+    kind: turn.role,
+    text: turn.text,
+    origin: turn.origin,
+    customType: turn.customType,
+  })));
 
   const boundedReadFiles = newestLimited(readFiles.slice(), 50);
   const boundedModifiedFiles = newestLimited([...modifiedFiles.slice(), ...createdFiles.slice()], 50);
-  const finalReadFiles = boundedReadFiles.values;
-  const finalModifiedFiles = boundedModifiedFiles.values;
-  const finalVerification = limitedVerificationSlice(verification, mutationEpoch);
-  const finalWorkingTree = limitedSetSlice(workingTree, 10, "working-tree rows");
-  const finalSourceAnchors = limitedSetSlice(sourceAnchors, 10, "source anchors");
-  const finalActiveTasks = limitedSetSlice(activeTasks, 10, "active tasks");
-  const finalResumeRisks = limitedSetSlice(resumeRisks, 8, "resume risks");
-  const resumeIndex = buildResumeIndex(finalTurns, finalReadFiles, finalModifiedFiles, recentToolCalls);
+  let finalReadFiles = terminalComplete ? [] : boundedReadFiles.values;
+  let finalModifiedFiles = terminalComplete ? [] : boundedModifiedFiles.values;
+  const finalVerification = terminalComplete ? [] : limitedVerificationSlice(verification, mutationEpoch);
+  let finalWorkingTree = terminalComplete ? [] : limitedSetSlice(workingTree, 10, "working-tree rows");
+  let finalSourceAnchors = terminalComplete ? [] : limitedSetSlice(sourceAnchors, 10, "source anchors");
+  const finalActiveTasks = terminalComplete ? [] : limitedSetSlice(activeTasks, 10, "active tasks");
+  const delegatedRepo = finalActiveTasks.findLast((line) => line.includes("running at snapshot"))
+    ?.match(/(;\s+)(\/(?:Users|home|tmp)\/[^;]+);/)?.[2];
+  if (delegatedRepo) {
+    const belongsToDelegatedRepo = (value: string) => value === delegatedRepo || value.startsWith(`${delegatedRepo}/`);
+    finalReadFiles = finalReadFiles.filter(belongsToDelegatedRepo);
+    finalModifiedFiles = finalModifiedFiles.filter(belongsToDelegatedRepo);
+    finalSourceAnchors = finalSourceAnchors.filter(belongsToDelegatedRepo);
+    finalWorkingTree = finalWorkingTree.filter((line) => line.includes(`cwd=${delegatedRepo}`));
+  }
+  const finalResumeRisks = terminalComplete ? [] : limitedSetSlice(resumeRisks, 8, "resume risks");
+  const finalRecentToolCalls = terminalComplete ? [] : recentToolCalls;
+  const resumeIndex = terminalComplete
+    ? { activeFiles: [], recentUserIntents: [], continuationHints: [], recallQueries: [] }
+    : buildResumeIndex(finalTurns, finalReadFiles, finalModifiedFiles, finalRecentToolCalls);
   const pathRoot = choosePathRoot([...finalReadFiles, ...finalModifiedFiles, ...resumeIndex.activeFiles], sessionCwd);
 
   return {
@@ -1920,8 +2188,8 @@ function extractConversation(blocks: NormalizedBlock[], sessionCwd?: string): Co
     modifiedFiles: finalModifiedFiles,
     omittedReadFiles: boundedReadFiles.omitted,
     omittedModifiedFiles: boundedModifiedFiles.omitted,
-    recentToolCalls,
-    recentToolResults: [
+    recentToolCalls: finalRecentToolCalls,
+    recentToolResults: terminalComplete ? [] : [
       ...(omittedErrorResults + omittedRecentResults > 0 ? [{
         toolName: "...",
         text: `(${omittedErrorResults + omittedRecentResults} recent tool results omitted)`,
@@ -1939,10 +2207,11 @@ function extractConversation(blocks: NormalizedBlock[], sessionCwd?: string): Co
     budgetOmissions: [],
     resumeIndex,
     resumeTasks: buildResumeTasks({
-      recentToolCalls,
+      recentToolCalls: finalRecentToolCalls,
       verification: finalVerification,
       workingTree: finalWorkingTree,
       sourceAnchors: finalSourceAnchors,
+      activeTasks: finalActiveTasks,
       resumeIndex,
       pathRoot,
     }),
@@ -2113,17 +2382,15 @@ function formatRecentToolResults(results: ToolResultEntry[]): string {
   ].join("\n");
 }
 
-function formatResumeIndex(index: ResumeIndex, pathRoot?: string): string {
+function formatResumeIndex(index: ResumeIndex): string {
   const lines = ["<resume-index>"];
   for (const [label, values] of [
-    ["active-files", index.activeFiles],
     ["recent-user-intent", index.recentUserIntents],
     ["continuation", index.continuationHints],
     ["recall-queries", index.recallQueries],
   ] as const) {
     if (values.length === 0) continue;
-    const rendered = label === "active-files" ? values.map((value) => displayPath(value, pathRoot)) : values;
-    lines.push(`${label}:`, ...rendered.map((value) => `- ${escapeResumeLine(value)}`));
+    lines.push(`${label}:`, ...values.map((value) => `- ${escapeResumeLine(value)}`));
   }
   if (lines.length === 1) return "";
   lines.push("</resume-index>");
@@ -2219,25 +2486,22 @@ function summarizePriorState(summary: string): string {
   return kept.join("\n\n");
 }
 
-function formatPriorSummaries(summaries: string[]): string {
+function formatPriorSummaries(summaries: string[], preserveAll = false): string {
   if (summaries.length === 0) return "";
-  const budget = 4_000;
-  const newest = summaries.slice().reverse();
-  const kept: string[] = [];
-  let used = 0;
-  for (const summary of newest) {
-    const remaining = budget - used;
-    if (remaining <= 0) break;
-    const state = summarizePriorState(summary);
-    const size = Array.from(state).length;
-    if (size > remaining) break;
-    kept.unshift(state);
-    used += size;
+  if (preserveAll) {
+    return `## Prior Summaries\n${summaries
+      .map((summary, index) => `[Prior ${index + 1} retained state]\n${summarizePriorState(summary)}`)
+      .join("\n\n")}`;
   }
-  const omitted = summaries.length - kept.length;
-  const rows = kept.map((summary, index) => `[Prior ${index + 1} retained state]\n${summary}`);
-  if (omitted > 0) rows.unshift(`... (${omitted} older summaries omitted)`);
+  const state = summarizePriorState(summaries.at(-1) ?? "");
+  const omitted = summaries.length - 1;
+  const rows = omitted > 0 ? [`... (${omitted} older summaries superseded)`] : [];
+  rows.push(`[Prior 1 retained state]\n${state}`);
   return `## Prior Summaries\n${rows.join("\n\n")}`;
+}
+
+function shellQuote(value: string): string {
+  return `'${value.replaceAll("'", `'"'"'`)}'`;
 }
 
 function formatSummary(meta: SessionMeta, conv: ConversationResult, userFocus?: string): string {
@@ -2265,6 +2529,7 @@ function formatSummary(meta: SessionMeta, conv: ConversationResult, userFocus?: 
     parts.push(`<goal-state>\n${goalLines.join("\n")}\n</goal-state>`, "");
   }
   const metaLines = [
+    meta.id ? `Session ID: ${escapeMarkerText(meta.id)}` : "",
     meta.cwd ? `CWD: ${meta.cwd}` : "",
     meta.model ? `Model: ${meta.model}` : "",
     meta.timestamp ? `Started: ${meta.timestamp}` : "",
@@ -2273,7 +2538,9 @@ function formatSummary(meta: SessionMeta, conv: ConversationResult, userFocus?: 
   if (conv.pathRoot) {
     parts.push(`<path-root>${escapeMarkerText(conv.pathRoot)}</path-root>`, "");
   }
-  const prior = formatPriorSummaries(meta.priorSummaries);
+  const prior = hasTerminalNoWorkCompletion(conv.turns)
+    ? ""
+    : formatPriorSummaries(meta.priorSummaries, conv.turns.length === 0);
   if (prior) parts.push(prior, "");
   if (userFocus?.trim()) parts.push(`## User Focus\n${escapeMarkerText(sliceU16(userFocus.trim(), 2_048))}`, "");
   parts.push(
@@ -2305,7 +2572,10 @@ function formatSummary(meta: SessionMeta, conv: ConversationResult, userFocus?: 
     markerBlock("active-tasks", conv.activeTasks),
     markerBlock("literal-anchors", conv.literalAnchors),
     markerBlock("resume-tasks", conv.resumeTasks),
-    formatResumeIndex(conv.resumeIndex, conv.pathRoot),
+    formatResumeIndex(conv.resumeIndex),
+    meta.id
+      ? `<full-session-recovery>\nFull transcript: \`ctxgo show session --provider pi --provider-session ${shellQuote(meta.id)}\`\nSource JSONL: \`ctxgo locate session --provider pi --provider-session ${shellQuote(meta.id)}\`\n</full-session-recovery>`
+      : "",
     markerBlock("summary-omissions", conv.budgetOmissions),
   ]) {
     if (block) parts.push("", block);
@@ -2336,6 +2606,7 @@ function enforceOperatingBudget(
       verification: conv.verification,
       workingTree: conv.workingTree,
       sourceAnchors: conv.sourceAnchors,
+      activeTasks: conv.activeTasks,
       resumeIndex: conv.resumeIndex,
       pathRoot: conv.pathRoot,
     });
@@ -2357,9 +2628,6 @@ function enforceOperatingBudget(
     } else if (conv.recentToolCalls.length > 0) {
       conv.recentToolCalls.shift();
       note("recent tool calls");
-    } else if (conv.activeTasks.length > 0) {
-      conv.activeTasks.shift();
-      note("active tasks");
     } else if (conv.verification.some((line) => line.includes("[freshness: not established"))) {
       const stale = conv.verification.findIndex((line) => line.includes("[freshness: not established"));
       conv.verification.splice(stale, 1);
@@ -2381,6 +2649,9 @@ function enforceOperatingBudget(
       } else if (conv.verification.length > 1) {
         conv.verification.shift();
         note("verification receipts");
+      } else if (conv.activeTasks.length > 1) {
+        conv.activeTasks.shift();
+        note("active tasks");
       } else {
         break;
       }
