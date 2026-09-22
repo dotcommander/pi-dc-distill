@@ -15,11 +15,11 @@ call a model and cancels instead of falling back to Pi's default compactor.
 | --- | --- |
 | `/compact` | Run Pi's built-in manual compaction with dc-shrink's deterministic result. |
 | `/compact <focus>` | Preserve a bounded focus hint at the top of the summary. |
-| `/compact-status` | Show monitor, Pi-derived thresholds, dump state, pending state, and last failure without compacting. |
 
-Pi owns and dispatches `/compact`; dc-shrink does not shadow it. `/compact
-status` compacts with `status` as focus text, so use `/compact-status` for
-diagnostics. Manual compaction never queues an autonomous continuation.
+Pi owns and dispatches `/compact`; dc-shrink does not shadow it and registers
+no slash command of its own. `/compact status` simply compacts with `status`
+as focus text; there is no separate status command. Manual compaction never
+queues an autonomous continuation.
 
 ## What Gets Compacted
 
@@ -37,10 +37,9 @@ notification.
 
 ## Autonomous Compaction
 
-At Pi's documented `turn_end` boundary, after the response and its tool calls,
-dc-shrink derives boundaries from Pi's effective `compaction` settings and can
-compact before the next assistant turn. It checks again at `agent_settled` as
-an end-of-run fallback:
+At Pi's `agent_settled` boundary — after the response and its tool calls have
+settled — dc-shrink derives boundaries from Pi's effective `compaction` settings
+and can compact before the next run:
 
 - Pi trigger: `contextWindow - reserveTokens`
 - auto: `min(120,000, Pi trigger - 20,000)` → Mechanical compaction
@@ -57,7 +56,10 @@ attempt, `~/.pi/data/dc-shrink/diag.log` records a reason-deduplicated
 
 After Pi appends a matching autonomous compaction, dc-shrink may queue a hidden
 `dc-shrink-continuation` turn if the session is idle. It does not render as user
-input. A manual compaction leaves the next move to you.
+input. A manual compaction leaves the next move to you. Delivery is durable:
+if a restart, reload, or tree switch loses the in-flight delivery, dc-shrink
+reads the journalled attempt from the session ledger on startup and delivers
+the unanswered autonomous continuation exactly once.
 
 ## Recall
 
@@ -124,8 +126,9 @@ file blocks each keep 50 paths, individual marker items keep 512 code points,
 and verification/working-tree/source-anchor/task blocks keep ten items. Every
 truncated list includes an omitted-count row, and XML markers remain balanced.
 
-Details version 7 includes:
+Details version 8 includes:
 
+- `autonomous`, whether the attempt was queued by the autonomous monitor
 - `tokensAfter`, Pi's rebuilt message-context estimate
 - `summaryTokens`, the returned-summary estimate
 - `tokensAfterSource: "pi-rebuilt-message-estimate"`
@@ -138,5 +141,4 @@ Details version 7 includes:
 
 After compaction, dc-shrink reads Pi's native
 `{ role: "compactionSummary", summary }` message and may inject a short,
-bounded, de-duplicated focus echo into the next context. `/compact-status` shows
-the last injected echo.
+bounded, de-duplicated focus echo into the next context.

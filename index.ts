@@ -30,6 +30,7 @@ import {
   type CompactionCardDetails,
 } from "./lib/compaction-card.ts";
 import { queueAutonomousContinuation } from "./lib/continuation.ts";
+import { recoverContinuation, type RecoveryEntryLike } from "./lib/continuation-recovery.ts";
 import { injectFocusEcho } from "./lib/focus-echo.ts";
 import { SHRINK_HANDOFF_ENTRY_TYPE, shrinkHandoffEntry } from "./lib/handoff.ts";
 import { buildMetricLine } from "./lib/metric.ts";
@@ -55,7 +56,7 @@ import {
 import { Tier } from "./lib/types.ts";
 import { registerOutputCompactor } from "./lib/output-compactor.ts";
 
-const VERSION = 7;
+const VERSION = 8;
 const WARN_COOLDOWN_MS = 120_000;
 const WARN_STEER_PROMPT = [
   "You are near the context boundary — compaction is imminent.",
@@ -122,6 +123,7 @@ interface ShrinkRuntime {
   lastFocusEcho: string | null;
   lastFailure: string | null;
   lastAutoBlockReason: string | null;
+  continuationAttemptId: string | null;
   contextWindow?: number;
   compactionCardDedupe: CompactionCardDedupeHandle | null;
 }
@@ -266,6 +268,37 @@ function checkAutonomousCompaction(
   });
 }
 
+/**
+ * Reconciles durable autonomous continuation against the active branch.
+ * Delivery and the unanswered nudge are journal-driven, so a restart,
+ * reload, or tree switch can recover a committed attempt exactly once.
+ */
+function reconcileContinuation(runtime: ShrinkRuntime, ctx: ExtensionContext): void {
+  let branch: RecoveryEntryLike[];
+  try {
+    branch = (ctx.sessionManager?.getBranch?.() ?? []) as RecoveryEntryLike[];
+  } catch {
+    // Stale or readonly session view; the next lifecycle event retries.
+    return;
+  }
+  const recovery = recoverContinuation(branch);
+  if (recovery.action === "none") {
+    runtime.continuationAttemptId = null;
+    return;
+  }
+  if (runtime.continuationAttemptId === recovery.attemptId) return;
+  const { attemptId, action } = recovery;
+  if (!attemptId) return;
+  setImmediate(() => {
+    if (runtime.continuationAttemptId === attemptId) return;
+    const delivered = queueAutonomousContinuation(runtime.pi, ctx, {
+      attemptId,
+      resumed: action === "resume",
+    });
+    if (delivered) runtime.continuationAttemptId = attemptId;
+  });
+}
+
 function summaryTokenEstimate(summary: string): number {
   return estimateTokens({
     role: "user",
@@ -350,6 +383,7 @@ function createRuntime(pi: ExtensionAPI): ShrinkRuntime {
     store: null,
     pending: null,
     nextAttemptAutonomous: false,
+    continuationAttemptId: null,
     warmupTurnsRemaining: 1,
     lastWarnTime: 0,
     lastFocusEcho: null,
@@ -476,6 +510,7 @@ function createExtension(pi: ExtensionAPI, options: ShrinkExtensionOptions = {})
               version: VERSION,
               tier: result.tier,
               attemptId,
+              autonomous: runtime.nextAttemptAutonomous,
               tokensAfter: wire.tokensAfter,
               summaryTokens: wire.summaryTokens,
               tokensAfterSource: "pi-rebuilt-message-estimate",
@@ -547,6 +582,8 @@ function createExtension(pi: ExtensionAPI, options: ShrinkExtensionOptions = {})
             Diag.warn("dc-shrink", "Pi compaction-card compatibility skipped", error);
           }
         }
+        runtime.continuationAttemptId = null;
+        reconcileContinuation(runtime, ctx);
       },
 
       session_shutdown: async (_event, ctx) => {
@@ -556,6 +593,7 @@ function createExtension(pi: ExtensionAPI, options: ShrinkExtensionOptions = {})
         clearAttempt(runtime);
         runtime.ownerSessionId = null;
         runtime.store = null;
+        runtime.continuationAttemptId = null;
       },
 
       message_end: async (event, ctx) => {
@@ -568,6 +606,11 @@ function createExtension(pi: ExtensionAPI, options: ShrinkExtensionOptions = {})
 
       agent_settled: async (_event, ctx) => {
         checkAutonomousCompaction(runtime, ctx, "agent_settled");
+      },
+
+      session_tree: async (_event, ctx) => {
+        if (!isOwner(runtime, ctx)) return;
+        reconcileContinuation(runtime, ctx);
       },
 
       session_compact: async (event, ctx) => {
@@ -649,7 +692,13 @@ function createExtension(pi: ExtensionAPI, options: ShrinkExtensionOptions = {})
             Notify.user(ctx, `Shrunk: ${pending.metric} (${afterLabel.toLocaleString()} post-commit)`, "info");
           }
           if (pending.autonomous) {
-            setImmediate(() => queueAutonomousContinuation(runtime.pi, ctx));
+            const attemptId = pending.attemptId;
+            setImmediate(() => {
+              if (runtime.continuationAttemptId === attemptId) return;
+              if (queueAutonomousContinuation(runtime.pi, ctx, { attemptId })) {
+                runtime.continuationAttemptId = attemptId;
+              }
+            });
           }
         } finally {
           clearAttempt(runtime);

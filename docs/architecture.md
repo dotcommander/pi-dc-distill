@@ -74,9 +74,10 @@ Events.compact({
   tokensBefore: preparation.tokensBefore,
   details: {
     compactor: "dc-shrink",
-    version: 7,
+    version: 8,
     tier: 1,
     attemptId,
+    autonomous,
     tokensAfter,
     summaryTokens,
     tokensAfterSource: "pi-rebuilt-message-estimate",
@@ -150,9 +151,9 @@ file, literal, and artifact records remain exempt.
 One setup-owned `ShrinkRuntime` contains the captured Pi API, owner session ID,
 monitor, latch, warnings, pending transaction, project/session identity, and
 last failure/focus state. Stateful hooks guard ownership before reading usage or
-mutating state. `turn_end` owns the in-run autonomous check because Pi emits it
-after the response and tool calls; `agent_settled` repeats the check only as an
-end-of-run fallback. The latch prevents duplicate attempts across both hooks.
+mutating state. `agent_settled` owns the autonomous check: it fires after the
+response and its tool calls settle, once per run, and consumes the warmup turn
+there. The latch prevents duplicate attempts across events.
 `session_compact_failed` records the terminal outcome and clears pending/latch
 state. Non-primary hooks are no-ops, except `session_before_compact`, which
 cancels to prevent LLM fallback. Owner shutdown clears identity so a new,
@@ -185,12 +186,22 @@ Only a committed autonomous attempt may queue the hidden
 `dc-shrink-continuation` message, and only while the session is idle. Manual
 compaction never queues continuation. Notify sites require `ctx.hasUI`.
 
+Delivery is durable and journal-driven. The attempt id rides in the compaction
+details and in the delivered message's details, so on `session_start` or a tree
+change a pure reducer over `ctx.sessionManager.getBranch()` derives the state —
+`committed`, `delivered`, `answered` — and redelivers or nudges an unanswered
+autonomous continuation exactly once; manual and pre-v8 compactions never
+recover.
+
 Focus echo consumes Pi's native `{ role: "compactionSummary", summary }`
 message, bounds the echo, and suppresses duplicates.
 
 ## Compatibility
 
 The repository's locked Pi SDK test surface is 0.82.1. Installed PATH runtimes
-are reviewed separately; Pi 0.84.4's compaction-card lifecycle is explicitly
-allowlisted. Compatibility checks must prove one extension-owned append, active
-discarded/focused content only, version-7 metrics, and zero provider requests.
+are reviewed separately; Pi 0.84.4 and 0.87.0's compaction-card lifecycles
+are explicitly allowlisted. The opt-in RPC contract suite under `tests/e2e`
+drives the installed runtime end to end with a scripted provider and proves
+one extension-owned append, active discarded/focused content only, version-8
+metrics, exactly one provider request per agent run, and zero summarizer
+requests.

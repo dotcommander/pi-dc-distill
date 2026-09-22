@@ -60,7 +60,7 @@ Use Pi’s built-in command when the session has eligible context to discard:
 
 Pi supplies the discarded active-branch input. dc-shrink compiles it locally, prefixes the returned summary with deterministic metrics, and returns it to Pi for the normal append and context rebuild. The focus text becomes a bounded part of the summary; it is limited to 2,048 Unicode code points.
 
-A manual compaction leaves the next action under your control. Autonomous compaction may queue a hidden continuation only after Pi confirms the matching compaction was appended and the session is idle.
+A manual compaction leaves the next action under your control. Autonomous compaction may queue a hidden continuation only after Pi confirms the matching compaction was appended and the session is idle. Delivery is journal-driven and restart-safe: after a reload or tree switch, dc-shrink re-reads the committed attempt from the session ledger and delivers an unanswered autonomous continuation exactly once.
 
 ## Pi-derived policy and stored data
 
@@ -71,7 +71,7 @@ dc-shrink has no extension settings. At primary-session start, it reads Pi's eff
 - Warn: `Pi trigger` (Pi's native trigger line)
 - Emergency: `contextWindow`
 
-When Pi has `compaction.enabled: false`, dc-shrink's autonomous monitor stands down; manual `/compact` remains deterministic and available. The monitor checks at Pi's documented `turn_end` boundary, after tool results are available, and checks again at `agent_settled` as an end-of-run fallback. A fixed 120-second cooldown and small-window floors remain internal loop-safety mechanics. Normal automatic attempts also observe warmup, latch, Pi-sync, and post-compaction-growth guards; emergency bypasses cooldown and Pi-sync. When usage is already above auto but a guard blocks compaction, dc-shrink writes one reason-deduplicated `auto-check blocked` record to `~/.pi/data/dc-shrink/diag.log`.
+When Pi has `compaction.enabled: false`, dc-shrink's autonomous monitor stands down; manual `/compact` remains deterministic and available. The monitor checks at Pi's `agent_settled` boundary, after the response and its tool results have settled. A fixed 120-second cooldown and small-window floors remain internal loop-safety mechanics. Normal automatic attempts also observe warmup, latch, Pi-sync, and post-compaction-growth guards; emergency bypasses cooldown and Pi-sync. When usage is already above auto but a guard blocks compaction, dc-shrink writes one reason-deduplicated `auto-check blocked` record to `~/.pi/data/dc-shrink/diag.log`.
 
 | Location | Contents |
 | --- | --- |
@@ -88,7 +88,7 @@ Raw dumps are off by default. Set `DC_SHRINK_DUMPS=1` in Pi's process environmen
 
 The live compiler receives only Pi’s preparation and active branch: the previous summary, discarded messages, discarded split-turn prefix, and the latest eligible handoff. Retained-tail and abandoned-fork messages do not become compiler input. If the normalized input exceeds 20 MiB, it retains complete newest records within that envelope instead of slicing JSON or messages.
 
-The returned wire summary is capped at 65,536 Unicode code points. Its version-7 details include the rebuilt-context token estimate, returned-summary estimate, input and summary digests, bounded file/anchor arrays, and whether the input used the normal or bounded envelope. Version-5 and version-6 entries remain readable and are not rewritten.
+The returned wire summary is capped at 65,536 Unicode code points. Its version-8 details include whether the attempt was queued by the autonomous monitor, the rebuilt-context token estimate, returned-summary estimate, input and summary digests, bounded file/anchor arrays, and whether the input used the normal or bounded envelope. Version-5 through version-7 entries remain readable and are not rewritten.
 
 Failures and cancellations fail closed: no default LLM compactor is used. Success artifacts—log, optional dumps, recall, notification, monitor reset, and autonomous continuation—are delayed until the matching extension-owned `session_compact` event verifies the appended entry.
 
@@ -147,6 +147,16 @@ This is an ESM TypeScript/Bun package. Run its configured checks from the reposi
 bun test
 bun x tsc --noEmit
 ```
+
+### Offline real-Pi lifecycle demo
+
+Run a zero-cost manual lifecycle through the installed `pi --mode rpc` runtime:
+
+```bash
+bun run shrink:demo
+```
+
+The script uses the local scripted provider, needs no API key or network access, and exits nonzero if Pi requests any provider summary. It writes a before/after session ledger, RPC trace, and provider-request trace under `.work/e2e-artifacts/demo/`, then prints the request counts and artifact location. For the full automated RPC contract suite, run `bun run shrink:e2e` (the autonomous scenario observes the production 120-second startup cooldown).
 
 Focused behavioral coverage includes deterministic results for manual, threshold, and overflow compaction triggers; transaction commit matching; continuation delivery; recall; storage; input bounding; and tool-output previews.
 

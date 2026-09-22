@@ -11,17 +11,29 @@ export const SHRINK_CONTINUATION_PROMPT = [
   "Continue exactly where you left off. Pick up the task you were working on.",
 ].join("\n");
 
+export interface AutonomousContinuationOptions {
+  /** Attempt id of the autonomous compaction this continuation belongs to. */
+  attemptId?: string;
+  /** True when re-delivering a message that already went out unanswered. */
+  resumed?: boolean;
+}
+
 export function queueAutonomousContinuation(
   pi: ExtensionAPI | null,
   ctx: ExtensionContext,
+  options: AutonomousContinuationOptions = {},
 ): boolean {
   if (!pi) return false;
   try {
     if (!(ctx.isIdle?.() ?? true)) return false;
 
+    const details: Record<string, unknown> = { reason: "autonomous_compaction" };
+    if (options.attemptId) details.attemptId = options.attemptId;
+    if (options.resumed) details.resumed = true;
+
     Notify.toLLM(pi, SHRINK_CONTINUATION_PROMPT, {
       customType: SHRINK_CONTINUATION_MESSAGE_TYPE,
-      details: { reason: "autonomous_compaction" },
+      details,
       triggerTurn: true,
     });
     return true;

@@ -47,7 +47,7 @@ entirely filtered input.
 ## Output Contract
 
 `session_before_compact` returns Pi's canonical shape with dc-shrink details
-version 7:
+version 8:
 
 ```ts
 {
@@ -57,9 +57,10 @@ version 7:
     tokensBefore: number,
     details: {
       compactor: "dc-shrink",
-      version: 7,
+      version: 8,
       tier: 1,
       attemptId: string,
+      autonomous: boolean,
       tokensAfter: number,
       summaryTokens: number,
       tokensAfterSource: "pi-rebuilt-message-estimate",
@@ -79,7 +80,7 @@ version 7:
 `tokensAfter` is Pi's rebuilt message-context estimate, calculated with
 `buildSessionContext()` and `estimateTokens()`. `summaryTokens` estimates the
 returned summary alone. `summaryDigest` hashes the exact returned wire summary,
-including its metric line. Version-5 and version-6 session entries remain
+including its metric line. Version-5 through version-7 session entries remain
 readable and are not rewritten.
 
 The final summary is limited to 65,536 Unicode code points and targets a 13,024-
@@ -106,7 +107,7 @@ success artifacts or reset the monitor.
 details version, attempt, first-kept ID, and exact summary digest match. Commit
 then resets the monitor from Pi's post-rebuild full-context usage when available,
 writes log/dump/recall, clears failure state, notifies only in a UI, and queues
-continuation only for an autonomous attempt. Pending state and the latch are
+continuation only for an autonomous attempt. Continuation delivery is durable: the attempt id is journalled in the compaction details and the delivered message, and on `session_start` or tree changes a pure reducer over the active branch redelivers an unanswered autonomous continuation exactly once. Pending state and the latch are
 released in `finally`.
 
 Session replacement, shutdown, autonomous errors, cancellation, foreign
@@ -131,7 +132,7 @@ and 100K/140K/160K are legacy fallbacks only when Pi cannot report a context
 window. Cooldown, post-compaction growth, Pi-sync, and warmup guards still
 apply. Emergency bypasses cooldown and sync. The 120,000-token target is fixed
 policy, not extension configuration; smaller contexts are capped by Pi's safe
-geometry. `/compact-status` reports Pi's inputs and the resolved boundaries.
+geometry. `auto-check blocked` records in `~/.pi/data/dc-shrink/diag.log` carry Pi's inputs and the resolved boundaries.
 
 ## Recall, Dumps, and Migration
 
@@ -164,8 +165,9 @@ the four `@earendil-works/pi-*` development dependencies and overrides to that
 version. Keep focused tests and typechecking on the resolved 0.82.1 packages;
 the installed PATH runtime is reviewed separately. The TUI-only
 compaction-card compatibility shim keeps a separate, explicit allowlist of
-reviewed active Pi versions. Pi 0.84.4 is reviewed: its `compaction_end` handler
-rebuilds the chat, then appends one native `compactionSummary` card. Add a
+reviewed active Pi versions. Pi 0.84.4 and 0.87.0 are reviewed: their
+`compaction_end` handlers rebuild the chat, then append one native
+`compactionSummary` card. Add a
 version there only after inspecting that runtime's handler and verifying its
 focused compatibility test against the active implementation.
 
@@ -176,6 +178,12 @@ bun test
 bun x tsc --noEmit
 git diff --check
 ```
+
+`bun run shrink:e2e` is the opt-in real-Pi RPC contract suite (scripted
+provider, sandboxed HOME plus temp Pi dirs); the autonomous scenario observes
+the production 120-second startup cooldown. `bun run shrink:demo` runs one
+offline manual lifecycle and writes inspectable artifacts. Both stay out of
+`bun test` discovery.
 
 Keep `runStrategies()` single-strategy and deterministic. Bump
 `details.version` when details fields or their semantics change.

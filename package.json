@@ -16,7 +16,9 @@
   "scripts": {
     "shrink:session": "bun ./bin/dc-shrink-session.ts",
     "test": "bun test",
-    "typecheck": "bun x tsc --noEmit"
+    "typecheck": "bun x tsc --noEmit",
+    "shrink:e2e": "bun test ./tests/e2e/lifecycle.e2e.ts",
+    "shrink:demo": "bun run tests/e2e/demo.ts"
   },
   "peerDependencies": {
     "@earendil-works/pi-coding-agent": "*",

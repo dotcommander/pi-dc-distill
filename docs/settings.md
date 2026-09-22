@@ -34,8 +34,9 @@ keep auto, warn, and emergency ordered. If an older Pi cannot report a context
 window, dc-shrink falls back to 100,000 / 140,000 / 160,000 tokens.
 
 The monitor retains a fixed 120-second cooldown and post-compaction growth
-guard. These are loop-safety mechanics, not user settings. `/compact-status`
-reports the resolved geometry and its Pi inputs.
+guard. These are loop-safety mechanics, not user settings. `auto-check blocked`
+lines in `~/.pi/data/dc-shrink/diag.log` record the resolved geometry and its
+Pi inputs.
 
 ## Diagnostic Dumps
 

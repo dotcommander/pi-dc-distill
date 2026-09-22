@@ -3,20 +3,21 @@
 Check current state first:
 
 ```text
-/compact-status
+tail -n 20 ~/.pi/data/dc-shrink/compact-log.jsonl
 ```
 
-Status reports token estimates, Pi sync, Pi-derived threshold inputs and
-boundaries, compactor/dump state, pending state, warmup, paths, and the last
-failure/focus echo.
+Committed-success and failure records live in `compact-log.jsonl`. When usage
+is above the auto boundary but a guard blocks compaction, `diag.log` records
+one reason-deduplicated `auto-check blocked` line with the exact guard,
+effective geometry, and Pi inputs.
 
 ## Common Issues
 
 | Symptom | Likely cause | Fix |
 | --- | --- | --- |
-| Manual `/compact` appears to do nothing | Pi found no eligible discarded context, another attempt owns the latch, or deterministic compilation cancelled. | Run `/compact-status` and inspect the failure log. |
-| `/compact status` compacted the session | Pi treats `status` as focus text. | Use `/compact-status`. |
-| Autonomous compaction does not fire at auto | Pi disabled auto-compaction, warmup, cooldown, missing Pi sync, repeat-growth guard, or an in-flight attempt. | Check `/compact-status`, then inspect the latest `auto-check blocked` line in `diag.log`; it records the exact guard and effective geometry. |
+| Manual `/compact` appears to do nothing | Pi found no eligible discarded context, another attempt owns the latch, or deterministic compilation cancelled. | Inspect the latest failure record in `~/.pi/data/dc-shrink/compact-log.jsonl`. |
+| `/compact status` compacted the session | Pi treats `status` as focus text. | There is no separate status command; inspect `compact-log.jsonl` and `diag.log` instead. |
+| Autonomous compaction does not fire at auto | Pi disabled auto-compaction, warmup, cooldown, missing Pi sync, repeat-growth guard, or an in-flight attempt. | Inspect the latest `auto-check blocked` line in `diag.log`; it records the exact guard and effective geometry. |
 | A cooperative warning appears | The context reached Pi's `contextWindow - reserveTokens` line. | Finish the atomic unit; compaction becomes unconditional at the context limit. |
 | Compaction fires at emergency despite cooldown | Emergency bypasses cooldown and sync by design. | Investigate why earlier Mechanical compaction did not reduce context. |
 | Summary lacks retained-tail content | Retained content is deliberately excluded from the discarded-input summary and remains in rebuilt context. | Inspect rebuilt context rather than expecting duplication in the summary. |
@@ -73,11 +74,15 @@ or marker; arbitrary text performs keyword search across those parts.
 ## Compatibility and Verification
 
 The repository's locked Pi SDK test surface is 0.82.1. Installed PATH runtimes
-are reviewed separately; Pi 0.84.4's compaction-card lifecycle is explicitly
-allowlisted.
+are reviewed separately; Pi 0.84.4 and 0.87.0's compaction-card lifecycles
+are explicitly allowlisted.
 
 ```bash
 bun test
 bun x tsc --noEmit
 git diff --check
 ```
+
+For the installed runtime, `bun run shrink:e2e` runs the opt-in RPC contract
+suite and `bun run shrink:demo` runs one offline manual lifecycle; both are
+excluded from `bun test`.

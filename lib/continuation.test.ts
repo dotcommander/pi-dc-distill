@@ -27,6 +27,28 @@ describe("shrink continuation delivery", () => {
     expect(call?.args[1]).toEqual({ triggerTurn: true });
   });
 
+  test("journals the attempt id and resume marker in delivery details", () => {
+    const stub = createStubCtx();
+
+    expect(
+      queueAutonomousContinuation(stub.pi, stub.ctx, {
+        attemptId: "attempt-1",
+        resumed: true,
+      }),
+    ).toBe(true);
+
+    const call = stub.calls.find((entry) => entry.api === "pi.sendMessage");
+    expect(call).toBeDefined();
+    expect(call?.args[0]).toMatchObject({
+      customType: SHRINK_CONTINUATION_MESSAGE_TYPE,
+      details: {
+        reason: "autonomous_compaction",
+        attemptId: "attempt-1",
+        resumed: true,
+      },
+    });
+  });
+
   test("does not queue while user input is pending", () => {
     const stub = createStubCtx();
     (stub.ctx as any).isIdle = () => false;

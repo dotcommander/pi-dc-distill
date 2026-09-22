@@ -8,6 +8,7 @@ import { createStubCtx, simulate } from "#shrink-framework/x/testing";
 import { buildSessionContext, estimateTokens } from "#shrink-framework/pi/coding-agent";
 import { createShrinkExtension } from "./index.ts";
 import { SHRINK_HANDOFF_ENTRY_TYPE } from "./lib/handoff.ts";
+import { SHRINK_CONTINUATION_MESSAGE_TYPE } from "./lib/continuation.ts";
 import { ShrinkStore } from "./lib/store.ts";
 
 const testRoot = mkdtempSync(join(tmpdir(), "dc-shrink-index-tests-"));
@@ -171,7 +172,7 @@ describe("dc-shrink host compaction override", () => {
           tokensBefore: 120_000,
           details: {
             compactor: "dc-shrink",
-            version: 7,
+            version: 8,
             tokensAfterSource: "pi-rebuilt-message-estimate",
           },
         },
@@ -205,7 +206,7 @@ describe("dc-shrink host compaction override", () => {
     );
 
     expect(result).toMatchObject({
-      compaction: { details: { compactor: "dc-shrink", version: 7 } },
+      compaction: { details: { compactor: "dc-shrink", version: 8 } },
     });
   });
 
@@ -487,7 +488,235 @@ describe("dc-shrink subagent safety", () => {
         },
       },
     );
-    expect(replacement).toMatchObject({ compaction: { details: { version: 7 } } });
+    expect(replacement).toMatchObject({ compaction: { details: { version: 8 } } });
+  });
+});
+
+describe("dc-shrink durable continuation recovery", () => {
+  function tick(): Promise<void> {
+    return new Promise<void>((resolve) => setImmediate(resolve));
+  }
+
+  function compactEvent(reason: "manual" | "threshold" | "overflow") {
+    return {
+      reason,
+      customInstructions: undefined,
+      signal: new AbortController().signal,
+      branchEntries: [],
+      preparation: {
+        messagesToSummarize: [{ role: "user", content: "Preserve TASK-13" }],
+        turnPrefixMessages: [],
+        previousSummary: undefined,
+        firstKeptEntryId: "entry-after-compact",
+        tokensBefore: 120_000,
+      },
+    };
+  }
+
+  function continuationMessages(stub: ReturnType<typeof createStubCtx>): Record<string, any>[] {
+    return stub.calls
+      .filter((call) => call.api === "pi.sendMessage")
+      .map((call) => call.args[0] as Record<string, any>);
+  }
+
+  function autonomousBranch(...after: unknown[]): any[] {
+    return [
+      { type: "message", message: { role: "user", content: "work" } },
+      {
+        type: "compaction",
+        details: {
+          compactor: "dc-shrink",
+          version: 8,
+          autonomous: true,
+          attemptId: "attempt-1",
+        },
+      },
+      ...after,
+    ];
+  }
+
+  test("delivers a committed autonomous continuation after restart", async () => {
+    const stub = createStubCtx();
+    extension(stub.pi);
+    await simulate.hook(stub, "session_start", {});
+    stub.ctx.sessionManager.getBranch = () => autonomousBranch();
+
+    await simulate.hook(stub, "session_start", { reason: "resume" });
+    await tick();
+
+    const messages = continuationMessages(stub);
+    expect(messages).toHaveLength(1);
+    expect(messages[0]).toMatchObject({
+      customType: SHRINK_CONTINUATION_MESSAGE_TYPE,
+      details: { reason: "autonomous_compaction", attemptId: "attempt-1" },
+    });
+
+    // A tree switch does not redeliver the same attempt.
+    await simulate.hook(stub, "session_tree", {});
+    await tick();
+    expect(continuationMessages(stub)).toHaveLength(1);
+  });
+
+  test("nudges exactly once for a delivered but unanswered continuation", async () => {
+    const stub = createStubCtx();
+    extension(stub.pi);
+    await simulate.hook(stub, "session_start", {});
+    stub.ctx.sessionManager.getBranch = () => autonomousBranch(
+      {
+        type: "custom_message",
+        customType: SHRINK_CONTINUATION_MESSAGE_TYPE,
+        details: { reason: "autonomous_compaction", attemptId: "attempt-1" },
+      },
+      { type: "message", message: { role: "user", content: "interrupted" } },
+    );
+
+    await simulate.hook(stub, "session_start", { reason: "resume" });
+    await tick();
+
+    const messages = continuationMessages(stub);
+    expect(messages).toHaveLength(1);
+    expect(messages[0]).toMatchObject({
+      customType: SHRINK_CONTINUATION_MESSAGE_TYPE,
+      details: { reason: "autonomous_compaction", attemptId: "attempt-1", resumed: true },
+    });
+
+    await simulate.hook(stub, "session_tree", {});
+    await tick();
+    expect(continuationMessages(stub)).toHaveLength(1);
+  });
+
+  test("stands down when the continuation was answered", async () => {
+    const stub = createStubCtx();
+    extension(stub.pi);
+    await simulate.hook(stub, "session_start", {});
+    stub.ctx.sessionManager.getBranch = () => autonomousBranch(
+      {
+        type: "custom_message",
+        customType: SHRINK_CONTINUATION_MESSAGE_TYPE,
+        details: { reason: "autonomous_compaction", attemptId: "attempt-1" },
+      },
+      { type: "message", message: { role: "assistant", content: "continued work" } },
+    );
+
+    await simulate.hook(stub, "session_start", { reason: "resume" });
+    await simulate.hook(stub, "session_tree", {});
+    await tick();
+
+    expect(continuationMessages(stub)).toEqual([]);
+  });
+
+  test("ignores manual and pre-v8 compactions", async () => {
+    const stub = createStubCtx();
+    extension(stub.pi);
+    await simulate.hook(stub, "session_start", {});
+    stub.ctx.sessionManager.getBranch = (): any[] => [
+      {
+        type: "compaction",
+        details: { compactor: "dc-shrink", version: 7, attemptId: "legacy" },
+      },
+      {
+        type: "compaction",
+        details: { compactor: "dc-shrink", version: 8, autonomous: false, attemptId: "manual" },
+      },
+    ];
+
+    await simulate.hook(stub, "session_start", { reason: "resume" });
+    await simulate.hook(stub, "session_tree", {});
+    await tick();
+
+    expect(continuationMessages(stub)).toEqual([]);
+  });
+
+  test("non-owner sessions never reconcile a continuation", async () => {
+    const stub = createStubCtx();
+    extension(stub.pi);
+    await simulate.hook(stub, "session_start", {});
+    stub.ctx.sessionManager.getBranch = () => autonomousBranch();
+    stub.ctx.sessionManager.getSessionId = () => "child-session";
+    stub.cmdCtx.sessionManager.getSessionId = () => "child-session";
+
+    await simulate.hook(stub, "session_tree", {});
+    await tick();
+
+    expect(continuationMessages(stub)).toEqual([]);
+  });
+
+  test("a committed autonomous attempt delivers once and survives duplicate events", async () => {
+    const stub = createStubCtx();
+    extension(stub.pi);
+    await simulate.hook(stub, "session_start", {});
+
+    // Consume the warmup turn, then cross the emergency threshold so the
+    // autonomous monitor latches an attempt and requests host compaction.
+    await simulate.hook(stub, "agent_settled", {});
+    stub.ctx.getContextUsage = () => ({
+      tokens: 200_000,
+      contextWindow: 200_000,
+      percent: 100,
+    });
+    await simulate.hook(stub, "agent_settled", {});
+    expect(stub.calls.filter((call) => call.api === "ctx.compact")).toHaveLength(1);
+
+    const [prepared] = await simulate.hook(
+      stub,
+      "session_before_compact",
+      compactEvent("overflow"),
+    );
+    const compaction = (prepared as any).compaction;
+    expect(compaction.details.autonomous).toBe(true);
+
+    await simulate.hook(stub, "session_compact", {
+      fromExtension: true,
+      compactionEntry: {
+        type: "compaction",
+        id: "committed",
+        parentId: null,
+        timestamp: new Date().toISOString(),
+        ...compaction,
+      },
+    });
+    await tick();
+
+    const messages = continuationMessages(stub);
+    expect(messages).toHaveLength(1);
+    expect(messages[0]).toMatchObject({
+      customType: SHRINK_CONTINUATION_MESSAGE_TYPE,
+      details: {
+        reason: "autonomous_compaction",
+        attemptId: compaction.details.attemptId,
+      },
+    });
+
+    // A duplicate commit event for the same attempt cannot redeliver.
+    await simulate.hook(stub, "session_compact", {
+      fromExtension: true,
+      compactionEntry: {
+        type: "compaction",
+        id: "duplicate",
+        parentId: null,
+        timestamp: new Date().toISOString(),
+        ...compaction,
+      },
+    });
+    await tick();
+    expect(continuationMessages(stub)).toHaveLength(1);
+
+    // Journal-driven recovery for the same attempt is suppressed in-memory
+    // even before the delivered message would appear in the branch.
+    stub.ctx.sessionManager.getBranch = (): any[] => [
+      {
+        type: "compaction",
+        details: {
+          compactor: "dc-shrink",
+          version: 8,
+          autonomous: true,
+          attemptId: compaction.details.attemptId,
+        },
+      },
+    ];
+    await simulate.hook(stub, "session_tree", {});
+    await tick();
+    expect(continuationMessages(stub)).toHaveLength(1);
   });
 });
 
