@@ -165,7 +165,7 @@ the four `@earendil-works/pi-*` development dependencies and overrides to that
 version. Keep focused tests and typechecking on the resolved 0.82.1 packages;
 the installed PATH runtime is reviewed separately. The TUI-only
 compaction-card compatibility shim keeps a separate, explicit allowlist of
-reviewed active Pi versions. Pi 0.84.4 and 0.87.0 are reviewed: their
+reviewed active Pi versions. Pi 0.84.4, 0.87.0, and 0.87.1 are reviewed: their
 `compaction_end` handlers rebuild the chat, then append one native
 `compactionSummary` card. Add a
 version there only after inspecting that runtime's handler and verifying its
