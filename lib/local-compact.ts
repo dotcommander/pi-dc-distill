@@ -667,6 +667,13 @@ function removeMarkerLine(set: OrderedSet, line: string): void {
   if (normalized) set.remove(sliceU16(normalized, 180));
 }
 
+function removePartialEffectsRisksForPath(set: OrderedSet, path: string): void {
+  const needle = ` for ${path} may have partial effects`;
+  for (const line of set.slice()) {
+    if (line.startsWith("Failed ") && line.includes(needle)) set.remove(line);
+  }
+}
+
 function addExactMarkerLine(set: OrderedSet, line: string, limit = 512): void {
   const sanitized = sanitize(line).trim();
   if (sanitized) set.add(sliceU16(sanitized, limit));
@@ -1910,6 +1917,10 @@ function collectConversationToolResult(
           resumeRisks,
           `Failed ${call.name} for ${path} may have partial effects; inspect before retry.`,
         );
+      } else if (fileReadTools.has(call.name.toLowerCase())) {
+        // A successful read of the same path is the inspection the marker asks
+        // for ("inspect before retry"); it retires the risk without a retry write.
+        removePartialEffectsRisksForPath(resumeRisks, path);
       }
     }
   } else if (matched && isError && path && fileWriteTools.has(call.name.toLowerCase())) {

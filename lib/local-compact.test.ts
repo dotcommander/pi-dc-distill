@@ -533,6 +533,19 @@ describe("compileSessionJsonl", () => {
     expect(summary).toContain("successful tool-reported write");
   });
 
+  test("clears a partial-effects resume risk after a successful read of the same path", () => {
+    const summary = compileSessionJsonl([
+      sessionLine,
+      userMsg("inspect the failed edit target"),
+      toolCall("edit", { path: "docs/spec.md" }, "edit-bad"),
+      toolResult("edit", "write interrupted", true, "edit-bad"),
+      toolCall("read", { path: "docs/spec.md" }, "read-back"),
+      toolResult("read", "source intact", false, "read-back"),
+    ].join("\n")).summary;
+
+    expect(summary).not.toContain("Failed edit for docs/spec.md may have partial effects");
+  });
+
   test("retains only actionable state from a prior shrink summary", () => {
     const prior = [
       "## Session\nCWD: /tmp/proj",
