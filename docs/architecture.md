@@ -199,8 +199,13 @@ message, bounds the echo, and suppresses duplicates.
 ## Compatibility
 
 The repository's locked Pi SDK test surface is 0.82.1. Installed PATH runtimes
-are reviewed separately; Pi 0.84.4 and 0.87.0's compaction-card lifecycles
-are explicitly allowlisted. The opt-in RPC contract suite under `tests/e2e`
+are reviewed separately; Pi 0.84.4, 0.87.0, and 0.87.1's compaction-card
+lifecycles are explicitly allowlisted for the legacy shim. Reviewed Pi 0.99.0
+uses its native card without patching the InteractiveMode prototype. The native
+card renders once and shows deterministic summary metrics when expanded; older
+reviewed hosts retain the custom card and duplicate suppression. Compatibility
+fixtures are separate from
+installed-renderer evidence. The opt-in RPC contract suite under `tests/e2e`
 drives the installed runtime end to end with a scripted provider and proves
 one extension-owned append, active discarded/focused content only, version-8
 metrics, exactly one provider request per agent run, and zero summarizer

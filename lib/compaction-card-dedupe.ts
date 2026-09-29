@@ -130,11 +130,11 @@ function polishedCompactionCard(
 }
 
 /**
- * Prevent Pi's compaction_end TUI handler from rendering the same persisted
- * compaction card twice. The first matching card is converted to dc-framework's
- * typed house presentation; later matches within the same successful event are
- * suppressed. Unrelated messages and future host implementations that render
- * one card pass through unchanged.
+ * Present a successful compaction with dc-framework's typed house card.
+ * The first matching native card is converted; later matches within the same
+ * event are suppressed for older hosts that render duplicates. Pi 0.99 uses
+ * its native card; the installed-runtime adapter leaves its prototype untouched.
+ * Unrelated messages pass through unchanged.
  */
 export function installCompactionCardDedupe(
   prototype: object,
@@ -214,6 +214,9 @@ export async function installPiCompactionCardDedupe(
   entrypoint?: string,
 ): Promise<CompactionCardDedupeHandle | null> {
   const activePi = await Runtime.loadActivePiInteractiveMode(entrypoint);
+  // Pi 0.99 renders the latest compaction once and shows the summary metrics
+  // when expanded. Its native presentation no longer needs this private shim.
+  if (activePi.packageVersion === "0.99.0") return null;
   if (!SUPPORTED_PI_VERSIONS.has(activePi.packageVersion)) {
     throw new Error(
       `active Pi ${activePi.packageVersion} is not reviewed for compaction-card dedupe`,

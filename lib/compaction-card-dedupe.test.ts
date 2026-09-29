@@ -63,6 +63,42 @@ const polishedCard = () => ({
 });
 
 describe("compaction card dedupe", () => {
+  test("leaves reviewed Pi 0.99's native card and prototype unchanged", async () => {
+    const root = mkdtempSync(join(tmpdir(), "dc-shrink-reviewed-pi-"));
+    try {
+      mkdirSync(join(root, "bin"));
+      mkdirSync(join(root, "modes", "interactive"), { recursive: true });
+      writeFileSync(join(root, "bin", "pi"), "#!/bin/sh\n");
+      writeFileSync(join(root, "package.json"), JSON.stringify({ version: "0.99.0", type: "module" }));
+      writeFileSync(join(root, "index.js"), `
+        export class InteractiveMode {
+          async handleEvent(event) {
+            this.addMessageToChat({ role: "compactionSummary", summary: event.result.summary, tokensBefore: event.result.tokensBefore });
+          }
+        }
+      `);
+      writeFileSync(join(root, "modes", "interactive", "interactive-mode.js"), "export {};\n");
+
+      const entrypoint = join(root, "bin", "pi");
+      const activePi = await Runtime.loadActivePiInteractiveMode(entrypoint);
+      const original = activePi.prototype.handleEvent;
+      const installation = await installPiCompactionCardDedupe(entrypoint);
+      try {
+        expect(installation).toBeNull();
+        const rendered: TestMessage[] = [];
+        await activePi.prototype.handleEvent.call({
+          addMessageToChat(message: TestMessage) { rendered.push(message); },
+        }, EVENT);
+        expect(rendered).toEqual([compactionCard()]);
+      } finally {
+        installation?.dispose();
+      }
+      expect(activePi.prototype.handleEvent).toBe(original);
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
   test("renders one polished card from Pi's duplicate compaction cards", async () => {
     class DuplicateRenderer {
       readonly rendered: TestMessage[] = [];
@@ -171,7 +207,7 @@ describe("compaction card dedupe", () => {
     expect(Object.hasOwn(renderer, "addMessageToChat")).toBe(false);
   });
 
-  test("dedupes the active Pi compaction_end handler", async () => {
+  test("uses the reviewed active Pi presentation with fixture session rendering", async () => {
     const activePi = await Runtime.loadActivePiInteractiveMode();
     expect([
       "0.79.8",
@@ -184,9 +220,11 @@ describe("compaction card dedupe", () => {
       "0.85.1",
       "0.87.0",
       "0.87.1",
+      "0.99.0",
     ]).toContain(
       activePi.packageVersion,
     );
+    const originalHandler = activePi.prototype.handleEvent;
     const installation = await installPiCompactionCardDedupe();
     const rendered: TestMessage[] = [];
     const fakeMode = {
@@ -197,7 +235,7 @@ describe("compaction card dedupe", () => {
       chatContainer: { clear() {} },
       sessionManager: {
         buildContextEntries() {
-          return [{ type: "compaction" }, compactionCard()];
+          return [{ type: "compaction" }];
         },
       },
       renderSessionEntries(entries: TestMessage[]) {
@@ -213,10 +251,20 @@ describe("compaction card dedupe", () => {
       ui: { requestRender() {} },
     };
 
-    await activePi.prototype.handleEvent.call(fakeMode, EVENT);
-
-    expect(rendered).toEqual([polishedCard()]);
-    installation?.dispose();
+    // Session rendering is stubbed here; this is not an installed-renderer proof.
+    try {
+      await activePi.prototype.handleEvent.call(fakeMode, EVENT);
+      if (activePi.packageVersion === "0.99.0") {
+        expect(installation).toBeNull();
+        expect(activePi.prototype.handleEvent).toBe(originalHandler);
+        expect(rendered).toHaveLength(1);
+        expect(rendered[0]).toMatchObject(compactionCard());
+      } else {
+        expect(rendered).toEqual([polishedCard()]);
+      }
+    } finally {
+      installation?.dispose();
+    }
   });
 
   test("disposal restores only the wrapper it installed", () => {

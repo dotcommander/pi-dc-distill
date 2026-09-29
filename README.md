@@ -60,6 +60,10 @@ Use Pi’s built-in command when the session has eligible context to discard:
 
 Pi supplies the discarded active-branch input. dc-shrink compiles it locally, prefixes the returned summary with deterministic metrics, and returns it to Pi for the normal append and context rebuild. The focus text becomes a bounded part of the summary; it is limited to 2,048 Unicode code points.
 
+Pi 0.99.0 uses its stock compaction card with no presentation patch. Expand
+the card to see the deterministic reduction metrics and summary. Older reviewed
+Pi versions retain the compatibility shim for duplicate-card suppression.
+
 A manual compaction leaves the next action under your control. Autonomous compaction may queue a hidden continuation only after Pi confirms the matching compaction was appended and the session is idle. Delivery is journal-driven and restart-safe: after a reload or tree switch, dc-shrink re-reads the committed attempt from the session ledger and delivers an unanswered autonomous continuation exactly once.
 
 ## Pi-derived policy and stored data
