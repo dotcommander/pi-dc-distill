@@ -1,0 +1,57 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1440" height="900" viewBox="0 0 1440 900" role="img" aria-labelledby="title desc">
+<title id="title">pi-dc-distill: from bulky session to focused resume context</title>
+<desc id="desc">Illustrated terminals compare a synthetic parser session with its compacted summary. The original is 11,988 UTF-8 bytes and the summary is 2,950 bytes, 75.4 percent smaller. Objective, decision, modified files, synthetic checks and next action are retained. Fixture example only, not a general benchmark.</desc>
+<defs><linearGradient id="bg" x2="1" y2="1"><stop stop-color="#0b1323"/><stop offset="1" stop-color="#111d2e"/></linearGradient></defs>
+<rect width="1440" height="900" rx="28" fill="url(#bg)"/>
+<g font-family="Menlo,Consolas,monospace">
+<path d="M48 47h10v24H48zM64 47h10v24H64zM80 47h10v24H80z" fill="#b5ef64"/>
+<text x="108" y="78" fill="#f0f5fc" font-size="52" font-weight="700">pi-dc-distill</text>
+<text x="48" y="126" fill="#c2cede" font-size="26">Deterministic context compaction. No LLM required.</text>
+<rect x="1125" y="47" width="267" height="44" rx="22" fill="#1a2c3f" stroke="#35536a"/>
+<text x="1258" y="76" text-anchor="middle" fill="#80dce5" font-size="20">SYNTHETIC EXAMPLE</text>
+
+<rect x="48" y="180" width="624" height="534" rx="18" fill="#0a111d" stroke="#2c4055" stroke-width="2"/>
+<path d="M66 180h588a18 18 0 0 1 18 18v48h-624v-48a18 18 0 0 1 18-18z" fill="#172438"/>
+<circle cx="72" cy="212" r="6" fill="#e58380"/>
+<circle cx="92" cy="212" r="6" fill="#dcb974"/>
+<circle cx="112" cy="212" r="6" fill="#8bc19d"/>
+<text x="144" y="220" fill="#7cdae8" font-size="22" font-weight="700">BEFORE / session.jsonl</text>
+<rect x="768" y="180" width="624" height="534" rx="18" fill="#0a111d" stroke="#2c4055" stroke-width="2"/>
+<path d="M786 180h588a18 18 0 0 1 18 18v48h-624v-48a18 18 0 0 1 18-18z" fill="#172438"/>
+<circle cx="792" cy="212" r="6" fill="#e58380"/>
+<circle cx="812" cy="212" r="6" fill="#dcb974"/>
+<circle cx="832" cy="212" r="6" fill="#8bc19d"/>
+<text x="864" y="220" fill="#b5ef64" font-size="22" font-weight="700">AFTER / resume context</text>
+<text x="72" y="287" fill="#7cdae8" font-size="23">$ Read src/parser.ts</text>
+<text x="72" y="321" fill="#8997ac" font-size="23">// source line 001: scaffolding</text>
+<text x="72" y="355" fill="#8997ac" font-size="23">// source line 002: scaffolding</text>
+<text x="72" y="389" fill="#8997ac" font-size="23">// source line 003: scaffolding</text>
+<text x="72" y="423" fill="#64758b" font-size="23">... 106 more source lines</text>
+<text x="72" y="457" fill="#8997ac" font-size="23">// source line 110: scaffolding</text>
+<text x="72" y="491" fill="#7cdae8" font-size="23">$ Edit src/parser.ts</text>
+<text x="72" y="525" fill="#7cdae8" font-size="23">$ Edit tests/parser.test.ts</text>
+<text x="72" y="559" fill="#7cdae8" font-size="23">$ bun test tests/parser.test.ts</text>
+<text x="72" y="593" fill="#c4d1df" font-size="23">3 pass · 0 fail  [synthetic]</text>
+<text x="72" y="627" fill="#8997ac" font-size="23">assistant notes · tool results</text>
+<text x="72" y="661" fill="#8997ac" font-size="23">task state · handoff · metadata</text>
+<text x="796" y="280" fill="#b5ef64" font-size="19" font-weight="700">OBJECTIVE</text>
+<text x="796" y="309" fill="#e0e9f3" font-size="23">Handle empty input.</text>
+<text x="796" y="349" fill="#b5ef64" font-size="19" font-weight="700">DECISION</text>
+<text x="796" y="378" fill="#e0e9f3" font-size="23">Preserve non-empty line endings.</text>
+<text x="796" y="418" fill="#b5ef64" font-size="19" font-weight="700">FILES</text>
+<text x="796" y="447" fill="#e0e9f3" font-size="23">src/parser.ts</text>
+<text x="796" y="476" fill="#e0e9f3" font-size="23">tests/parser.test.ts</text>
+<text x="796" y="516" fill="#b5ef64" font-size="19" font-weight="700">CHECKS</text>
+<text x="796" y="545" fill="#e0e9f3" font-size="23">3 pass · 0 fail [synthetic]</text>
+<text x="796" y="574" fill="#e0e9f3" font-size="23">bun test tests/parser.test.ts</text>
+<text x="796" y="614" fill="#b5ef64" font-size="19" font-weight="700">NEXT</text>
+<text x="796" y="643" fill="#e0e9f3" font-size="23">Run CRLF integration coverage.</text>
+<circle cx="720" cy="446" r="29" fill="#1b2c3e" stroke="#34536b"/>
+<path d="M706 446h26m-9-9 9 9-9 9" fill="none" stroke="#7cdae8" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"/>
+<text x="48" y="778" fill="#e0e9f3" font-size="40" font-weight="700">11,988 bytes</text>
+<text x="48" y="812" fill="#8fa3ba" font-size="22">Serialized JSONL · 13 records</text>
+<text x="768" y="778" fill="#b5ef64" font-size="40" font-weight="700">2,950 bytes</text>
+<text x="768" y="812" fill="#c8dbb3" font-size="22">Summary · 75.4% smaller</text>
+<path d="M48 840h1344" stroke="#2b3d53"/>
+<text x="48" y="875" fill="#96abc2" font-size="21">Fixture byte counts, not tokens or a general compression benchmark.</text>
+</g></svg>

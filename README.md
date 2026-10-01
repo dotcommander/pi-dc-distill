@@ -2,6 +2,8 @@
 
 **Deterministic context compaction. No LLM required.**
 
+![Illustrated synthetic parser session before and after compaction: 11,988 to 2,950 UTF-8 bytes, with objective, decisions, files, synthetic checks, and next action retained.](docs/assets/distill-before-after.svg)
+
 pi-dc-distill builds local resume summaries for [Pi](https://github.com/earendil-works/pi-mono).
 It extracts explicit task state, decisions, file observations, and verification
 receipts, then removes repetition and low-signal context under a fixed budget.
