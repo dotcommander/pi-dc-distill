@@ -11,8 +11,8 @@ import {
 } from "node:fs";
 import { basename, dirname, join } from "node:path";
 import { homedir } from "node:os";
-import { Path } from "#distill-framework";
-import { Fs } from "#distill-framework/x/fs";
+import { Path } from "./paths.ts";
+import { Fs } from "./fs-support.ts";
 
 const CURRENT_NAMESPACE = "dc-distill";
 const LEGACY_NAMESPACE = `dc-${"cru"}${"nch"}`;

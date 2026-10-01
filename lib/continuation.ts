@@ -1,8 +1,8 @@
 import type {
   ExtensionAPI,
   ExtensionContext,
-} from "#distill-framework/pi/coding-agent";
-import { Notify } from "#distill-framework";
+} from "./sdk.ts";
+import { Notify } from "./notify-support.ts";
 
 export const DISTILL_CONTINUATION_MESSAGE_TYPE = "dc-distill-continuation";
 

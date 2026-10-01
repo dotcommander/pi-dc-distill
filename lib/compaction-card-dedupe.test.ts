@@ -7,7 +7,7 @@ import {
   installPiCompactionCardDedupe,
 } from "./compaction-card-dedupe.ts";
 import { COMPACTION_CARD_TYPE } from "./compaction-card.ts";
-import { Runtime } from "#distill-framework/x/runtime";
+import { Runtime } from "./runtime-probe.ts";
 
 type TestMessage = {
   role: string;

@@ -1,5 +1,5 @@
 import { isDistillHandoffType } from "./legacy.ts";
-import type { SessionEntry } from "#distill-framework/pi/coding-agent";
+import type { SessionEntry } from "./sdk.ts";
 import { DISTILL_HANDOFF_ENTRY_TYPE, handoffTextFromEntryData } from "./handoff.ts";
 
 const MAX_INPUT_BYTES = 20 * 1024 * 1024;

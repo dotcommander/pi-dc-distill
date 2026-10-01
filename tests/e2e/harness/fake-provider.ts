@@ -13,6 +13,8 @@
  *   DISTILL_FAKE_WINDOW  context window (default 200000)
  *   DISTILL_FAKE_BASE    total context tokens reported on the first turn (default 4000)
  *   DISTILL_FAKE_STEP    extra tokens per assistant message in context (default 25000)
+ *   DISTILL_FAKE_POST_COMPACTION_USAGE optional usage once native summary is in context
+ *   DISTILL_FAKE_OVERFLOW_ERROR emit one context-overflow error before recovery
  *   DISTILL_FAKE_TRACE   path to append a JSONL trace of every model request
  */
 import { appendFileSync } from "node:fs";
@@ -25,6 +27,7 @@ const WINDOW = Number(env("DISTILL_FAKE_WINDOW", "200000"));
 const BASE = Number(env("DISTILL_FAKE_BASE", "4000"));
 const STEP = Number(env("DISTILL_FAKE_STEP", "25000"));
 const TRACE = process.env.DISTILL_FAKE_TRACE;
+let overflowErrorSent = false;
 
 function textOf(content: unknown): string {
   if (typeof content === "string") return content;
@@ -60,7 +63,12 @@ interface TraceTurn {
 function decide(context: Context): { text: string; usageTotal: number } {
   const messages = context.messages;
   const assistantCount = messages.filter((m) => m.role === "assistant").length;
-  const usageTotal = BASE + STEP * assistantCount;
+  const postCompactionUsage = process.env.DISTILL_FAKE_POST_COMPACTION_USAGE;
+  const hasCompactionSummary = messages.some((message) =>
+    textOf(message.content).startsWith("The conversation history before this point was compacted into the following summary:\n\n<summary>\n"));
+  const usageTotal = postCompactionUsage !== undefined && hasCompactionSummary
+    ? Number(postCompactionUsage)
+    : BASE + STEP * assistantCount;
   const last = messages[messages.length - 1];
   const lastText = last ? textOf((last as { content?: unknown }).content) : "";
 
@@ -130,6 +138,15 @@ function streamScripted(model: Model<any>, context: Context, options?: SimpleStr
           messages: context.messages.length,
         };
         trace(record);
+        if (process.env.DISTILL_FAKE_OVERFLOW_ERROR === "1" && !overflowErrorSent
+          && plan.usageTotal > WINDOW) {
+          overflowErrorSent = true;
+          output.stopReason = "error";
+          output.errorMessage = "Your input exceeds the context window of this model";
+          stream.push({ type: "error", reason: "error", error: output });
+          stream.end();
+          return;
+        }
         output.content.push({ type: "text", text: plan.text });
         stream.push({ type: "text_start", contentIndex: 0, partial: output });
         (output.content[0] as { text: string }).text = plan.text;

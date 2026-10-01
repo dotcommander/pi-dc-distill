@@ -48,10 +48,11 @@ export function makeTestDir(name: string, settings: Record<string, unknown> = {}
   // sandboxed agent home, the sandboxed ~/.pi, and the project so every
   // resolution path agrees.
   const compaction = { enabled: true, reserveTokens: 16_384, ...settings };
+  const extensionConfig = { "dc-distill": { toolOutput: { enabled: true }, recall: { enabled: true } } };
   for (const target of [join(agentHome, "settings.json"), join(home, ".pi", "settings.json")]) {
-    writeFileSync(target, JSON.stringify({ compaction }, null, 2));
+    writeFileSync(target, JSON.stringify({ compaction, extensionConfig }, null, 2));
   }
-  writeFileSync(join(dir, ".pi", "settings.json"), JSON.stringify({ compaction }, null, 2));
+  writeFileSync(join(dir, ".pi", "settings.json"), JSON.stringify({ compaction, extensionConfig }, null, 2));
 
   return {
     dir,

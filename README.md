@@ -2,6 +2,8 @@
 
 **Deterministic context compaction. No LLM required.**
 
+[![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
+
 ![Illustrated synthetic parser session before and after compaction: 11,988 to 2,950 UTF-8 bytes, with objective, decisions, files, synthetic checks, and next action retained.](docs/assets/distill-before-after.svg)
 
 pi-dc-distill builds local resume summaries for [Pi](https://github.com/earendil-works/pi-mono).
@@ -9,8 +11,16 @@ It extracts explicit task state, decisions, file observations, and verification
 receipts, then removes repetition and low-signal context under a fixed budget.
 Pi owns `/compact`, chooses what to discard, and rebuilds the conversation.
 
-The extension also stores full oversized tool output before replacing it with
-a preview, and provides project-scoped recall of recent compaction summaries.
+Pi keeps the recent tail; the local compiler turns the discarded portion into
+resume text. Its custom result replaces Pi's default LLM summary for that
+attempt. See [how the mechanism works](docs/algorithm.md#what-happens-to-a-long-session)
+for the sequence, trigger/interception distinction, metric units and known
+verification-evidence risks. This is lossy extraction, with no guarantee that
+all meaning survives.
+
+Oversized tool-output previews and project-scoped recall are optional,
+independent features. Both are **off by default**; enable them only when you
+want their additional local storage and context behavior.
 
 ## Install
 
@@ -20,8 +30,15 @@ Use Node.js 22.19.0 or newer and Pi 0.99.2, the SDK and runtime verified here:
 pi install git:github.com/dotcommander/pi-dc-distill
 ```
 
-The Git repository still has its previous name; the package is `pi-dc-distill`.
-An npm release, once published, uses `pi install npm:pi-dc-distill`.
+After the first npm release is published, install by package name:
+
+```bash
+pi install npm:pi-dc-distill
+```
+
+Pi loads the TypeScript extension directly; no compiled build is required.
+Bun 1.4.0 is required for the packaged `dc-distill-session` replay CLI and the
+development commands below.
 Remove or disable the previous extension before loading this one.
 
 Start a new Pi session in your project. Once enough context has accumulated:
@@ -33,6 +50,31 @@ Start a new Pi session in your project. Once enough context has accumulated:
 Expand the card to inspect the summary. Manual compaction leaves the next action
 to you. Automatic compaction checks after the response and tool calls settle,
 at Pi's `agent_settled` boundary, and can queue a continuation after commit.
+
+## Optional features
+
+Merge either opt-in into Pi's global or project settings, preserving other keys,
+then start a new session. This example enables both; each `enabled` value can be
+set independently:
+
+```json
+{
+  "extensionConfig": {
+    "dc-distill": {
+      "toolOutput": {"enabled": true},
+      "recall": {"enabled": true}
+    }
+  }
+}
+```
+
+With no opt-in, tool results are left untouched, no tool-output artifacts or new
+recall summaries are written, and no extra recall/focus echo is injected. The
+registered `recall_compaction` tool reports that recall is disabled without
+reading stored summaries. Existing data is preserved. Core session compaction,
+handoffs, normal compaction metadata/logs, and continuation recovery still work.
+See [feature settings](docs/settings.md#optional-feature-settings) for paths,
+inheritance, migration deferral, and what enabling each feature changes.
 
 ## Try a repeatable comparison
 
@@ -66,7 +108,7 @@ Artifacts are written to `.work/distill-evaluations/synthetic-parser/`.
 | --- | --- |
 | Compact now | `/compact` or `/compact <focus>` |
 | Save explicit task state | Agent tool `save_distill_handoff`, with a non-empty `handoff` string. |
-| Search retained summaries | Agent tool `recall_compaction`, with `query`, optional `limit`, and optional `scope`. |
+| Search retained summaries | Opt-in agent tool `recall_compaction`, with `query`, optional `limit`, and optional `scope`; reports disabled unless recall is enabled. |
 | Recover full tool output | Read the artifact path in its preview notice. |
 | Replay a session from a checkout | `bun run distill:session -- <session.jsonl>` |
 
@@ -77,8 +119,9 @@ slash command involved. See [usage](docs/usage.md) for arguments and examples.
 
 Pi's global and project compaction settings control the autonomous monitor.
 `compaction.enabled: false` disables it; manual compaction remains available.
-There are no extension-specific settings. Logs, recall, and output artifacts
-live under `~/.pi/data/dc-distill/`; raw input dumps are off by default.
+There are no extension-specific trigger settings. Core logs and optional
+recall/output artifacts live under `~/.pi/data/dc-distill/`; raw input dumps are
+also off by default and separately enabled with `DC_DISTILL_DUMPS=1`.
 
 The compiler is rule-based and lossy. It can miss subjective context and
 low-signal details. A handoff or focus hint helps identify what matters. File
@@ -112,5 +155,6 @@ Both use isolated data directories and make no provider/network requests.
 - [Troubleshooting](docs/troubleshooting.md): diagnostics and compatibility.
 - [Architecture](docs/architecture.md): ownership, lifecycle, isolation, metrics.
 - [Algorithm](docs/algorithm.md): scoring, repetition, evidence, eviction.
+- [Releasing to npm](docs/releasing.md): package checks, authentication, publication.
 
 [MIT license](LICENSE).

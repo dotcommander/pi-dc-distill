@@ -1521,3 +1521,22 @@ describe("compileSessionJsonl literal anchors", () => {
     expect(anchors).toContain("issue=4921");
   });
 });
+
+
+test("disabled live recall omits hints and queries even when operating budget rebuilds state", () => {
+  const records: unknown[] = [
+    { type: "session", id: "recall-gate", cwd: "/synthetic/gate" },
+    { type: "message", message: { role: "user", content: "Repair src/parser.ts. Next: verify the remaining work." } },
+    ...Array.from({ length: 40 }, (_, i) => ({ type: "message", message: { role: "assistant",
+      content: [{ type: "text", text: `## Decision ${i}\nChose src/parser.ts contract ${"bounded evidence ".repeat(70)}` }] } })),
+  ];
+  const input = records.map((record) => JSON.stringify(record)).join("\n") + "\n";
+  const enabled = compileSessionJsonl(input);
+  const disabled = compileSessionJsonl(input, undefined, undefined, false);
+  expect(enabled.summary).toContain("recall_compaction");
+  expect(disabled.summary).not.toContain("recall_compaction");
+  expect(disabled.summary).not.toContain("recall-queries:");
+  expect(disabled.summary).toContain("<summary-omissions>");
+  expect(disabled.summary).toContain("Repair src/parser.ts");
+  expect(compileSessionJsonl(input, undefined, undefined, false).summary).toBe(disabled.summary);
+});

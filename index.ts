@@ -6,15 +6,14 @@ import type {
   ExtensionAPI,
   ExtensionContext,
   SessionEntry,
-} from "#distill-framework/pi/coding-agent";
-import {
-  buildSessionContext,
-  estimateTokens,
-} from "#distill-framework/pi/coding-agent";
-import { defineExtension, Diag, Notify, Tool } from "#distill-framework";
-import { Entries } from "#distill-framework/x/entries";
-import { Events } from "#distill-framework/x/events";
-import { Block } from "#distill-framework/x/output";
+} from "./lib/sdk.ts";
+import { buildSessionContext, estimateTokens } from "./lib/sdk.ts";
+import { Diag } from "./lib/diag-support.ts";
+import { Notify, registerBlockSpec } from "./lib/notify-support.ts";
+import { Block } from "./lib/tui-block.ts";
+import { Tool } from "./lib/tool-result.ts";
+import { Entries } from "./lib/entries-support.ts";
+import { Events } from "./lib/events-support.ts";
 import { Type } from "typebox";
 import {
   buildCompactionSource,
@@ -41,8 +40,11 @@ import {
   COMPACTION_COOLDOWN_MS,
   DUMP_RETENTION,
   DEFAULT_PI_COMPACTION_SETTINGS,
+  DEFAULT_DISTILL_FEATURE_SETTINGS,
+  resolveDistillFeatureSettings,
+  type DistillFeatureSettings,
   dumpsEnabled,
-  loadPiCompactionSettings,
+  resolvePiCompactionSettings,
   type PiCompactionSettings,
 } from "./lib/settings.ts";
 import { formatDistillStatus } from "./lib/status.ts";
@@ -116,6 +118,7 @@ interface DistillRuntime {
   monitor: Monitor;
   latch: Latch;
   compactionSettings: PiCompactionSettings;
+  featureSettings: DistillFeatureSettings;
   store: DistillStore | null;
   pending: PendingCompaction | null;
   nextAttemptAutonomous: boolean;
@@ -146,6 +149,22 @@ function clearAttempt(runtime: DistillRuntime): void {
   runtime.nextAttemptAutonomous = false;
   runtime.lastAutoBlockReason = null;
   runtime.latch.release();
+}
+
+async function reportFailure(
+  runtime: DistillRuntime,
+  reasons: string[],
+  notification?: { ctx: ExtensionContext; message: string },
+): Promise<void> {
+  // Diagnostics must not replace the original failure or escape the fail-closed hook.
+  try {
+    await runtime.store?.appendFailure(reasons);
+  } catch { /* Failure logging is best effort. */ }
+  if (notification?.ctx.hasUI) {
+    try {
+      Notify.user(notification.ctx, notification.message, "warning");
+    } catch { /* A host notification failure must not enable default compaction. */ }
+  }
 }
 
 function cancellation(error: unknown): boolean {
@@ -381,6 +400,7 @@ function createRuntime(pi: ExtensionAPI): DistillRuntime {
     monitor: new Monitor(),
     latch: new Latch(),
     compactionSettings: DEFAULT_PI_COMPACTION_SETTINGS,
+    featureSettings: DEFAULT_DISTILL_FEATURE_SETTINGS,
     store: null,
     pending: null,
     nextAttemptAutonomous: false,
@@ -397,26 +417,42 @@ function createRuntime(pi: ExtensionAPI): DistillRuntime {
 export interface DistillExtensionOptions {
   storeFactory?: (ctx: ExtensionContext) => DistillStore;
   loadCompactionSettings?: (cwd: string) => PiCompactionSettings;
+  loadFeatureSettings?: (cwd: string) => DistillFeatureSettings;
+  outputArtifactRoot?: (cwd: string) => string;
   installCompactionDedupe?: () => Promise<CompactionCardDedupeHandle | null>;
 }
 
 function createExtension(pi: ExtensionAPI, options: DistillExtensionOptions = {}) {
   const runtime = createRuntime(pi);
+  const refreshCompactionSettings = (ctx: ExtensionContext): boolean => {
+    try {
+      runtime.compactionSettings = options.loadCompactionSettings?.(ctx.cwd)
+        ?? resolvePiCompactionSettings(pi.getSettings(), ctx.model);
+      return true;
+    } catch (error) {
+      runtime.compactionSettings = { ...DEFAULT_PI_COMPACTION_SETTINGS, enabled: false };
+      runtime.monitor.diagnostic(`auto-check blocked reason=invalid-settings: ${error instanceof Error ? error.message : String(error)}`);
+      return false;
+    }
+  };
 
-  return defineExtension({
+  const extension = {
     name: "dc-distill",
-    storage: { data: true },
 
     setup: (activePi) => {
-      registerOutputCompactor(activePi);
-      Block.registerSpec<CompactionCardDetails>(
+      registerOutputCompactor(activePi, {
+        config: { enabled: true },
+        artifactRoot: options.outputArtifactRoot,
+        isEnabled: (ctx) => isOwner(runtime, ctx) && runtime.featureSettings.toolOutput.enabled,
+      });
+      registerBlockSpec<CompactionCardDetails>(
         activePi,
         COMPACTION_CARD_TYPE,
         (message, options) =>
           compactionCardSpec(message, options.expanded === true),
       );
       // Historical custom cards remain renderable after the rename.
-      Block.registerSpec<CompactionCardDetails>(
+      registerBlockSpec<CompactionCardDetails>(
         activePi, LEGACY_COMPACTION_CARD_TYPE,
         (message, options) => compactionCardSpec(message, options.expanded === true),
       );
@@ -451,6 +487,7 @@ function createExtension(pi: ExtensionAPI, options: DistillExtensionOptions = {}
           const canonical = canonicalizeCompactionSource(source, event.signal);
           const result = await runStrategies({
             userFocus: event.customInstructions,
+            recallEnabled: runtime.featureSettings.recall.enabled,
             canonicalInput: canonical.bytes,
             digestScope: canonical.digestScope,
           }, event.signal);
@@ -458,8 +495,9 @@ function createExtension(pi: ExtensionAPI, options: DistillExtensionOptions = {}
             clearAttempt(runtime);
             if (result.cancelled) return Events.cancelCompact();
             runtime.lastFailure = result.reasons.join(" | ");
-            await runtime.store?.appendFailure(result.reasons);
-            if (ctx.hasUI) Notify.user(ctx, "Distill cancelled — deterministic compiler failed.", "warning");
+            await reportFailure(runtime, result.reasons, {
+              ctx, message: "Distill cancelled — deterministic compiler failed.",
+            });
             return Events.cancelCompact();
           }
           if (event.signal.aborted) throw new CompactionCancelledError();
@@ -534,8 +572,9 @@ function createExtension(pi: ExtensionAPI, options: DistillExtensionOptions = {}
           clearAttempt(runtime);
           if (cancellation(error)) return Events.cancelCompact();
           runtime.lastFailure = error instanceof Error ? error.message : String(error);
-          await runtime.store?.appendFailure([runtime.lastFailure]);
-          if (ctx.hasUI) Notify.user(ctx, `Distill cancelled: ${runtime.lastFailure}`, "warning");
+          await reportFailure(runtime, [runtime.lastFailure], {
+            ctx, message: `Distill cancelled: ${runtime.lastFailure}`,
+          });
           return Events.cancelCompact();
         }
       });
@@ -545,11 +584,56 @@ function createExtension(pi: ExtensionAPI, options: DistillExtensionOptions = {}
         const messages = Array.isArray((event as { messages?: unknown }).messages)
           ? (event as { messages: unknown[] }).messages
           : [];
+        if (!runtime.featureSettings.recall.enabled) return;
         const transformed = injectFocusEcho(messages);
         if (!transformed) return undefined;
         runtime.lastFocusEcho = transformed.echoText;
         return Events.messages(transformed.messages);
       }, { label: "dc-distill context focus echo" });
+
+      // Owned replacement for the vendored framework's manifest translation:
+      // hooks and tools declared on this extension object are registered on
+      // the Pi API directly, with the run-to-execute adaptation and result
+      // normalization the framework's Tool.register provided.
+      for (const [hookName, hookHandler] of Object.entries(extension.hooks)) {
+        activePi.on(hookName, async (event: unknown, hookCtx: ExtensionContext) => {
+          try {
+            return await hookHandler(event, hookCtx);
+          } catch (error) {
+            Diag.warn("dc-distill", `hook ${hookName} failed`, error);
+            return undefined;
+          }
+        });
+      }
+      interface OwnedToolDef {
+        name: string;
+        description: string;
+        parameters: Parameters<ExtensionAPI["registerTool"]>[0]["parameters"];
+        renderStyle?: string;
+        renderResult?: Parameters<ExtensionAPI["registerTool"]>[0]["renderResult"];
+        run: (args: never, exec: unknown) => Promise<unknown>;
+      }
+      for (const toolDef of Object.values(extension.tools) as OwnedToolDef[]) {
+        activePi.registerTool({
+          name: toolDef.name,
+          description: toolDef.description,
+          parameters: toolDef.parameters,
+          ...(toolDef.renderStyle === "custom" && toolDef.renderResult !== undefined
+            ? { renderResult: toolDef.renderResult }
+            : {}),
+          execute: async (toolCallId, args, signal, onUpdate, execCtx) => {
+            const exec = {
+              toolCallId,
+              signal: signal ?? new AbortController().signal,
+              onUpdate: onUpdate ?? (() => {}),
+              ctx: execCtx,
+            };
+            const result = await toolDef.run(args as never, exec);
+            if (typeof result === "string") return Tool.text(result);
+            return result;
+          },
+        } as unknown as Parameters<ExtensionAPI["registerTool"]>[0]);
+      }
     },
 
     hooks: {
@@ -561,13 +645,21 @@ function createExtension(pi: ExtensionAPI, options: DistillExtensionOptions = {}
         runtime.ownerSessionId = currentId;
         clearAttempt(runtime);
         runtime.monitor.reset();
-        runtime.compactionSettings = options.loadCompactionSettings?.(ctx.cwd)
-          ?? loadPiCompactionSettings(ctx.cwd);
+        refreshCompactionSettings(ctx);
+        runtime.featureSettings = { ...DEFAULT_DISTILL_FEATURE_SETTINGS };
+        try {
+          runtime.featureSettings = options.loadFeatureSettings?.(ctx.cwd)
+            ?? resolveDistillFeatureSettings(pi.getSettings());
+        } catch (error) {
+          runtime.monitor.diagnostic(`feature settings unavailable; optional features disabled: ${String(error)}`);
+        }
         runtime.lastFailure = null;
         runtime.store = options.storeFactory?.(ctx)
           ?? new DistillStore({ projectIdentity: ctx.cwd });
         try {
-          const migration = await runtime.store.initialize();
+          const migration = await runtime.store.initialize({
+            migrateLegacy: runtime.featureSettings.recall.enabled && runtime.featureSettings.toolOutput.enabled,
+          });
           if (migration.status === "failed") {
             runtime.lastFailure = `Legacy migration will retry: ${migration.errors.join(" | ")}`;
           }
@@ -610,7 +702,14 @@ function createExtension(pi: ExtensionAPI, options: DistillExtensionOptions = {}
         }
       },
 
+      model_select: async (_event, ctx) => {
+        if (!isOwner(runtime, ctx)) return;
+        runtime.contextWindow = ctx.model?.contextWindow;
+        refreshCompactionSettings(ctx);
+      },
+
       agent_settled: async (_event, ctx) => {
+        if (!isOwner(runtime, ctx) || !refreshCompactionSettings(ctx)) return;
         checkAutonomousCompaction(runtime, ctx, "agent_settled");
       },
 
@@ -678,19 +777,21 @@ function createExtension(pi: ExtensionAPI, options: DistillExtensionOptions = {}
               attemptId: pending.attemptId,
             },
           );
-          const recall: StoredRecallEntry = {
-            ts: pending.ts,
-            before: pending.tokensBefore,
-            after: pending.tokensAfter,
-            fullContextAfter,
-            fullContextAfterSource: fullContextAfter === undefined
-              ? undefined
-              : "pi-post-rebuild-context-usage",
-            tokenSource: "pi-rebuilt-message-estimate",
-            sessionId: pending.sessionId,
-            summary: pending.wireSummary,
+          if (runtime.featureSettings.recall.enabled) {
+            const recall: StoredRecallEntry = {
+              ts: pending.ts,
+              before: pending.tokensBefore,
+              after: pending.tokensAfter,
+              fullContextAfter,
+              fullContextAfterSource: fullContextAfter === undefined
+                ? undefined
+                : "pi-post-rebuild-context-usage",
+              tokenSource: "pi-rebuilt-message-estimate",
+              sessionId: pending.sessionId,
+              summary: pending.wireSummary,
           };
           await runtime.store?.persistRecall(recall);
+          }
           runtime.lastFailure = null;
           runtime.lastFocusEcho = null;
           if (ctx.hasUI) {
@@ -716,18 +817,26 @@ function createExtension(pi: ExtensionAPI, options: DistillExtensionOptions = {}
         if (!runtime.pending && !runtime.latch.held) return;
         const outcome = event.aborted ? "aborted" : "failed";
         const detail = event.errorMessage ?? "no error message";
-        runtime.monitor.diagnostic([
-          `compaction ${outcome}`,
-          `reason=${event.reason}`,
-          `fromExtension=${event.fromExtension}`,
-          `willRetry=${event.willRetry}`,
-          `detail=${detail}`,
-        ].join(" "));
-        if (!event.aborted) {
-          runtime.lastFailure = `Compaction ${outcome} (${event.reason}): ${detail}`;
-          await runtime.store?.appendFailure([runtime.lastFailure]);
+        const failure = `Compaction ${outcome} (${event.reason}): ${detail}`;
+        try {
+          if (!event.aborted) {
+            runtime.lastFailure = failure;
+          }
+          try {
+            runtime.monitor.diagnostic([
+              `compaction ${outcome}`,
+              `reason=${event.reason}`,
+              `fromExtension=${event.fromExtension}`,
+              `willRetry=${event.willRetry}`,
+              `detail=${detail}`,
+            ].join(" "));
+          } catch { /* Terminal diagnostics are best effort. */ }
+          if (!event.aborted) {
+            await reportFailure(runtime, [failure]);
+          }
+        } finally {
+          clearAttempt(runtime);
         }
-        clearAttempt(runtime);
       },
     },
 
@@ -756,7 +865,7 @@ function createExtension(pi: ExtensionAPI, options: DistillExtensionOptions = {}
 
       recall_compaction: {
         name: "recall_compaction",
-        description: "Search prior compaction summaries in this project, or explicitly across all projects.",
+        description: "Opt-in search of prior compaction summaries in this project or across all projects; disabled by default.",
         parameters: Type.Object({
           query: Type.String(),
           limit: Type.Optional(Type.Number({ default: 3 })),
@@ -765,6 +874,9 @@ function createExtension(pi: ExtensionAPI, options: DistillExtensionOptions = {}
         run: async (args, exec) => {
           try {
             if (!isOwner(runtime, exec.ctx)) return Tool.error("recall_compaction is unavailable outside the owner session.");
+            if (!runtime.featureSettings.recall.enabled) {
+              return Tool.text('Recall is disabled. Set extensionConfig["dc-distill"].recall.enabled to true in Pi settings and start a new session.');
+            }
             if (!runtime.store) return Tool.text("No active distill session.");
             const entries = await runtime.store.loadRecall(args.scope === "all" ? "all" : "project");
             const results = searchRecallEntries(entries, String(args.query ?? ""), Number(args.limit ?? 3));
@@ -776,13 +888,17 @@ function createExtension(pi: ExtensionAPI, options: DistillExtensionOptions = {}
       },
     },
 
-  });
+  };
+
+  return extension;
 }
 
 export default function setupDistill(pi: ExtensionAPI): void {
-  createExtension(pi)(pi);
+  createExtension(pi).setup(pi);
 }
 
 export function createDistillExtension(options: DistillExtensionOptions) {
-  return (pi: ExtensionAPI): void => createExtension(pi, options)(pi);
+  return (pi: ExtensionAPI): void => {
+    createExtension(pi, options).setup(pi);
+  };
 }

@@ -118,7 +118,10 @@ state so an aborted host attempt cannot disable later autonomous checks.
 ## Trigger Policy
 
 dc-distill has no extension trigger settings. It reads Pi's effective global and
-project `compaction` settings at primary-session start:
+project `compaction` settings through `pi.getSettings()` at primary-session
+start, model selection, and before autonomous checks. Model-specific token
+overrides follow Pi 0.99.2 precedence and validation; invalid settings block
+autonomous checks without disabling manual deterministic interception:
 
 | Band | Pi-derived boundary | Action |
 | --- | --- | --- |
@@ -133,6 +136,17 @@ window. Cooldown, post-compaction growth, Pi-sync, and warmup guards still
 apply. Emergency bypasses cooldown and sync. The 120,000-token target is fixed
 policy, not extension configuration; smaller contexts are capped by Pi's safe
 geometry. `auto-check blocked` records in `~/.pi/data/dc-distill/diag.log` carry Pi's inputs and the resolved boundaries.
+
+## Optional Feature Gates
+
+Tool-output persistence/previews and recall are independently off by default.
+Read global/project `extensionConfig["dc-distill"].toolOutput.enabled` and
+`.recall.enabled` booleans at owner-session start. Disabled output must return
+before content/storage; disabled recall must not persist/read stored summaries,
+inject extra focus echo, or recommend recall in live summaries. Keep core
+compaction, handoffs, session details/logs, and continuation recovery independent.
+Preserve existing data. Whole-source migration is deferred unless both gates are
+on so partial hydration cannot finalize migration markers.
 
 ## Recall, Dumps, and Migration
 

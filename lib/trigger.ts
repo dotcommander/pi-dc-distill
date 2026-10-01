@@ -77,7 +77,7 @@ export function resolveTriggerThresholds(
   }
 
   const window = Math.max(1, Math.round(contextWindow));
-  const reserve = Math.max(1, Math.round(options.compaction?.reserveTokens ?? 16_384));
+  const reserve = Math.max(0, Math.round(options.compaction?.reserveTokens ?? 16_384));
   const emergency = window;
   const warnFloor = Math.min(MIN_WARN_THRESHOLD, Math.max(0, emergency - 1));
   // This is Pi's native automatic compaction threshold.

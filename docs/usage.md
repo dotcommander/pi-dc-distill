@@ -101,7 +101,12 @@ they are never proof that verification passed.
 
 ## Recall prior summaries
 
-Ask the agent to call `recall_compaction` with JSON arguments such as:
+Recall is off by default. First enable `extensionConfig["dc-distill"].recall.enabled`
+in [feature settings](settings.md#optional-feature-settings) and start a new
+session. Otherwise the registered tool reports disabled without reading any
+recall store; no new summaries or extra focus echoes are saved/injected.
+
+When enabled, ask the agent to call `recall_compaction` with JSON arguments such as:
 
 ```json
 {"query": "modified-files", "limit": 3}
@@ -118,11 +123,12 @@ All-project search merges stores newest-first and can include ownerless legacy
 entries labelled `legacy-unscoped`. Those entries do not appear in default
 project search.
 
-Named sections include `Session`, `User Focus`, and `Conversation`. Supported
-markers include `resume-state`, `current-intent`, `resume-risks`, `file-evidence`,
-`read-files`, `modified-files`, `recent-tool-calls`, `recent-tool-results`,
-`verification`, `working-tree`, `source-anchors`, `active-tasks`, `resume-tasks`,
-`resume-index`, and `summary-omissions`. Other queries search keywords across
+Named sections include `Session`, `User Focus`, and `Conversation`. Searchable
+markers are `read-files`, `modified-files`, `recent-tool-calls`,
+`recent-tool-results`, `verification`, `working-tree`, `source-anchors`,
+`active-tasks`, `resume-tasks`, and `resume-index`. The current search does not
+index `resume-state`, `current-intent`, `resume-risks`, `file-evidence`, or
+`summary-omissions`, even when present in a stored summary. Other queries search keywords across
 supported parts. Recall searches retained summaries, not the complete transcript.
 
 Summaries with a provider session ID include `ctxgo show session` and
@@ -132,7 +138,13 @@ not install it or index transcripts.
 
 ## Oversized tool output
 
-The `tool_result` hook leaves small results unchanged. Text exceeding 12,000
+This feature is off by default. Enable
+`extensionConfig["dc-distill"].toolOutput.enabled` in
+[feature settings](settings.md#optional-feature-settings) and start a new session.
+When disabled, all results are left untouched and no output artifacts are written.
+
+When enabled in the owner session, the `tool_result` hook leaves small results
+unchanged. Text exceeding 12,000
 JavaScript string units or 240 lines is saved locally and replaced with a
 preview. The replacement includes the artifact path, exact UTF-8 byte count,
 SHA-256 digest, and preview strategy. Diagnostic, diff, whole-document JSON,

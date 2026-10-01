@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import { createStubCtx } from "#distill-framework/x/testing";
+import { createStubCtx } from "../tests/harness/fake-pi.ts";
 
 import {
   DISTILL_CONTINUATION_MESSAGE_TYPE,

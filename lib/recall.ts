@@ -7,7 +7,7 @@
  * Deterministic, no LLM. Pure search.
  */
 
-import { Path, type PathHandle } from "#distill-framework";
+import { Path, type PathHandle } from "./paths.ts";
 
 export interface RecallEntry {
   /** ISO timestamp of the compaction */

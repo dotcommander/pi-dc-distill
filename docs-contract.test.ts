@@ -1,7 +1,7 @@
 import { describe, expect, test } from "bun:test";
 import { readdir, readFile } from "node:fs/promises";
 import { join } from "node:path";
-import { createStubCtx } from "#distill-framework/x/testing";
+import { createStubCtx } from "./tests/harness/fake-pi.ts";
 import setupDistill from "./index.ts";
 
 /**

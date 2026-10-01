@@ -17,7 +17,7 @@ import { LEGACY_DATA_DIR_ENV } from "./legacy.ts";
 
 import { appendFileSync, existsSync, mkdirSync, readdirSync, renameSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
-import { Path } from "#distill-framework";
+import { Path } from "./paths.ts";
 import type { CompactEvent } from "./types.ts";
 
 const DATA_DIR_ENV = "DC_DISTILL_DATA_DIR";

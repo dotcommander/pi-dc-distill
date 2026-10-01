@@ -8,8 +8,8 @@ import {
   stat,
 } from "node:fs/promises";
 import { join } from "node:path";
-import { Path } from "#distill-framework";
-import { Fs } from "#distill-framework/x/fs";
+import { Path } from "./paths.ts";
+import { Fs } from "./fs-support.ts";
 import { migrateDistillData, type DistillDataMigrationResult } from "./data-migration.ts";
 import type { CompactEvent } from "./types.ts";
 
@@ -117,7 +117,11 @@ export class DistillStore {
     this.pid = options.pid ?? process.pid;
   }
 
-  async initialize(): Promise<DistillDataMigrationResult> {
+  async initialize(options: { migrateLegacy?: boolean } = {}): Promise<DistillDataMigrationResult> {
+    // Whole-source markers cannot finalize a migration with optional data omitted.
+    if (options.migrateLegacy === false) {
+      return { status: "skipped", copied: [], merged: [], preserved: [], errors: [] };
+    }
     return migrateDistillData({
       legacyDir: this.legacyDir,
       currentDir: this.dataDir,

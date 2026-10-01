@@ -1800,6 +1800,7 @@ function buildResumeTasks(input: {
   activeTasks: string[];
   resumeIndex: ResumeIndex;
   pathRoot?: string;
+  recallEnabled?: boolean;
 }): string[] {
   const out = new OrderedSet();
   const continuation = input.resumeIndex.continuationHints.at(-1);
@@ -1830,7 +1831,7 @@ function buildResumeTasks(input: {
     !activeBases.has(query) &&
     !isVerificationCommand(query) &&
     !isWorkingTreeCommand(query));
-  if (queries[0]) addMarkerLine(out, `Recall: recall_compaction ${quoteRecallQuery(queries[0])}`);
+  if (input.recallEnabled !== false && queries[0]) addMarkerLine(out, `Recall: recall_compaction ${quoteRecallQuery(queries[0])}`);
   if (input.workingTree.length > 0) addMarkerLine(out, "Check working tree: git status --short");
   return out.slice().slice(0, 4);
 }
@@ -2597,6 +2598,7 @@ function enforceOperatingBudget(
   meta: SessionMeta,
   conv: ConversationResult,
   userFocus?: string,
+  recallEnabled = true,
 ): void {
   const omitted = new Map<string, number>();
   const note = (label: string) => omitted.set(label, (omitted.get(label) ?? 0) + 1);
@@ -2607,6 +2609,7 @@ function enforceOperatingBudget(
       conv.modifiedFiles,
       conv.recentToolCalls,
     );
+    if (!recallEnabled) conv.resumeIndex.recallQueries = [];
     conv.pathRoot = choosePathRoot(
       [...conv.readFiles, ...conv.modifiedFiles, ...conv.resumeIndex.activeFiles],
       meta.cwd,
@@ -2619,6 +2622,7 @@ function enforceOperatingBudget(
       activeTasks: conv.activeTasks,
       resumeIndex: conv.resumeIndex,
       pathRoot: conv.pathRoot,
+      recallEnabled,
     });
   };
   // Reserve room for the omission receipt, separator, recall note, and metric prefix.
@@ -2690,7 +2694,7 @@ function enforceOperatingBudget(
   conv.budgetOmissions = omissions;
 }
 
-export function compileSessionJsonl(content: string, userFocus?: string, signal?: AbortSignal): LocalCompileResult {
+export function compileSessionJsonl(content: string, userFocus?: string, signal?: AbortSignal, recallEnabled = true): LocalCompileResult {
   checkAbort(signal);
   if (!content.trim()) throw new CompactionInputError("compaction input is empty");
   const normalized = normalizeSessionJsonl(content, signal);
@@ -2706,9 +2710,13 @@ export function compileSessionJsonl(content: string, userFocus?: string, signal?
     compressToolResults(filterNoise(normalized.blocks)),
     normalized.meta.cwd,
   );
-  enforceOperatingBudget(normalized.meta, conv, userFocus);
+  if (!recallEnabled) {
+    conv.resumeIndex.recallQueries = [];
+    conv.resumeTasks = buildResumeTasks({ ...conv, recallEnabled });
+  }
+  enforceOperatingBudget(normalized.meta, conv, userFocus, recallEnabled);
   checkAbort(signal);
-  let summary = `${formatSummary(normalized.meta, conv, userFocus)}${COMPILE_SEPARATOR}${RECALL_NOTE}`;
+  let summary = `${formatSummary(normalized.meta, conv, userFocus)}${recallEnabled ? `${COMPILE_SEPARATOR}${RECALL_NOTE}` : ""}`;
   while (Array.from(summary).length > MAX_STRUCTURED_SUMMARY_CODE_POINTS && (conv.readFiles.length > 0 || conv.modifiedFiles.length > 0)) {
     if (conv.readFiles.length >= conv.modifiedFiles.length && conv.readFiles.length > 0) {
       conv.readFiles.shift();
@@ -2717,7 +2725,7 @@ export function compileSessionJsonl(content: string, userFocus?: string, signal?
       conv.modifiedFiles.shift();
       conv.omittedModifiedFiles++;
     }
-    summary = `${formatSummary(normalized.meta, conv, userFocus)}${COMPILE_SEPARATOR}${RECALL_NOTE}`;
+    summary = `${formatSummary(normalized.meta, conv, userFocus)}${recallEnabled ? `${COMPILE_SEPARATOR}${RECALL_NOTE}` : ""}`;
   }
   if (Array.from(summary).length > MAX_STRUCTURED_SUMMARY_CODE_POINTS) {
     throw new CompactionInputError(
@@ -2775,8 +2783,8 @@ async function readSessionBounded(path: string): Promise<BoundedSessionRead> {
   }
 }
 
-export async function compileSessionFile(path: string, userFocus?: string): Promise<LocalCompileResult> {
+export async function compileSessionFile(path: string, userFocus?: string, recallEnabled = true): Promise<LocalCompileResult> {
   const input = await readSessionBounded(path);
-  const result = compileSessionJsonl(input.content, userFocus);
+  const result = compileSessionJsonl(input.content, userFocus, undefined, recallEnabled);
   return { ...result, digestScope: input.digestScope };
 }

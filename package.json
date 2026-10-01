@@ -1,13 +1,21 @@
 {
   "name": "pi-dc-distill",
   "version": "0.1.1",
-  "description": "Deterministic provider-free context and tool-output compaction for Pi.",
+  "description": "Deterministic, local context compaction for the Pi coding agent. No LLM calls; includes tool-output previews and project-scoped recall.",
   "license": "MIT",
   "type": "module",
   "main": "./index.ts",
   "keywords": [
+    "pi-coding-agent",
     "pi-package",
-    "pi-extension"
+    "pi-extension",
+    "context-compaction",
+    "context-management",
+    "developer-tools",
+    "ai-agents",
+    "typescript",
+    "bun",
+    "local-first"
   ],
   "pi": {
     "extensions": [
@@ -16,10 +24,6 @@
   },
   "bin": {
     "dc-distill-session": "./bin/dc-distill-session.ts"
-  },
-  "imports": {
-    "#distill-framework": "./lib/framework/index.ts",
-    "#distill-framework/*": "./lib/framework/*.ts"
   },
   "files": [
     "index.ts",
@@ -39,7 +43,8 @@
     "distill:session": "bun ./bin/dc-distill-session.ts",
     "test": "bun test",
     "typecheck": "tsc --noEmit",
-    "distill:e2e": "bun test ./tests/e2e/lifecycle.e2e.ts",
+    "prepublishOnly": "bun run test && bun run typecheck",
+    "distill:e2e": "bun test ./tests/e2e/lifecycle.e2e.ts ./tests/e2e/interception.e2e.ts",
     "distill:demo": "bun run tests/e2e/demo.ts",
     "distill:compare": "bun run tests/compare-session.ts"
   },
@@ -64,6 +69,14 @@
     "node": ">=22.19.0"
   },
   "packageManager": "bun@1.4.0",
+  "homepage": "https://github.com/dotcommander/pi-dc-distill#readme",
+  "bugs": {
+    "url": "https://github.com/dotcommander/pi-dc-distill/issues"
+  },
+  "publishConfig": {
+    "access": "public",
+    "registry": "https://registry.npmjs.org/"
+  },
   "repository": {
     "type": "git",
     "url": "git+https://github.com/dotcommander/pi-dc-distill.git"

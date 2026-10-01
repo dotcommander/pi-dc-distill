@@ -154,6 +154,21 @@ describe("runStrategies", () => {
 
     expect(result.ok).toBe(false);
     if (result.ok) throw new Error("expected failure result");
+    expect(result.cancelled).toBe(false);
     expect(result.reasons.join("\n")).toContain("no such file");
+  });
+
+  test("classifies an aborted signal as cancellation, not failure", async () => {
+    const controller = new AbortController();
+    controller.abort();
+    const result = await runStrategies(
+      { userFocus: "focus", sessionFile: "/tmp/unused-session.jsonl" },
+      controller.signal,
+    );
+
+    expect(result.ok).toBe(false);
+    if (result.ok) throw new Error("expected failure result");
+    expect(result.cancelled).toBe(true);
+    expect(result.reasons.join("\n")).toContain("algorithmic: compaction cancelled");
   });
 });

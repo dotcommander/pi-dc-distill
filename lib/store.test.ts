@@ -122,3 +122,20 @@ describe("DistillStore", () => {
     expect(existsSync(join(dataDir, ".migrated-from-legacy-distill"))).toBe(true);
   });
 });
+
+
+test("deferred migration leaves optional legacy data and markers untouched until enabled", async () => {
+  const dir = root();
+  const legacyDir = join(dir, "legacy");
+  const dataDir = join(dir, "current");
+  await mkdir(legacyDir);
+  const original = JSON.stringify([entry("2026-01-01T00:00:00Z", "legacy optional state")]);
+  await writeFile(join(legacyDir, "recall.json"), original);
+  const store = new DistillStore({ dataDir, legacyDir, projectRoot: join(dir, "project") });
+  expect((await store.initialize({ migrateLegacy: false })).status).toBe("skipped");
+  expect(existsSync(dataDir)).toBe(false);
+  expect(readFileSync(join(legacyDir, "recall.json"), "utf8")).toBe(original);
+  expect((await store.initialize({ migrateLegacy: true })).status).toBe("migrated");
+  expect(existsSync(join(dataDir, "recall.json"))).toBe(true);
+  expect(readFileSync(join(legacyDir, "recall.json"), "utf8")).toBe(original);
+});

@@ -1,5 +1,5 @@
 import { isDistillCompactor } from "./legacy.ts";
-import type { BlockField, BlockSpec } from "#distill-framework/x/output";
+import type { BlockField, BlockSpec } from "./tui-block.ts";
 
 export const COMPACTION_CARD_TYPE = "dc-distill-compaction";
 

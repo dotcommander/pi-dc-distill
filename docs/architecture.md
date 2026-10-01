@@ -2,9 +2,13 @@
 
 [README](../README.md) · [Usage](usage.md) · [Policy and data](settings.md)
 
-The package entry point is `index.ts`; its framework is bundled in
-`lib/framework`. Load it with `pi -e ./index.ts` from an installed checkout,
-or use the [package quick start](../README.md#install).
+The package entry point is `index.ts`. Load it with `pi -e ./index.ts`
+from an installed checkout, or use the
+[package quick start](../README.md#install). It depends only on the
+`@earendil-works/pi-coding-agent` SDK; the former vendored `lib/framework`
+copy is gone (see [ADR 0002](adr/0002-remove-vendored-framework.md)), replaced
+by small owned support modules under `lib/` (events, entries, tool results,
+notification, paths, fs, diagnostics, host probing).
 
 `dc-distill` is deterministic-only. `runStrategies()` has one local TypeScript
 Mechanical strategy. `Tier.Warn` is a cooperative policy signal, not a second
@@ -19,8 +23,8 @@ only after Pi confirms the matching append.
 ```text
 session_start
   -> primary session claims DistillRuntime
-  -> initialize store and retry migration
-  -> read Pi compaction settings and project recall
+  -> snapshot ordinary Pi compaction settings and optional feature gates
+  -> initialize store; defer whole legacy migration unless both gates are on
 
 session_before_compact
   -> build CompactionSource from preparation + active branch
@@ -35,7 +39,7 @@ Pi appends compaction entry
 session_compact
   -> verify owner, extension/version, attempt, first-kept ID, digest
   -> read post-rebuild full-context usage
-  -> commit log, optional dumps, and project recall exactly once
+  -> commit log, optional dumps, and opt-in project recall
   -> reset monitor and optionally notify/continue
   -> clear pending state and release latch
 ```

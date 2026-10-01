@@ -4,8 +4,8 @@ import { mkdtemp, readFile, writeFile } from "node:fs/promises";
 import { existsSync, mkdtempSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { createStubCtx, simulate } from "#distill-framework/x/testing";
-import { buildSessionContext, estimateTokens } from "#distill-framework/pi/coding-agent";
+import { createStubCtx, simulate } from "./tests/harness/fake-pi.ts";
+import { buildSessionContext, estimateTokens } from "./lib/sdk.ts";
 import { createDistillExtension } from "./index.ts";
 import { DISTILL_HANDOFF_ENTRY_TYPE } from "./lib/handoff.ts";
 import { DISTILL_CONTINUATION_MESSAGE_TYPE } from "./lib/continuation.ts";
@@ -13,6 +13,7 @@ import { DistillStore } from "./lib/store.ts";
 
 const testRoot = mkdtempSync(join(tmpdir(), "dc-distill-index-tests-"));
 const extension = createDistillExtension({
+  loadFeatureSettings: () => ({ toolOutput: { enabled: true }, recall: { enabled: true } }),
   loadCompactionSettings: () => ({
     enabled: true,
     reserveTokens: 16_384,
@@ -30,6 +31,28 @@ function notificationText(stub: ReturnType<typeof createStubCtx>): string[] {
   return stub.calls
     .filter((call) => call.api === "ui.notify")
     .map((call) => String(call.args[0]));
+}
+
+function failureReportingFixture(rejectLog: boolean) {
+  const root = mkdtempSync(join(tmpdir(), "dc-distill-failure-reporting-"));
+  const failures: string[][] = [];
+  const store = new DistillStore({
+    dataDir: join(root, "data"),
+    projectRoot: join(root, "project"),
+    projectsRoot: join(root, "projects"),
+    projectIdentity: "failure-reporting-test",
+    legacyDir: join(root, "missing-legacy"),
+  });
+  store.appendFailure = async (reasons) => {
+    failures.push([...reasons]);
+    if (rejectLog) throw new Error("failure log unavailable");
+  };
+  const stub = createStubCtx();
+  createDistillExtension({
+    storeFactory: () => store,
+    loadCompactionSettings: () => ({ enabled: true, reserveTokens: 16_384 }),
+  })(stub.pi);
+  return { stub, failures, root };
 }
 
 describe("dc-distill entrypoint", () => {
@@ -254,6 +277,39 @@ describe("dc-distill host compaction override", () => {
     expect(result).toEqual({ cancel: true });
   });
 
+  for (const rejectLog of [false, true]) {
+    for (const failurePath of ["compiler-result", "thrown-error"] as const) {
+      for (const rejectNotification of [false, true]) {
+        test(`failure reporting preserves cancellation for ${failurePath} with rejecting log=${rejectLog}, notification=${rejectNotification}`, async () => {
+          const { stub, failures, root } = failureReportingFixture(rejectLog);
+          await simulate.hook(stub, "session_start", {});
+          const event = compactEvent("overflow");
+          if (failurePath === "compiler-result") {
+            // Nonempty preparation reaches runStrategies but has no eligible records.
+            event.preparation.messagesToSummarize = [{ role: "unsupported", content: "filtered" }];
+          } else {
+            const circular: any = { role: "user" };
+            circular.content = circular;
+            event.preparation.messagesToSummarize = [circular];
+          }
+          let notificationAttempts = 0;
+          stub.ctx.ui.notify = () => {
+            notificationAttempts++;
+            if (rejectNotification) throw new Error("notification unavailable");
+          };
+
+          const [result] = await simulate.hook(stub, "session_before_compact", event);
+          expect(result).toEqual({ cancel: true });
+          expect(failures).toHaveLength(1);
+          expect(failures[0]?.[0]).toMatch(failurePath === "compiler-result" ? /^algorithmic:/ : /cyclic|circular/i);
+          expect(notificationAttempts).toBe(1);
+          expect(existsSync(join(root, "data", "compact-log.jsonl"))).toBe(false);
+          expect(existsSync(join(root, "project", "recall.json"))).toBe(false);
+        });
+      }
+    }
+  }
+
   test("stages success until the matching host append commits", async () => {
     const stub = createStubCtx();
     extension(stub.pi);
@@ -427,6 +483,25 @@ describe("dc-distill subagent safety", () => {
     });
     await simulate.hook(stub, "agent_settled", {});
     expect(compactCalls(stub).length).toBe(2);
+  });
+
+  test("session_compact_failed releases the autonomous latch when failure logging rejects", async () => {
+    const { stub, failures, root } = failureReportingFixture(true);
+    await simulate.hook(stub, "session_start", {});
+    await simulate.hook(stub, "agent_settled", {});
+    stub.ctx.getContextUsage = () => ({ tokens: 200_000, contextWindow: 200_000, percent: 100 });
+    await simulate.hook(stub, "agent_settled", {});
+    expect(compactCalls(stub)).toHaveLength(1);
+
+    await simulate.hook(stub, "session_compact_failed", {
+      reason: "threshold", errorMessage: "original host failure", aborted: false,
+      willRetry: false, fromExtension: true,
+    });
+    expect(failures).toEqual([["Compaction failed (threshold): original host failure"]]);
+    await simulate.hook(stub, "agent_settled", {});
+    expect(compactCalls(stub)).toHaveLength(2);
+    expect(existsSync(join(root, "data", "compact-log.jsonl"))).toBe(false);
+    expect(existsSync(join(root, "project", "recall.json"))).toBe(false);
   });
 
   test("isolates hooks, tools, commands, shutdown, and owner recovery", async () => {
@@ -765,5 +840,159 @@ describe("dc-distill handoff capture", () => {
         },
       ],
     });
+  });
+});
+
+
+describe("optional feature gates", () => {
+  for (const toolOutput of [false, true]) {
+    for (const recall of [false, true]) {
+      test(`independent tool output=${toolOutput}, recall=${recall} gates at registration, start, commit, context and shutdown`, async () => {
+        const root = mkdtempSync(join(tmpdir(), "dc-distill-feature-gates-"));
+        const stub = createStubCtx();
+        const store = new DistillStore({
+          dataDir: join(root, "data"), projectRoot: join(root, "project"),
+          projectsRoot: join(root, "projects"), projectIdentity: stub.ctx.cwd,
+          legacyDir: join(root, "missing-legacy"),
+        });
+        const migrationFlags: boolean[] = [];
+        const initialize = store.initialize.bind(store);
+        store.initialize = async (options) => {
+          migrationFlags.push(options?.migrateLegacy !== false);
+          return initialize(options);
+        };
+        let reads = 0;
+        const load = store.loadRecall.bind(store);
+        store.loadRecall = async (scope) => { reads++; return load(scope); };
+        createDistillExtension({
+          storeFactory: () => store,
+          outputArtifactRoot: () => join(root, "tool-output"),
+          loadCompactionSettings: () => ({ enabled: true, reserveTokens: 16384 }),
+          loadFeatureSettings: () => ({ toolOutput: { enabled: toolOutput }, recall: { enabled: recall } }),
+        })(stub.pi);
+        const output = { toolName: "read", toolCallId: "feature-output", input: {},
+          content: [{ type: "text", text: "x".repeat(13000) }], isError: false };
+        expect((await simulate.hook(stub, "tool_result", output))[0]).toBeUndefined();
+        await simulate.hook(stub, "session_start", {});
+        expect(migrationFlags).toEqual([toolOutput && recall]);
+        const patch = (await simulate.hook(stub, "tool_result", output)).find(Boolean);
+        if (toolOutput) {
+          expect(patch, JSON.stringify(notificationText(stub))).toBeDefined();
+          expect(existsSync((patch as any).details.dcDistillOutputCompactor.artifactPath)).toBe(true);
+        } else expect(patch).toBeUndefined();
+        const [prepared] = await simulate.hook(stub, "session_before_compact", {
+          reason: "manual", signal: new AbortController().signal, branchEntries: [],
+          preparation: { messagesToSummarize: [{ role: "user", content: "Repair src/parser.ts and continue next." }],
+            turnPrefixMessages: [], firstKeptEntryId: "keep", tokensBefore: 120000 },
+        });
+        const compaction = (prepared as any).compaction;
+        expect(compaction.details.compactor).toBe("dc-distill");
+        expect(compaction.summary.includes("recall_compaction")).toBe(recall);
+        await simulate.hook(stub, "session_compact", { fromExtension: true,
+          compactionEntry: { type: "compaction", id: "commit", parentId: null,
+            timestamp: new Date().toISOString(), ...compaction } });
+        expect(existsSync(join(root, "data", "compact-log.jsonl"))).toBe(true);
+        expect(existsSync(join(root, "project", "recall.json"))).toBe(recall);
+        const response: any = await simulate.tool(stub, "recall_compaction", { query: "Conversation" });
+        expect(reads).toBe(recall ? 1 : 0);
+        if (!recall) expect(response.content[0].text).toContain("Recall is disabled");
+        const [echo] = await simulate.hook(stub, "context", { messages: [
+          { role: "compactionSummary", summary: compaction.summary },
+          { role: "user", content: "Continue" },
+        ] });
+        expect(Boolean(echo)).toBe(recall);
+        await simulate.hook(stub, "session_shutdown", {});
+        expect((await simulate.hook(stub, "tool_result", output))[0]).toBeUndefined();
+      });
+    }
+  }
+
+  test("missing feature settings disable optional work without deleting existing recall", async () => {
+    const root = mkdtempSync(join(tmpdir(), "dc-distill-default-features-"));
+    const projectRoot = join(root, "project");
+    await import("node:fs/promises").then(({ mkdir }) => mkdir(projectRoot));
+    const previous = '[{"ts":"2026-01-01T00:00:00Z","before":10,"after":5,"summary":"old","project":"old"}]';
+    await writeFile(join(projectRoot, "recall.json"), previous);
+    const stub = createStubCtx();
+    stub.ctx.cwd = root;
+    let reads = 0;
+    const store = new DistillStore({ dataDir: join(root, "data"), projectRoot,
+      legacyDir: join(root, "missing-legacy") });
+    store.loadRecall = async () => { reads++; throw new Error("disabled read must not happen"); };
+    createDistillExtension({ storeFactory: () => store })(stub.pi);
+    await simulate.hook(stub, "session_start", {});
+    const response: any = await simulate.tool(stub, "recall_compaction", { query: "old", scope: "all" });
+    expect(response.content[0].text).toContain("Recall is disabled");
+    expect(reads).toBe(0);
+    expect(await readFile(join(projectRoot, "recall.json"), "utf8")).toBe(previous);
+    expect((await simulate.hook(stub, "tool_result", { toolName: "read", content: [{ type: "text", text: "x".repeat(13000) }] }))[0]).toBeUndefined();
+  });
+});
+
+
+describe("effective host settings", () => {
+  const compactCalls = (stub: ReturnType<typeof createStubCtx>) => stub.calls.filter((call) => call.api === "ctx.compact");
+  const compactEvent = (_reason: "manual") => ({
+    reason: "manual", signal: new AbortController().signal, branchEntries: [],
+    preparation: { messagesToSummarize: [{ role: "user", content: "Preserve the current settings task and continue implementation." }],
+      turnPrefixMessages: [], firstKeptEntryId: "settings-keep", tokensBefore: 120000 },
+  });
+
+  test("refreshes on model selection and checks, preserves feature snapshots, and recovers from invalid settings", async () => {
+    const root = mkdtempSync(join(tmpdir(), "dc-distill-host-settings-"));
+    const stub = createStubCtx();
+    const store = new DistillStore({ dataDir: join(root, "data"), projectRoot: join(root, "project"),
+      projectsRoot: join(root, "projects"), projectIdentity: stub.ctx.cwd, legacyDir: join(root, "missing") });
+    let settings: any = { compaction: { enabled: false }, extensionConfig: { "dc-distill": { recall: { enabled: false } } } };
+    let reads = 0;
+    stub.pi.getSettings = () => { reads++; return settings; };
+    createDistillExtension({ storeFactory: () => store })(stub.pi);
+    await simulate.hook(stub, "session_start", {});
+    const startupReads = reads;
+    const selected: string[] = [];
+    settings.compaction.modelOverrides = {
+      get "fake/first"() { selected.push("first"); return { reserveTokens: 50000 }; },
+      get "fake/second"() { selected.push("second"); return { reserveTokens: 0 }; },
+    };
+    stub.ctx.model = { provider: "fake", id: "first", contextWindow: 200000 } as any;
+    await simulate.hook(stub, "model_select", {});
+    expect(reads).toBe(startupReads + 1);
+    expect(selected).toEqual(["first"]);
+    stub.ctx.model = { provider: "fake", id: "second", contextWindow: 200000 } as any;
+    stub.ctx.getContextUsage = () => ({ tokens: 200000, contextWindow: 200000, percent: 100 });
+    await simulate.hook(stub, "agent_settled", {});
+    expect(reads).toBe(startupReads + 2);
+    expect(selected).toEqual(["first", "second"]);
+    expect(compactCalls(stub)).toHaveLength(0);
+    settings = { compaction: { reserveTokens: -1 }, extensionConfig: { "dc-distill": { recall: { enabled: true } } } };
+    await simulate.hook(stub, "agent_settled", {});
+    expect(compactCalls(stub)).toHaveLength(0);
+    // Manual interception remains deterministic despite invalid autonomous geometry.
+    const [manual] = await simulate.hook(stub, "session_before_compact", compactEvent("manual"));
+    expect(manual).toHaveProperty("compaction.details.compactor", "dc-distill");
+    await simulate.hook(stub, "session_compact_failed", { reason: "manual", aborted: true, fromExtension: true });
+    const recall = stub.registeredTools.get("recall_compaction")!;
+    const result = await recall.execute("settings-recall", { scope: "project" }, new AbortController().signal, undefined, stub.ctx as any);
+    expect(JSON.stringify(result)).toContain("Recall is disabled");
+    settings = { compaction: { enabled: true, reserveTokens: 0 } };
+    await simulate.hook(stub, "agent_settled", {}); // startup warmup
+    await simulate.hook(stub, "agent_settled", {}); // emergency bypasses cooldown
+    expect(compactCalls(stub)).toHaveLength(1);
+    await simulate.hook(stub, "session_shutdown", {});
+  });
+
+  test("unavailable snapshots disable optional work and autonomous requests", async () => {
+    const root = mkdtempSync(join(tmpdir(), "dc-distill-unavailable-settings-"));
+    const stub = createStubCtx();
+    stub.pi.getSettings = () => { throw new Error("host snapshot unavailable"); };
+    createDistillExtension({ storeFactory: () => new DistillStore({ dataDir: join(root, "data"),
+      projectRoot: join(root, "project"), projectsRoot: join(root, "projects"), legacyDir: join(root, "missing") }) })(stub.pi);
+    await simulate.hook(stub, "session_start", {});
+    stub.ctx.getContextUsage = () => ({ tokens: 200000, contextWindow: 200000, percent: 100 });
+    await simulate.hook(stub, "agent_settled", {});
+    expect(compactCalls(stub)).toHaveLength(0);
+    const [manual] = await simulate.hook(stub, "session_before_compact", compactEvent("manual"));
+    expect(manual).toHaveProperty("compaction.details.compactor", "dc-distill");
+    await simulate.hook(stub, "session_shutdown", {});
   });
 });

@@ -6,6 +6,7 @@ const MIN_USEFUL_LENGTH = 50;
 
 interface CompactionPrep {
   userFocus?: string;
+  recallEnabled?: boolean;
   canonicalInput?: string;
   digestScope?: "compaction-input" | "bounded-compaction-input";
   /** Diagnostic/test compatibility only. Production passes canonicalInput. */
@@ -45,9 +46,9 @@ const algorithmic = async (
   }
 
   const result = prep.canonicalInput !== undefined
-    ? compileSessionJsonl(prep.canonicalInput, prep.userFocus, signal)
+    ? compileSessionJsonl(prep.canonicalInput, prep.userFocus, signal, prep.recallEnabled)
     : prep.sessionFile
-      ? await compileSessionFile(prep.sessionFile, prep.userFocus)
+      ? await compileSessionFile(prep.sessionFile, prep.userFocus, prep.recallEnabled)
       : (() => { throw new Error("canonical compaction input unavailable"); })();
   if (signal?.aborted) throw new CompactionCancelledError();
   const summary = result.summary.trim();
@@ -86,6 +87,7 @@ export const runStrategies = async (
   signal?: AbortSignal,
 ): Promise<StrategyResult> => {
   const reasons: string[] = [];
+  let cancelled = Boolean(signal?.aborted);
   try {
     const result = await algorithmic(prep, signal);
     // algorithmic() already enforces MIN_USEFUL_LENGTH; no re-check needed.
@@ -104,7 +106,8 @@ export const runStrategies = async (
     reasons.push(
       `algorithmic: ${err instanceof Error ? err.message : String(err)}`,
     );
+    cancelled = cancelled || err instanceof CompactionCancelledError
+      || (err instanceof Error && (err.name === "AbortError" || err.name === "LoaderAbortError"));
   }
-  const cancelled = signal?.aborted || reasons.some((reason) => reason.includes("compaction cancelled"));
-  return { ok: false, cancelled: Boolean(cancelled), reasons };
+  return { ok: false, cancelled, reasons };
 };

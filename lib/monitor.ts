@@ -2,7 +2,7 @@ import type { CompactState } from "./types.ts"
 import { mkdirSync, renameSync, statSync } from "node:fs";
 import { appendFile } from "node:fs/promises";
 import { join } from "node:path";
-import { Path } from "#distill-framework";
+import { Path } from "./paths.ts";
 
 interface MessageLike {
   role: string

@@ -1,7 +1,4 @@
 import { LEGACY_DUMPS_ENV } from "./legacy.ts";
-import { existsSync, readFileSync } from "node:fs";
-import { homedir } from "node:os";
-import { join } from "node:path";
 
 export interface PiCompactionSettings {
   enabled: boolean;
@@ -18,60 +15,79 @@ export const COMPACTION_COOLDOWN_MS = 120_000;
 /** Raw-dump retention when DC_DISTILL_DUMPS enables diagnostic dumps. */
 export const DUMP_RETENTION = 20;
 
-const AGENT_SETTINGS_FILE = join(homedir(), ".pi", "agent", "settings.json");
-const PROJECT_SETTINGS_FILE = ".pi/settings.json";
-
 function asRecord(value: unknown): Record<string, unknown> {
   return value !== null && typeof value === "object"
     ? value as Record<string, unknown>
     : {};
 }
 
-function positiveInteger(value: unknown, fallback: number): number {
-  if (typeof value !== "number" || !Number.isFinite(value)) return fallback;
-  return Math.max(1, Math.round(value));
+/** Resolve the host's merged snapshot using Pi 0.99.2 token-setting semantics. */
+export function resolvePiCompactionSettings(
+  settings: unknown,
+  model?: { provider: string; id: string },
+): PiCompactionSettings {
+  const compaction = asRecord(asRecord(settings).compaction);
+  const ordinary = compaction.reserveTokens;
+  const validate = (value: unknown, field: string) => {
+    if (value !== undefined && (typeof value !== "number" || !Number.isSafeInteger(value) || value < 0)) {
+      throw new Error(`Invalid ${field}: expected a non-negative safe integer.`);
+    }
+  };
+  validate(ordinary, "compaction.reserveTokens");
+  validate(compaction.keepRecentTokens, "compaction.keepRecentTokens");
+  const key = model ? `${model.provider}/${model.id}` : undefined;
+  const entry = key === undefined ? undefined : asRecord(compaction.modelOverrides)[key];
+  if (entry !== undefined && (entry === null || typeof entry !== "object" || Array.isArray(entry))) {
+    throw new Error(`Invalid compaction.modelOverrides["${key}"]: expected an object.`);
+  }
+  const override = asRecord(entry).reserveTokens;
+  validate(override, `compaction.modelOverrides["${key}"].reserveTokens`);
+  validate(asRecord(entry).keepRecentTokens, `compaction.modelOverrides["${key}"].keepRecentTokens`);
+  const enabled = compaction.enabled ?? true;
+  if (typeof enabled !== "boolean") throw new Error("Invalid compaction.enabled: expected a boolean.");
+  return { enabled, reserveTokens: (override ?? ordinary ?? 16_384) as number };
 }
 
-/**
- * Pi deep-merges global and project settings. Preserve that merge shape for the
- * two compaction keys dc-distill reads without owning a parallel config.
- */
-export function normalizePiCompactionSettings(
+export function resolveDistillFeatureSettings(settings: unknown): DistillFeatureSettings {
+  return normalizeDistillFeatureSettings(asRecord(asRecord(settings).extensionConfig)["dc-distill"]);
+}
+
+export interface DistillFeatureSettings {
+  toolOutput: { enabled: boolean };
+  recall: { enabled: boolean };
+}
+
+export const DEFAULT_DISTILL_FEATURE_SETTINGS: DistillFeatureSettings = {
+  toolOutput: { enabled: false },
+  recall: { enabled: false },
+};
+
+/** Normalize only explicit booleans; omitted or malformed leaves inherit. */
+export function normalizeDistillFeatureSettings(
   raw: unknown,
-  fallback: PiCompactionSettings = DEFAULT_PI_COMPACTION_SETTINGS,
-): PiCompactionSettings {
-  const compaction = asRecord(raw);
+  fallback: DistillFeatureSettings = DEFAULT_DISTILL_FEATURE_SETTINGS,
+): DistillFeatureSettings {
+  const features = asRecord(raw);
+  const toolOutput = asRecord(features.toolOutput);
+  const recall = asRecord(features.recall);
   return {
-    enabled: typeof compaction.enabled === "boolean"
-      ? compaction.enabled
-      : fallback.enabled,
-    reserveTokens: positiveInteger(compaction.reserveTokens, fallback.reserveTokens),
+    toolOutput: {
+      enabled: typeof toolOutput.enabled === "boolean"
+        ? toolOutput.enabled : fallback.toolOutput.enabled,
+    },
+    recall: {
+      enabled: typeof recall.enabled === "boolean"
+        ? recall.enabled : fallback.recall.enabled,
+    },
   };
 }
 
-export function mergePiCompactionSettings(...settingsFiles: unknown[]): PiCompactionSettings {
-  return settingsFiles.reduce<PiCompactionSettings>(
-    (settings, settingsFile) =>
-      normalizePiCompactionSettings(asRecord(settingsFile).compaction, settings),
-    DEFAULT_PI_COMPACTION_SETTINGS,
-  );
-}
-
-function readSettingsFile(path: string): unknown {
-  try {
-    if (!existsSync(path)) return {};
-    return JSON.parse(readFileSync(path, "utf8"));
-  } catch {
-    return {};
-  }
-}
-
-/** Read Pi's global settings followed by the current project's override file. */
-export function loadPiCompactionSettings(cwd: string): PiCompactionSettings {
-  return mergePiCompactionSettings(
-    readSettingsFile(AGENT_SETTINGS_FILE),
-    readSettingsFile(join(cwd, PROJECT_SETTINGS_FILE)),
-  );
+/** Merge the extension's feature leaves from Pi global and project settings. */
+export function mergeDistillFeatureSettings(...settingsFiles: unknown[]): DistillFeatureSettings {
+  return settingsFiles.reduce<DistillFeatureSettings>((settings, settingsFile) => {
+    const extensionConfig = asRecord(asRecord(settingsFile).extensionConfig);
+    return normalizeDistillFeatureSettings(extensionConfig["dc-distill"], settings);
+  }, DEFAULT_DISTILL_FEATURE_SETTINGS);
 }
 
 /** Raw dumps are diagnostic-only and intentionally require an explicit process opt-in. */

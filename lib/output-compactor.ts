@@ -1,10 +1,11 @@
 import { appendFile, mkdir } from "node:fs/promises";
 import { createHash } from "node:crypto";
 import { dirname, join } from "node:path";
-import type { ExtensionAPI } from "#distill-framework/pi/coding-agent";
-import { Notify, Path } from "#distill-framework";
-import { Events } from "#distill-framework/x/events";
-import { Fs } from "#distill-framework/x/fs";
+import type { ExtensionAPI } from "./sdk.ts";
+import { Notify } from "./notify-support.ts";
+import { Path } from "./paths.ts";
+import { Events } from "./events-support.ts";
+import { Fs } from "./fs-support.ts";
 
 export interface OutputCompactorConfig {
   enabled: boolean;
@@ -74,7 +75,9 @@ interface ToolResultEvent {
   isError?: boolean;
 }
 
-interface OutputCompactorOptions {
+export interface OutputCompactorOptions {
+  /** Evaluated for each result before inspecting content or writing artifacts. */
+  isEnabled?: (ctx: any) => boolean;
   config?: Partial<OutputCompactorConfig>;
   artifactRoot?: (cwd: string) => string;
   writeText?: (path: string, text: string) => Promise<void>;
@@ -82,7 +85,7 @@ interface OutputCompactorOptions {
 }
 
 export const DEFAULT_OUTPUT_COMPACTOR_CONFIG: OutputCompactorConfig = {
-  enabled: true,
+  enabled: false,
   maxChars: 12_000,
   maxLines: 240,
   headLines: 100,
@@ -441,7 +444,7 @@ export function createOutputCompactor(options: OutputCompactorOptions = {}) {
 
   async function onToolResult(event: ToolResultEvent, ctx: any) {
     try {
-      if (!config.enabled) return;
+      if (!config.enabled || (options.isEnabled && !options.isEnabled(ctx))) return;
       const content = event.content ?? [];
       const texts = textBlocks(content);
       if (texts.length === 0) return;
@@ -519,8 +522,11 @@ export function createOutputCompactor(options: OutputCompactorOptions = {}) {
   return { onToolResult };
 }
 
-export function registerOutputCompactor(pi: ExtensionAPI): void {
-  const compactor = createOutputCompactor();
+export function registerOutputCompactor(
+  pi: ExtensionAPI,
+  options: OutputCompactorOptions = {},
+): void {
+  const compactor = createOutputCompactor(options);
   Events.toolResult(
     pi,
     async ({ event, ctx }) => {

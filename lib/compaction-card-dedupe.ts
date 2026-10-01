@@ -1,4 +1,4 @@
-import { Runtime } from "#distill-framework/x/runtime";
+import { Runtime } from "./runtime-probe.ts";
 import {
   COMPACTION_CARD_TYPE,
   type CompactionCardDetails,

@@ -3,7 +3,7 @@ import { existsSync, mkdirSync, mkdtempSync, readFileSync, writeFileSync } from 
 import { mkdir, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
-import { Fs } from "#distill-framework/x/fs";
+import { Fs } from "./fs-support.ts";
 import { migrateDistillData } from "./data-migration.ts";
 
 function tempRoot(): string {

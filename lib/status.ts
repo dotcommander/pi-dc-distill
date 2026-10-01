@@ -1,5 +1,5 @@
 import { join } from "node:path";
-import { Path } from "#distill-framework";
+import { Path } from "./paths.ts";
 import {
   COMPACTION_COOLDOWN_MS,
   DEFAULT_PI_COMPACTION_SETTINGS,

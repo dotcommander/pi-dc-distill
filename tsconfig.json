@@ -14,8 +14,6 @@
     "types": ["node", "bun"],
     "typeRoots": ["./node_modules/@types"],
     "paths": {
-      "#distill-framework": ["./lib/framework/index.ts"],
-      "#distill-framework/*": ["./lib/framework/*"],
       "typebox": ["./node_modules/typebox"],
       "@earendil-works/pi-agent-core": ["./node_modules/@earendil-works/pi-agent-core"],
       "@earendil-works/pi-coding-agent": ["./node_modules/@earendil-works/pi-coding-agent"],

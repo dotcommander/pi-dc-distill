@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, test } from "bun:test";
-import { mkdtemp, readFile, rm } from "node:fs/promises";
+import { mkdtemp, readFile, readdir, rm, writeFile } from "node:fs/promises";
 import { createHash } from "node:crypto";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
@@ -111,11 +111,77 @@ describe("output compactor helpers", () => {
 });
 
 describe("output compactor", () => {
+  test("is off by default without inspecting text or touching storage", async () => {
+    const root = await tempRoot();
+    const existing = join(root, "existing.txt");
+    await writeFile(existing, "preserved");
+    let storageCalls = 0;
+    const compactor = createOutputCompactor({
+      artifactRoot: () => { storageCalls++; return root; },
+      writeText: async () => { storageCalls++; },
+      appendIndex: async () => { storageCalls++; },
+    });
+    const event = {
+      get content(): never { throw new Error("disabled results must not be inspected"); },
+    };
+    const callCtx = ctx(root);
+    expect(DEFAULT_OUTPUT_COMPACTOR_CONFIG.enabled).toBe(false);
+    expect(await compactor.onToolResult(event, callCtx)).toBeUndefined();
+    expect(storageCalls).toBe(0);
+    expect(callCtx.notices).toEqual([]);
+    expect(await readdir(root)).toEqual(["existing.txt"]);
+    expect(await readFile(existing, "utf8")).toBe("preserved");
+  });
+
+  test("checks the session gate on each result and preserves output when disabled", async () => {
+    const root = await tempRoot();
+    let enabled = false;
+    let gateCalls = 0;
+    const callCtx = ctx(root);
+    const compactor = createOutputCompactor({
+      config: { enabled: true, maxChars: 5 },
+      artifactRoot: () => root,
+      isEnabled: (currentCtx) => {
+        expect(currentCtx).toBe(callCtx);
+        gateCalls++;
+        return enabled;
+      },
+    });
+    const image = { type: "image", data: "preserved-image" };
+    const fullText = "complete Unicode output 🐈";
+    const event = {
+      toolName: "bash",
+      toolCallId: "gate-test",
+      content: [image, { type: "text", text: fullText }],
+      details: { existing: "preserved-detail" },
+    };
+    expect(await compactor.onToolResult(event, callCtx)).toBeUndefined();
+    expect(await readdir(root)).toEqual([]);
+    expect(event.content).toEqual([image, { type: "text", text: fullText }]);
+    expect(callCtx.notices).toEqual([]);
+
+    enabled = true;
+    const patch = await compactor.onToolResult(event, callCtx);
+    expect(gateCalls).toBe(2);
+    expect(patch?.content?.[0]).toEqual(image);
+    const details = patch?.details as Record<string, any>;
+    expect(details.existing).toBe("preserved-detail");
+    const receipt = details.dcDistillOutputCompactor;
+    expect(await readFile(receipt.artifactPath, "utf8")).toBe(fullText);
+    expect(receipt.contentSha256).toBe(createHash("sha256").update(fullText, "utf8").digest("hex"));
+    expect(receipt.bytes).toBe(Buffer.byteLength(fullText, "utf8"));
+    const files = await readdir(root);
+    enabled = false;
+    expect(await compactor.onToolResult(event, callCtx)).toBeUndefined();
+    expect(await readdir(root)).toEqual(files);
+    expect(await readFile(receipt.artifactPath, "utf8")).toBe(fullText);
+  });
+
   test("returns undefined for small text output", async () => {
     const root = await tempRoot();
     const compactor = createOutputCompactor({
       artifactRoot: () => root,
-      config: { maxChars: 100, maxLines: 10 },
+      config: { enabled: true, maxChars: 100, maxLines: 10 },
     });
 
     const patch = await compactor.onToolResult(
@@ -132,6 +198,7 @@ describe("output compactor", () => {
     const compactor = createOutputCompactor({
       artifactRoot: () => root,
       config: {
+        enabled: true,
         maxLines: 5,
         headLines: 2,
         tailLines: 2,
@@ -204,6 +271,7 @@ describe("output compactor", () => {
     const compactor = createOutputCompactor({
       artifactRoot: () => root,
       config: {
+        enabled: true,
         maxLines: 5,
         headLines: 1,
         tailLines: 1,
@@ -228,7 +296,7 @@ describe("output compactor", () => {
     const root = await tempRoot();
     const compactor = createOutputCompactor({
       artifactRoot: () => root,
-      config: { maxChars: 1 },
+      config: { enabled: true, maxChars: 1 },
       writeText: async () => {
         throw new Error("disk full");
       },

@@ -2,18 +2,67 @@
 
 [README](../README.md) · [Usage](usage.md) · [Troubleshooting](troubleshooting.md)
 
-`dc-distill` has no extension configuration. It reads Pi's effective global and
-project compaction settings at primary-session start:
+`dc-distill` has no extension-specific trigger configuration. Production reads
+`pi.getSettings()`, Pi's effective global/project settings snapshot including host
+overrides and the configured agent directory. It does not read settings files itself.
 
-```text
-~/.pi/agent/settings.json
-<project>/.pi/settings.json
+Compaction settings refresh at owner-session start, on model selection, and before
+each autonomous check. Token values follow Pi 0.99.2 precedence: the active
+`provider/id` model override, then the ordinary setting, then Pi's default
+(`reserveTokens: 16384`, `keepRecentTokens: 20000`). Token values must be
+non-negative safe integers; zero is valid. Ordinary and matching override values
+are validated even when an override wins. Invalid settings or an unavailable
+snapshot block autonomous checks with a diagnostic; manual deterministic
+interception remains available. `compaction.enabled` defaults to true and must
+be boolean when supplied. No settings are written by dc-distill.
+
+Optional feature gates remain owner-start snapshots. Legacy trigger keys such as
+`extensionConfig["dc-distill"].autoThresholdTokens` remain ignored.
+
+## Optional feature settings
+
+Both optional features default to `false`. Only explicit boolean values are
+accepted; strings such as `"true"` do not enable them. Merge into the global
+agent `settings.json` or `<project>/.pi/settings.json` and restart the session:
+
+```json
+{
+  "extensionConfig": {
+    "dc-distill": {
+      "toolOutput": {"enabled": true},
+      "recall": {"enabled": true}
+    }
+  }
+}
 ```
 
-The project file overrides individual keys from the global file, matching Pi's
-compaction settings merge. Legacy `extensionConfig["dc-distill"]` values such as
-`autoThresholdTokens` are not read; remove them rather than relying on a dead
-parallel policy.
+| Setting | Default | Enabled behavior |
+| --- | --- | --- |
+| `extensionConfig["dc-distill"].toolOutput.enabled` | `false` | Owner-session oversized tool text is persisted, indexed, and replaced with a recoverable preview. |
+| `extensionConfig["dc-distill"].recall.enabled` | `false` | Matching compaction commits save project recall; `recall_compaction` can read/search it; an extra bounded focus echo may be injected from the active compaction summary. |
+
+The switches are independent and merge per leaf: a project can enable recall
+while leaving a global tool-output opt-in unchanged, or explicitly disable
+either. Optional feature settings are startup snapshots, not live toggles. Previously default-on behavior
+is not treated as an opt-in; existing files are preserved without being deleted.
+
+When tool output is off, its hook returns before reading result content or
+writing artifacts. When recall is off, there is no new recall persistence,
+no recall store read through the tool, no extra focus echo, and live summaries
+omit recall-tool suggestions/queries. The tool remains registered and reports
+how to enable recall. Pi's native compaction summary, saved handoffs, core
+logs/details, and autonomous continuation/recovery are independent and remain.
+The offline evaluator is pure diagnostic compilation: its compatibility output
+can include recall hints without reading or writing the runtime recall store.
+
+Legacy migration currently copies whole namespaces and uses whole-source
+completion markers. Automatic migration is therefore deferred unless **both**
+features are enabled; partial copying must not finalize those markers. Either
+feature works independently with new/current data. Opting into only one does
+not automatically copy legacy data; opting into both on a later startup retries
+the complete migration, including historical logs/dumps. Source data is left
+intact. Core logging works without migration.
+
 
 To disable automatic compaction, merge this into Pi's global or project settings:
 
@@ -57,15 +106,16 @@ environment to enable them. dc-distill retains 20 complete pairs; retention is
 fixed. Dumps can contain discarded conversation context, so enable them only
 when that local storage is appropriate.
 
-Existing `extensionConfig["dc-distill"]` blocks and
-`~/.pi/data/dc-distill/settings.json` are no longer read. They are preserved;
-dc-distill never deletes user settings files.
+Only the two optional feature gates in `extensionConfig["dc-distill"]` are read.
+Historical trigger keys and `~/.pi/data/dc-distill/settings.json` remain ignored
+and preserved; dc-distill never deletes user settings files.
 
 ## Durable Storage
 
-Storage is local. Recall summaries, full tool outputs, logs, and optional raw
-dumps can contain conversation or project content. Disabling raw dumps does
-not disable recall or tool-output storage.
+Storage is local. Core logs, opt-in recall summaries, opt-in full tool outputs,
+and optional raw dumps can contain conversation or project content. Recall,
+tool outputs, and raw dumps have independent opt-ins; disabling one does not
+delete previously stored files or disable the others.
 
 `DistillStore` owns logs, dumps, migration, and recall.
 
@@ -86,7 +136,7 @@ plus the first eight hex characters of SHA-256 of its path. Project identity
 uses Pi's session working directory; these files are stored under the home
 directory, outside the project checkout.
 
-Recall keeps ten newest summaries per project; enabled raw dumps keep 20 pairs.
+Enabled recall keeps ten newest summaries per project; enabled raw dumps keep 20 pairs.
 Tool-output artifacts have no automatic retention limit in the current implementation.
 
 Recall read-modify-write and log/dump operations use locks and atomic framework
@@ -99,8 +149,8 @@ and the exact returned summary.
 This section concerns existing installations with historical compaction data. New users
 do not need to perform a migration step.
 
-Migration runs during store initialization/session start, never when the module
-is imported. It copies `~/.pi/data/dc-shrink/` and the older `dc-crunch` namespace
+With both optional features enabled, migration runs during store initialization/
+session start, never when the module is imported. Otherwise it is deferred. It copies `~/.pi/data/dc-shrink/` and the older `dc-crunch` namespace
 into `~/.pi/data/dc-distill/`, with a separate completion marker for each source.
 Stop using the old extension before starting the new one; this is a one-time
 copy, not ongoing synchronization. It needs space for the copied artifacts.
