@@ -165,6 +165,14 @@ describe("compileSessionJsonl", () => {
     expect(summary).toContain("spec it — refers to: The panel should expose the currently running tool and elapsed time.");
   });
 
+  test("advisory BARD entries do not affect the wire summary or make input useful", () => {
+    const bard = line({ type: "custom_message", customType: "bard-context", content: "Discarded analysis" });
+    const records = [sessionLine, userMsg("implement the task activity panel"), assistantMsg("Run the focused tests.")];
+    const baseline = compileSessionJsonl(records.join("\n")).summary;
+    expect(compileSessionJsonl([bard, ...records, bard].join("\n")).summary).toBe(baseline);
+    expect(() => compileSessionJsonl([sessionLine, bard].join("\n"))).toThrow();
+  });
+
   test("preserves the latest structured goal objective and status", () => {
     const goal = (content: string) => JSON.stringify({
       type: "custom_message",

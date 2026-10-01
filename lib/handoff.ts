@@ -88,50 +88,9 @@ function withinCodePointLimit(value: string, limit: number): boolean {
   return Array.from(value).length <= limit;
 }
 
-function rootObjectKeys(json: string): string[] | undefined {
-  const keys: string[] = [];
-  let depth = 0;
-  let lastStructural = "";
-  for (let index = 0; index < json.length; index++) {
-    const char = json[index];
-    if (char === '"') {
-      const start = index;
-      index++;
-      while (index < json.length) {
-        if (json[index] === "\\") {
-          index += 2;
-          continue;
-        }
-        if (json[index] === '"') break;
-        index++;
-      }
-      if (index >= json.length) return undefined;
-      if (depth === 1 && (lastStructural === "{" || lastStructural === ",")) {
-        let after = index + 1;
-        while (/\s/.test(json[after] ?? "")) after++;
-        if (json[after] === ":") {
-          try {
-            keys.push(JSON.parse(json.slice(start, index + 1)));
-          } catch {
-            return undefined;
-          }
-        }
-      }
-      continue;
-    }
-    if (/\s/.test(char)) continue;
-    if (char === "{") depth++;
-    else if (char === "}") depth--;
-    lastStructural = char;
-  }
-  return depth === 0 ? keys : undefined;
-}
-
-function hasExactlyKeys(json: string, keys: readonly string[]): boolean {
-  const actual = rootObjectKeys(json);
-  return actual !== undefined && actual.length === keys.length &&
-    new Set(actual).size === keys.length &&
-    keys.every((key) => actual.includes(key));
+function hasExactlyKeys(record: object, keys: readonly string[]): boolean {
+  const actual = Object.keys(record);
+  return actual.length === keys.length && keys.every((key) => actual.includes(key));
 }
 
 function hasNoDuplicateObjectKeys(json: string): boolean {
@@ -284,8 +243,8 @@ export function parseStructuredDistillHandoffV2(
     return undefined;
   }
   if (typeof value !== "object" || value === null || Array.isArray(value)) return undefined;
-  if (!hasExactlyKeys(json, STRUCTURED_HANDOFF_V2_KEYS) || !hasNoDuplicateObjectKeys(json)) return undefined;
   const record = value as Record<string, unknown>;
+  if (!hasExactlyKeys(record, STRUCTURED_HANDOFF_V2_KEYS) || !hasNoDuplicateObjectKeys(json)) return undefined;
   if (!isNonEmptyBoundedString(record.objective)) return undefined;
 
   const invariants = record.invariants;
@@ -300,7 +259,7 @@ export function parseStructuredDistillHandoffV2(
     decisions.some((decision) => typeof decision !== "object" || decision === null || Array.isArray(decision))) return undefined;
   const typedDecisions = decisions as DistillHandoffDecision[];
   if (typedDecisions.some((decision) =>
-    !hasExactlyKeys(JSON.stringify(decision), ["id", "text", "rationale"]) ||
+    !hasExactlyKeys(decision, ["id", "text", "rationale"]) ||
     !isNonEmptyBoundedString(decision.id) || !isNonEmptyBoundedString(decision.text) ||
     !isNonEmptyBoundedString(decision.rationale)) || !hasUniqueBoundedIds(typedDecisions)) return undefined;
 
@@ -309,7 +268,7 @@ export function parseStructuredDistillHandoffV2(
     hypotheses.some((hypothesis) => typeof hypothesis !== "object" || hypothesis === null || Array.isArray(hypothesis))) return undefined;
   const typedHypotheses = hypotheses as DistillHandoffRejectedHypothesis[];
   if (typedHypotheses.some((hypothesis) =>
-    !hasExactlyKeys(JSON.stringify(hypothesis), ["id", "claim", "evidence"]) ||
+    !hasExactlyKeys(hypothesis, ["id", "claim", "evidence"]) ||
     !isNonEmptyBoundedString(hypothesis.id) || !isNonEmptyBoundedString(hypothesis.claim) ||
     !isNonEmptyBoundedString(hypothesis.evidence)) || !hasUniqueBoundedIds(typedHypotheses)) return undefined;
 
@@ -318,7 +277,7 @@ export function parseStructuredDistillHandoffV2(
     tasks.some((task) => typeof task !== "object" || task === null || Array.isArray(task))) return undefined;
   const typedTasks = tasks as DistillHandoffTask[];
   if (typedTasks.some((task) =>
-    !hasExactlyKeys(JSON.stringify(task), ["id", "status", "action", "depends-on", "blocker"]) ||
+    !hasExactlyKeys(task, ["id", "status", "action", "depends-on", "blocker"]) ||
     !isNonEmptyBoundedString(task.id) ||
     (task.status !== "done" && task.status !== "pending" && task.status !== "blocked") ||
     !isNonEmptyBoundedString(task.action) ||

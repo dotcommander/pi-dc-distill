@@ -222,6 +222,7 @@ describe("compaction card dedupe", () => {
       "0.87.1",
       "0.99.0",
       "0.99.2",
+      "1.0.0",
     ]).toContain(
       activePi.packageVersion,
     );
@@ -255,7 +256,7 @@ describe("compaction card dedupe", () => {
     // Session rendering is stubbed here; this is not an installed-renderer proof.
     try {
       await activePi.prototype.handleEvent.call(fakeMode, EVENT);
-      if (["0.99.0", "0.99.2"].includes(activePi.packageVersion)) {
+      if (["0.99.0", "0.99.2", "1.0.0"].includes(activePi.packageVersion)) {
         expect(installation).toBeNull();
         expect(activePi.prototype.handleEvent).toBe(originalHandler);
         expect(rendered).toHaveLength(1);
@@ -268,16 +269,42 @@ describe("compaction card dedupe", () => {
     }
   });
 
-  test("the installed native component renders deterministic metrics when expanded", async () => {
+  test("the installed native handler and renderer produce one expanded card with deterministic metrics", async () => {
     const activePi = await Runtime.loadActivePiInteractiveMode();
-    if (!["0.99.0", "0.99.2"].includes(activePi.packageVersion)) return;
+    if (!["0.99.0", "0.99.2", "1.0.0"].includes(activePi.packageVersion)) return;
     const { CompactionSummaryMessageComponent } = await import(
       new URL("./modes/interactive/components/compaction-summary-message.js", activePi.moduleUrl).href
     );
-    const { initTheme } = await import(new URL("./modes/interactive/theme/theme.js", activePi.moduleUrl).href);
+    const { initTheme, getMarkdownTheme } = await import(new URL("./modes/interactive/theme/theme.js", activePi.moduleUrl).href);
     initTheme("dark", false);
-    const component = new CompactionSummaryMessageComponent(compactionCard());
-    component.setExpanded(true);
+    const children: object[] = [];
+    const mode = Object.setPrototypeOf({
+      isInitialized: true,
+      toolOutputExpanded: true,
+      footer: { invalidate() {} },
+      settingsManager: {
+        getShowTerminalProgress: () => false,
+        getShowCacheMissNotices: () => false,
+      },
+      clearStatusIndicator() {},
+      chatContainer: {
+        clear() { children.length = 0; },
+        addChild(child: object) { children.push(child); },
+      },
+      sessionManager: { buildContextEntries: () => [{ type: "compaction" }] },
+      pendingTools: new Map(),
+      getMarkdownThemeWithSettings: getMarkdownTheme,
+      flushCompactionQueue() {},
+      ui: { requestRender() {} },
+    }, activePi.prototype);
+    const originalHandler = activePi.prototype.handleEvent;
+    expect(await installPiCompactionCardDedupe()).toBeNull();
+    expect(activePi.prototype.handleEvent).toBe(originalHandler);
+    // Use installed renderSessionEntries, renderSessionItems and addMessageToChat.
+    await activePi.prototype.handleEvent.call(mode, EVENT);
+    const cards = children.filter((child) => child instanceof CompactionSummaryMessageComponent);
+    expect(cards).toHaveLength(1);
+    const component = cards[0] as InstanceType<typeof CompactionSummaryMessageComponent>;
     const rendered = component.render(100).join("\n");
     expect(rendered).toContain("160,078");
     expect(rendered).toContain("4,914");

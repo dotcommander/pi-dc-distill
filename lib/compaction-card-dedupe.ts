@@ -43,7 +43,7 @@ type InteractiveModePrototype = Record<PropertyKey, unknown> & {
 };
 
 const PATCH_MARKER = Symbol.for("dc-distill.compaction-card-dedupe");
-const NATIVE_CARD_PI_VERSIONS = new Set(["0.99.0", "0.99.2"]);
+const NATIVE_CARD_PI_VERSIONS = new Set(["0.99.0", "0.99.2", "1.0.0"]);
 const SUPPORTED_PI_VERSIONS = new Set([
   "0.79.8",
   "0.80.9",
@@ -133,8 +133,8 @@ function polishedCompactionCard(
 /**
  * Present a successful compaction with dc-framework's typed house card.
  * The first matching native card is converted; later matches within the same
- * event are suppressed for older hosts that render duplicates. Pi 0.99 uses
- * its native card; the installed-runtime adapter leaves its prototype untouched.
+ * event are suppressed for older hosts that render duplicates. Reviewed newer Pi
+ * hosts use their native card; the adapter leaves their prototype untouched.
  * Unrelated messages pass through unchanged.
  */
 export function installCompactionCardDedupe(
@@ -215,8 +215,8 @@ export async function installPiCompactionCardDedupe(
   entrypoint?: string,
 ): Promise<CompactionCardDedupeHandle | null> {
   const activePi = await Runtime.loadActivePiInteractiveMode(entrypoint);
-  // Reviewed Pi 0.99.0 and 0.99.2 render the latest compaction once and show metrics
-  // when expanded. Its native presentation no longer needs this private shim.
+  // Reviewed Pi 0.99.0, 0.99.2 and 1.0.0 render the latest compaction once and show
+  // metrics when expanded. Their native presentation does not need this private shim.
   if (NATIVE_CARD_PI_VERSIONS.has(activePi.packageVersion)) return null;
   if (!SUPPORTED_PI_VERSIONS.has(activePi.packageVersion)) {
     throw new Error(

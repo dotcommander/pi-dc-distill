@@ -200,11 +200,12 @@ message, bounds the echo, and suppresses duplicates.
 
 ## Compatibility
 
-The supported SDK and installed runtime are Pi 0.99.2. All four Pi development
-dependencies are pinned to that version; peer ranges require compatible 0.99.2
-or later patch releases, and `bun.lock` records the resolved graph.
+The development SDK baseline is Pi 0.99.2; the reviewed installed runtime is
+Pi 1.0.0. All four Pi development dependencies remain pinned to 0.99.2, and
+`bun.lock` records that graph. Peer ranges admit compatible 0.99.2 patch
+releases and exact reviewed 1.0.0, without claiming all 1.x versions.
 
-Pi 0.99.2 renders the latest compaction once with its native summary component.
+Pi 0.99.2 and 1.0.0 render the latest compaction once with its native summary component.
 The extension leaves its InteractiveMode prototype unchanged. Tests drive the
 installed host's compaction handler and render its expanded native component
 to verify deterministic metrics. Reviewed 0.99.0 remains in the native-card

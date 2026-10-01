@@ -20,7 +20,6 @@ const RECENT_REQUEST_GROUPS_TO_KEEP = 3;
 
 const KIND_USER = "user";
 const KIND_ASSISTANT = "assistant";
-const KIND_BARD = "bard";
 const KIND_TOOL_CALL = "tool_call";
 const KIND_TOOL_RESULT = "tool_result";
 const KIND_THINKING = "thinking";
@@ -29,7 +28,6 @@ const KIND_COMPACTION = "compaction";
 type BlockKind =
   | typeof KIND_USER
   | typeof KIND_ASSISTANT
-  | typeof KIND_BARD
   | typeof KIND_TOOL_CALL
   | typeof KIND_TOOL_RESULT
   | typeof KIND_THINKING
@@ -48,7 +46,7 @@ interface NormalizedBlock {
 }
 
 interface ConversationTurn {
-  role: "user" | "assistant" | "bard";
+  role: "user" | "assistant";
   text: string;
   origin?: "human" | "custom";
   customType?: string;
@@ -328,13 +326,11 @@ function checkAbort(signal?: AbortSignal): void {
 
 interface NormalizedEntry {
   main: NormalizedBlock[];
-  bard: NormalizedBlock[];
   usefulRecordCount: number;
 }
 
 const emptyNormalizedEntry: NormalizedEntry = {
   main: [],
-  bard: [],
   usefulRecordCount: 0,
 };
 
@@ -395,7 +391,7 @@ function normalizeCustomMessage(entry: Record<string, unknown>, meta: SessionMet
     origin: "custom" as const,
     customType,
   }));
-  return { main, bard: [], usefulRecordCount: 1 };
+  return { main, usefulRecordCount: 1 };
 }
 
 function captureGoalState(contentText: string, meta: SessionMeta): void {
@@ -427,22 +423,15 @@ function saveHandoff(meta: SessionMeta, handoff: string | undefined): Normalized
   return { ...emptyNormalizedEntry, usefulRecordCount: 1 };
 }
 
-function normalizeBardContext(contentText: string): NormalizedEntry {
-  const text = sanitize(contentText).trim();
-  return text
-    ? { main: [], bard: [{ kind: KIND_BARD, text }], usefulRecordCount: 1 }
-    : emptyNormalizedEntry;
-}
-
 function normalizeMessageEntry(entry: Record<string, unknown>, meta: SessionMeta): NormalizedEntry {
   const message = isRecord(entry.message) ? entry.message : {};
   const blocks = contentBlocks(message.content);
   if (message.role === "user") {
-    return { main: normalizeUser(blocks), bard: [], usefulRecordCount: 1 };
+    return { main: normalizeUser(blocks), usefulRecordCount: 1 };
   }
   if (message.role === "assistant") {
     captureAssistantHandoff(blocks, meta);
-    return { main: normalizeAssistant(blocks), bard: [], usefulRecordCount: 1 };
+    return { main: normalizeAssistant(blocks), usefulRecordCount: 1 };
   }
   if (message.role === "toolResult") {
     return {
@@ -453,7 +442,6 @@ function normalizeMessageEntry(entry: Record<string, unknown>, meta: SessionMeta
         text: sanitize(textJoin(blocks)),
         isError: Boolean(message.isError),
       }],
-      bard: [],
       usefulRecordCount: 1,
     };
   }
@@ -478,14 +466,12 @@ function normalizeSummaryEntry(
   meta.priorSummaries.push(text);
   return {
     main: [{ kind: KIND_COMPACTION, text }],
-    bard: [],
     usefulRecordCount: 1,
   };
 }
 
 function normalizeSessionJsonl(content: string, signal?: AbortSignal): { blocks: NormalizedBlock[]; meta: SessionMeta; usefulRecordCount: number; invalidRecordCount: number } {
   const main: NormalizedBlock[] = [];
-  const bard: NormalizedBlock[] = [];
   const meta: SessionMeta = { priorSummaries: [] };
   let usefulRecordCount = 0;
   let invalidRecordCount = 0;
@@ -503,10 +489,9 @@ function normalizeSessionJsonl(content: string, signal?: AbortSignal): { blocks:
     const normalized = normalizeSessionEntry(entry, meta);
     usefulRecordCount += normalized.usefulRecordCount;
     main.push(...normalized.main);
-    bard.push(...normalized.bard);
   }
 
-  return { blocks: [...main, ...bard], meta, usefulRecordCount, invalidRecordCount };
+  return { blocks: main, meta, usefulRecordCount, invalidRecordCount };
 }
 
 const noiseTools = new Set(["TodoWrite", "TodoRead", "ToolSearch", "WebSearch", "AskUser", "ExitSpecMode", "GenerateDroid"]);
@@ -1990,7 +1975,7 @@ function extractOutputArtifactReceipt(text: string): string | undefined {
 }
 
 function collectConversationTurn(
-  block: NormalizedBlock & { kind: "user" | "assistant" | "bard" },
+  block: NormalizedBlock & { kind: "user" | "assistant" },
   sourceAnchors: OrderedSet,
   toolAdj: ToolAdjacent[],
   turns: ConversationTurn[],
@@ -2077,10 +2062,10 @@ function extractConversation(blocks: NormalizedBlock[], sessionCwd?: string): Co
     }
 
     if (block.kind === KIND_THINKING || block.kind === KIND_COMPACTION) continue;
-    if (block.kind === KIND_USER || block.kind === KIND_ASSISTANT || block.kind === KIND_BARD) {
+    if (block.kind === KIND_USER || block.kind === KIND_ASSISTANT) {
       lastErrorRun.current = undefined;
       const recorded = collectConversationTurn(
-        block as NormalizedBlock & { kind: "user" | "assistant" | "bard" },
+        block as NormalizedBlock & { kind: "user" | "assistant" },
         sourceAnchors,
         toolAdj,
         turns,
@@ -2557,11 +2542,9 @@ function formatSummary(meta: SessionMeta, conv: ConversationResult, userFocus?: 
   parts.push(
     conv.turns.length > 0
       ? `## Conversation\n${conv.turns.map((turn) => {
-        const label = turn.role === "bard"
-          ? "BARD"
-          : turn.role === "user" && turn.origin === "custom"
-            ? `Context${turn.customType ? `: ${turn.customType}` : ""}`
-            : turn.role[0].toUpperCase() + turn.role.slice(1);
+        const label = turn.role === "user" && turn.origin === "custom"
+          ? `Context${turn.customType ? `: ${turn.customType}` : ""}`
+          : turn.role[0].toUpperCase() + turn.role.slice(1);
         return `[${label}] ${turn.text}`;
       }).join("\n")}`
       : "## Conversation",

@@ -15,6 +15,7 @@
  *   DISTILL_FAKE_STEP    extra tokens per assistant message in context (default 25000)
  *   DISTILL_FAKE_POST_COMPACTION_USAGE optional usage once native summary is in context
  *   DISTILL_FAKE_OVERFLOW_ERROR emit one context-overflow error before recovery
+ *   DISTILL_FAKE_HOLD_TEXT hold this exact user text until the host aborts the turn
  *   DISTILL_FAKE_TRACE   path to append a JSONL trace of every model request
  */
 import { appendFileSync } from "node:fs";
@@ -101,7 +102,7 @@ function streamScripted(model: Model<any>, context: Context, options?: SimpleStr
     timestamp: Date.now(),
   };
   const isSummary = /summariz|compaction summar/i.test(context.systemPrompt ?? "");
-  setTimeout(() => {
+  setTimeout(async () => {
     try {
       stream.push({ type: "start", partial: output });
       const lastMessage = context.messages[context.messages.length - 1];
@@ -138,6 +139,29 @@ function streamScripted(model: Model<any>, context: Context, options?: SimpleStr
           messages: context.messages.length,
         };
         trace(record);
+        if (process.env.DISTILL_FAKE_HOLD_TEXT === lastText) {
+          // The real RPC compact command aborts an active turn first. A
+          // Promise barrier keeps this turn busy until that cancellation.
+          await new Promise<void>((resolve, reject) => {
+            const signal = options?.signal;
+            const finish = () => {
+              clearTimeout(timer);
+              signal?.removeEventListener("abort", finish);
+              resolve();
+            };
+            const timer = setTimeout(() => {
+              signal?.removeEventListener("abort", finish);
+              reject(new Error("Held scripted turn was not aborted within 30s"));
+            }, 30_000);
+            if (signal?.aborted) finish();
+            else signal?.addEventListener("abort", finish, { once: true });
+          });
+          trace({ kind: "held-abort", aborted: options?.signal?.aborted === true });
+          output.stopReason = "aborted";
+          stream.push({ type: "error", reason: "aborted", error: output });
+          stream.end();
+          return;
+        }
         if (process.env.DISTILL_FAKE_OVERFLOW_ERROR === "1" && !overflowErrorSent
           && plan.usageTotal > WINDOW) {
           overflowErrorSent = true;

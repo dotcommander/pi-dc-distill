@@ -24,7 +24,8 @@ want their additional local storage and context behavior.
 
 ## Install
 
-Use Node.js 22.19.0 or newer and Pi 0.99.2, the SDK and runtime verified here:
+Use Node.js 22.19.0 or newer and Pi 1.0.0, the installed runtime reviewed here.
+The development SDK baseline remains pinned to Pi 0.99.2:
 
 ```bash
 pi install git:github.com/dotcommander/pi-dc-distill

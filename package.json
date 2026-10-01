@@ -44,15 +44,15 @@
     "test": "bun test",
     "typecheck": "tsc --noEmit",
     "prepublishOnly": "bun run test && bun run typecheck",
-    "distill:e2e": "bun test ./tests/e2e/lifecycle.e2e.ts ./tests/e2e/interception.e2e.ts",
+    "distill:e2e": "bun test ./tests/e2e/lifecycle.e2e.ts ./tests/e2e/interception.e2e.ts ./tests/e2e/busy-compaction.e2e.ts",
     "distill:demo": "bun run tests/e2e/demo.ts",
     "distill:compare": "bun run tests/compare-session.ts"
   },
   "peerDependencies": {
-    "@earendil-works/pi-coding-agent": "^0.99.2",
-    "@earendil-works/pi-ai": "^0.99.2",
-    "@earendil-works/pi-tui": "^0.99.2",
-    "@earendil-works/pi-agent-core": "^0.99.2",
+    "@earendil-works/pi-coding-agent": "^0.99.2 || 1.0.0",
+    "@earendil-works/pi-ai": "^0.99.2 || 1.0.0",
+    "@earendil-works/pi-tui": "^0.99.2 || 1.0.0",
+    "@earendil-works/pi-agent-core": "^0.99.2 || 1.0.0",
     "typebox": "^1.3.34"
   },
   "devDependencies": {

@@ -72,10 +72,11 @@ or marker; arbitrary text performs keyword search across those parts.
 
 ## Compatibility and Verification
 
-The SDK dependencies and reviewed host are Pi 0.99.2. Use Node.js 22.19.0 or
+The SDK dependencies remain Pi 0.99.2; the reviewed installed host is Pi 1.0.0.
+Peer ranges admit exact 1.0.0 and compatible 0.99.2 patch releases. Use Node.js 22.19.0 or
 newer. Run `bun install --frozen-lockfile` in a checkout to install its pinned
 dependency graph; avoid a shared `node_modules` symlink when checking SDK changes.
-Pi 0.99.2 uses the native card without a prototype patch. Capture `pi --version`,
+Pi 0.99.2 and 1.0.0 use the native card without a prototype patch. Capture `pi --version`,
 the symptom, and relevant redacted diagnostics when reporting a compatibility
 problem. See [architecture](architecture.md#compatibility).
 

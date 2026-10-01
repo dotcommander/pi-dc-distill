@@ -6,6 +6,7 @@ import {
   parseStructuredDistillHandoffV2,
   readyDistillHandoffTasks,
   distillHandoffEntry,
+  type StructuredDistillHandoffV2,
 } from "./handoff.ts";
 
 function envelope(json: string): string {
@@ -25,7 +26,7 @@ const valid = {
   "verification-needed": ["bun test lib/local-compact.test.ts"],
 };
 
-const validV2 = {
+const validV2: Omit<StructuredDistillHandoffV2, "version"> = {
   objective: "Finish parser repair.",
   invariants: ["Legacy input remains valid."],
   decisions: [{ id: "D1", text: "Use recursive descent.", rationale: "Regex failed on nesting." }],
@@ -104,5 +105,53 @@ describe("structured distill handoff", () => {
       expect(parseAnyStructuredDistillHandoff(value)).toBeUndefined();
       expect(handoffTextFromEntryData({ handoff: value })).toBe(value);
     }
+  });
+
+  test("validates decoded v2 keys while preserving escaped string content", () => {
+    const value = {
+      ...validV2,
+      objective: 'Keep {braces}, [arrays], "quotes" and \\ paths.',
+    };
+    const json = JSON.stringify(value)
+      .replace('"objective":', '"obj\\u0065ctive":')
+      .replace('"rationale":', '"ration\\u0061le":');
+    expect(parseStructuredDistillHandoffV2(envelopeV2(json))).toEqual({ version: 2, ...value });
+  });
+
+  test("rejects duplicate decoded v2 keys at every object depth", () => {
+    const json = JSON.stringify(validV2);
+    const duplicates = [
+      json.replace('"objective":', '"obj\\u0065ctive":"duplicate","objective":'),
+      json.replace('"id":"D1"', '"id":"D1","\\u0069d":"D1"'),
+      json.replace('"claim":', '"cl\\u0061im":"duplicate","claim":'),
+      json.replace('"action":', '"\\u0061ction":"duplicate","action":'),
+    ];
+    for (const duplicate of duplicates) {
+      const text = envelopeV2(duplicate);
+      expect(parseAnyStructuredDistillHandoff(text)).toBeUndefined();
+      expect(handoffTextFromEntryData({ handoff: text })).toBe(text);
+    }
+  });
+
+  test("rejects missing and extra v2 fields in each nested record", () => {
+    for (const [field, key] of [
+      ["decisions", "rationale"],
+      ["rejected-hypotheses", "evidence"],
+      ["tasks", "blocker"],
+    ] as const) {
+      const item = validV2[field][0];
+      const missing = { ...item } as Record<string, unknown>;
+      delete missing[key];
+      for (const invalid of [missing, { ...item, unknown: {} }, { ...item, [key]: null }]) {
+        const text = envelopeV2(JSON.stringify({ ...validV2, [field]: [invalid] }));
+        expect(parseAnyStructuredDistillHandoff(text)).toBeUndefined();
+        expect(handoffTextFromEntryData({ handoff: text })).toBe(text);
+      }
+    }
+  });
+
+  test("retains conservative v1 raw-key validation", () => {
+    const json = JSON.stringify(valid).replace('"objective":', '"obj\\u0065ctive":');
+    expect(parseStructuredDistillHandoff(envelope(json))).toBeUndefined();
   });
 });
