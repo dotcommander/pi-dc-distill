@@ -1,5 +1,5 @@
 import { appendFile, mkdir } from "node:fs/promises";
-import { createHash } from "node:crypto";
+import { sha256Hex } from "./sha256.ts";
 import { dirname, join } from "node:path";
 import type { ExtensionAPI } from "./sdk.ts";
 import { Notify } from "./notify-support.ts";
@@ -96,9 +96,11 @@ export const DEFAULT_OUTPUT_COMPACTOR_CONFIG: OutputCompactorConfig = {
 
 export function countLines(text: string): number {
   if (text.length === 0) return 0;
-  return text.endsWith("\n")
-    ? text.split("\n").length - 1
-    : text.split("\n").length;
+  let lines = text.endsWith("\n") ? 0 : 1;
+  for (let index = 0; index < text.length; index++) {
+    if (text.charCodeAt(index) === 10) lines++;
+  }
+  return lines;
 }
 
 export function shouldCompact(
@@ -395,10 +397,7 @@ async function writeArtifact(args: {
   const root = args.artifactRoot(args.cwd);
   const timestamp = new Date().toISOString();
   const stamp = timestamp.replace(/[:.]/g, "-");
-  const hash = createHash("sha256")
-    .update(`${args.toolName}\n${args.toolCallId}\n${timestamp}`)
-    .digest("hex")
-    .slice(0, 10);
+  const hash = sha256Hex(`${args.toolName}\n${args.toolCallId}\n${timestamp}`).slice(0, 10);
   const fileName = [
     stamp,
     safePart(args.toolName),
@@ -416,7 +415,7 @@ async function writeArtifact(args: {
     artifactPath,
     chars: args.text.length,
     lines: args.lines,
-    contentSha256: createHash("sha256").update(args.text, "utf8").digest("hex"),
+    contentSha256: sha256Hex(args.text),
     bytes: Buffer.byteLength(args.text, "utf8"),
     previewStrategy: args.previewStrategy,
   };

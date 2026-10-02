@@ -150,6 +150,18 @@ describe("structured distill handoff", () => {
     }
   });
 
+  test("v1 rejects literal and decoded duplicate keys", () => {
+    const json = JSON.stringify(valid);
+    for (const duplicate of ['"objective":"duplicate",', '"obj\\u0065ctive":"duplicate",']) {
+      expect(parseStructuredDistillHandoff(envelope(json.replace("{", `{${duplicate}`)))).toBeUndefined();
+    }
+  });
+
+  test("key-like string content stays string content", () => {
+    const value = { ...valid, objective: 'Keep the text "objective": inside a string.' };
+    expect(parseStructuredDistillHandoff(envelope(JSON.stringify(value)))?.objective).toBe(value.objective);
+  });
+
   test("retains conservative v1 raw-key validation", () => {
     const json = JSON.stringify(valid).replace('"objective":', '"obj\\u0065ctive":');
     expect(parseStructuredDistillHandoff(envelope(json))).toBeUndefined();

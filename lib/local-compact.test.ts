@@ -1548,3 +1548,94 @@ test("disabled live recall omits hints and queries even when operating budget re
   expect(disabled.summary).toContain("Repair src/parser.ts");
   expect(compileSessionJsonl(input, undefined, undefined, false).summary).toBe(disabled.summary);
 });
+
+describe("file tool aliases", () => {
+  for (const key of ["targetFile", "TargetFile", "target_file", "target_path", "absolutePath", "AbsolutePath"]) {
+    test(`view_file reads the ${key} path`, () => {
+      const result = compileSessionJsonl([
+        sessionLine, userMsg("inspect the parser"),
+        toolCall("VIEW_FILE", { [key]: "src/parser.ts" }, "view"),
+        toolResult("VIEW_FILE", "source", false, "view"),
+      ].join("\n"));
+      expect(result.readFiles).toEqual(["src/parser.ts"]);
+      expect(result.modifiedFiles).toEqual([]);
+    });
+  }
+
+  for (const name of ["write_to_file", "replace_file_content", "patch_file", "create_file"]) {
+    test(`${name} records successful writes and stales prior verification`, () => {
+      const result = compileSessionJsonl([
+        sessionLine, userMsg("repair the parser"),
+        toolCall("bash", { command: "bun test lib/parser.test.ts" }, "verify"),
+        toolResult("bash", "8 pass, 0 fail", false, "verify"),
+        toolCall(name.toUpperCase(), { TargetFile: "src/parser.ts" }, "write"),
+        toolResult(name.toUpperCase(), "updated", false, "write"),
+      ].join("\n"));
+      expect(result.modifiedFiles).toEqual(["src/parser.ts"]);
+      expect(result.summary).toContain("freshness: not established after later potentially modifying work");
+    });
+
+    test(`${name} failures and ambiguous results cannot promote file evidence`, () => {
+      const result = compileSessionJsonl([
+        sessionLine, userMsg("repair the parser"),
+        toolCall(name, { target_path: "src/failed.ts" }, "failed"),
+        toolResult(name, "interrupted", true, "failed"),
+        toolCall(name, { target_path: "src/first.ts" }),
+        toolCall(name, { target_path: "src/second.ts" }),
+        toolResult(name, "updated"),
+      ].join("\n"));
+      expect(result.modifiedFiles).toEqual([]);
+      expect(result.summary).toContain(`Failed ${name} for src/failed.ts may have partial effects`);
+      expect(result.summary).toContain(`Unmatched ${name} for src/first.ts has unknown effects`);
+    });
+  }
+
+  for (const name of ["write_to_file", "create_file"]) {
+    test(`${name} remains create-capable when later edited`, () => {
+      const result = compileSessionJsonl([
+        sessionLine, userMsg("create a parser and update its caller"),
+        toolCall(name, { absolutePath: "src/new.ts" }, "create"),
+        toolResult(name, "created", false, "create"),
+        toolCall("patch_file", { file: "src/new.ts" }, "patch"),
+        toolResult("patch_file", "updated", false, "patch"),
+        toolCall("edit", { path: "src/caller.ts" }, "edit"),
+        toolResult("edit", "updated", false, "edit"),
+      ].join("\n"));
+      expect(result.modifiedFiles).toEqual(["src/caller.ts", "src/new.ts"]);
+    });
+  }
+
+  test("existing path keys take precedence over aliases and aliases retain their order", () => {
+    const result = compileSessionJsonl([
+      sessionLine, userMsg("inspect the selected files"),
+      toolCall("view_file", { file: "src/original.ts", targetFile: "src/ignored.ts" }, "original"),
+      toolResult("view_file", "source", false, "original"),
+      toolCall("view_file", { targetFile: "src/first.ts", TargetFile: "src/ignored.ts" }, "alias"),
+      toolResult("view_file", "source", false, "alias"),
+    ].join("\n"));
+    expect(result.readFiles).toEqual(["src/original.ts", "src/first.ts"]);
+  });
+
+  test("classification lowercases aliases while id-less pairing preserves raw names", () => {
+    const result = compileSessionJsonl([
+      sessionLine, userMsg("inspect then repair the parser"),
+      toolCall("PATCH_FILE", { targetFile: "src/parser.ts" }),
+      toolResult("patch_file", "updated"),
+    ].join("\n"));
+    expect(result.modifiedFiles).toEqual([]);
+    expect(result.summary).toContain("Unmatched PATCH_FILE for src/parser.ts has unknown effects");
+  });
+
+  test("successful alias inspection clears a failed-write partial-effects risk", () => {
+    const result = compileSessionJsonl([
+      sessionLine, userMsg("inspect the interrupted write"),
+      toolCall("patch_file", { target_file: "src/parser.ts" }, "patch"),
+      toolResult("patch_file", "interrupted", true, "patch"),
+      toolCall("view_file", { AbsolutePath: "src/parser.ts" }, "inspect"),
+      toolResult("view_file", "source", false, "inspect"),
+    ].join("\n"));
+    expect(result.readFiles).toEqual(["src/parser.ts"]);
+    expect(result.modifiedFiles).toEqual([]);
+    expect(result.summary).not.toContain("Failed patch_file for src/parser.ts may have partial effects");
+  });
+});

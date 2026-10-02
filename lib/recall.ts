@@ -1,93 +1,15 @@
 /**
  * recall_compaction — search prior compaction summaries.
  *
- * Stores recent summaries in memory and exposes a pi tool for
- * the LLM to search them by section name or keyword.
+ * Queries explicit summary entries by section name or keyword.
+ * DistillStore owns all recall persistence.
  *
  * Deterministic, no LLM. Pure search.
  */
 
-import { Path, type PathHandle } from "./paths.ts";
+import type { CompactionRecallEntry } from "./recall-entry.ts";
 
-export interface RecallEntry {
-  /** ISO timestamp of the compaction */
-  ts: string;
-  /** Token count before compaction */
-  before: number;
-  /** Token count after compaction */
-  after: number;
-  /** The full summary markdown */
-  summary: string;
-  /** Project owner for version-6 recall. Missing only on legacy entries. */
-  project?: string;
-  sessionId?: string;
-  fullContextAfter?: number;
-  fullContextAfterSource?: "pi-post-rebuild-context-usage";
-  tokenSource?: string;
-  owner?: "legacy-unscoped";
-}
-
-const MAX_STORED = 10;
-const RECALL_FILE = "recall.json";
-
-/** In-memory ring buffer of recent compaction summaries. */
-const store: RecallEntry[] = [];
-
-/** Reset the store (called on session_start). */
-export const resetStore = (): void => {
-  store.length = 0;
-};
-
-/** Record a new compaction summary for recall. */
-export const recordSummary = (entry: RecallEntry): void => {
-  store.push(entry);
-  if (store.length > MAX_STORED) store.shift();
-};
-
-/** Get all stored summaries (newest first). */
-export const getSummaries = (): RecallEntry[] => [...store].reverse();
-
-export const hydrateSummaries = (entries: RecallEntry[]): void => {
-  resetStore();
-  for (const entry of entries.slice(-MAX_STORED)) recordSummary(entry);
-};
-
-function isRecallEntry(value: unknown): value is RecallEntry {
-  if (value === null || typeof value !== "object") return false;
-  const entry = value as Record<string, unknown>;
-  return hasRecallEntryFields(entry);
-}
-
-function hasRecallEntryFields(entry: Record<string, unknown>): boolean {
-  return typeof entry.ts === "string"
-    && typeof entry.before === "number"
-    && typeof entry.after === "number"
-    && typeof entry.summary === "string";
-}
-
-export const loadPersistedSummaries = (
-  pathHandle: PathHandle = Path.data("dc-distill"),
-): RecallEntry[] => {
-  try {
-    const parsed = pathHandle.read<unknown>(RECALL_FILE, []);
-    if (!Array.isArray(parsed)) return [];
-    return parsed.filter(isRecallEntry).slice(-MAX_STORED);
-  } catch {
-    return [];
-  }
-};
-
-export const persistSummary = (
-  entry: RecallEntry,
-  pathHandle: PathHandle = Path.data("dc-distill"),
-): void => {
-  try {
-    const entries = [...loadPersistedSummaries(pathHandle), entry].slice(-MAX_STORED);
-    pathHandle.write(RECALL_FILE, entries);
-  } catch {
-    // recall persistence must never crash compaction
-  }
-};
+export type RecallEntry = CompactionRecallEntry;
 
 /** Extract a named section from summary markdown. */
 const extractSection = (text: string, heading: string): string | null => {
@@ -151,15 +73,6 @@ const SUMMARY_PARTS: SummaryPart[] = [
     extract: (t: string) => extractMarker(t, m),
   })),
 ];
-
-/** Search stored summaries by section name or keyword.
- *  Returns matching content, newest first. */
-export const searchSummaries = (
-  query: string,
-  limit = 3,
-): string[] => {
-  return searchRecallEntries(getSummaries(), query, limit);
-};
 
 /** Search an explicit recall set, allowing callers to choose project/all scope. */
 export const searchRecallEntries = (

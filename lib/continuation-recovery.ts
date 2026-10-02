@@ -59,6 +59,13 @@ function isContinuationMessage(entry: RecoveryEntryLike): boolean {
     && (entry.customType === DISTILL_CONTINUATION_MESSAGE_TYPE || entry.customType === LEGACY_CONTINUATION_MESSAGE_TYPE);
 }
 
+function matchesContinuationAttempt(entry: RecoveryEntryLike, attemptId: string): boolean {
+  if (!isContinuationMessage(entry)) return false;
+  const messageAttemptId = detailsOf(entry).attemptId;
+  // Historical continuation messages did not journal an attempt id.
+  return messageAttemptId === undefined || messageAttemptId === attemptId;
+}
+
 export function recoverContinuation(entries: RecoveryEntryLike[]): ContinuationRecovery {
   let attemptId: string | null = null;
   let compactionIndex = -1;
@@ -73,7 +80,7 @@ export function recoverContinuation(entries: RecoveryEntryLike[]): ContinuationR
   if (attemptId === null || compactionIndex === -1) return { ...NONE };
 
   const afterCompaction = entries.slice(compactionIndex + 1);
-  const deliveryIndex = afterCompaction.findIndex(isContinuationMessage);
+  const deliveryIndex = afterCompaction.findIndex((entry) => matchesContinuationAttempt(entry, attemptId));
   if (deliveryIndex === -1) {
     return { phase: "committed", action: "deliver", attemptId };
   }
@@ -86,10 +93,10 @@ export function recoverContinuation(entries: RecoveryEntryLike[]): ContinuationR
     return { phase: "answered", action: "none", attemptId };
   }
 
-  // Delivered but not answered. Any continuation message already carrying the
+  // Delivered but not answered. A matching continuation message carrying the
   // resumed marker means the nudge fired once; never nag repeatedly.
   const resumed = afterCompaction.some(
-    (entry) => isContinuationMessage(entry) && detailsOf(entry).resumed === true,
+    (entry) => matchesContinuationAttempt(entry, attemptId) && detailsOf(entry).resumed === true,
   );
   return {
     phase: "delivered",

@@ -85,7 +85,7 @@ test("busy manual compaction aborts the turn, prepares without artifacts, and co
     expect(committed.summary).toBe(result.summary);
     expect(committed.firstKeptEntryId).toBe(result.firstKeptEntryId);
     expect(committed.details).toEqual(result.details);
-    expect(committed.details).toMatchObject({ compactor: "dc-distill", version: 8, autonomous: false });
+    expect(committed.details).toMatchObject({ compactor: "dc-distill", version: 9, autonomous: false });
     expect(committed.details.attemptId).toBeString();
     expect(committed.details.summaryDigest).toBe(createHash("sha256").update(committed.summary).digest("hex"));
 

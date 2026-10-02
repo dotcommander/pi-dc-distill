@@ -1,6 +1,7 @@
 import { LEGACY_COMPACTION_CARD_TYPE } from "./lib/legacy.ts";
 /** dc-distill: deterministic, local compaction with a prepare/commit lifecycle. */
-import { createHash, randomUUID } from "node:crypto";
+import { randomUUID } from "node:crypto";
+import { sha256Hex } from "./lib/sha256.ts";
 import type {
   CompactionEntry,
   ExtensionAPI,
@@ -59,7 +60,7 @@ import {
 import { Tier } from "./lib/types.ts";
 import { registerOutputCompactor } from "./lib/output-compactor.ts";
 
-const VERSION = 8;
+const VERSION = 9;
 const WARN_COOLDOWN_MS = 120_000;
 const WARN_STEER_PROMPT = [
   "You are near the context boundary — compaction is imminent.",
@@ -130,10 +131,6 @@ interface DistillRuntime {
   continuationAttemptId: string | null;
   contextWindow?: number;
   compactionCardDedupe: CompactionCardDedupeHandle | null;
-}
-
-function digest(text: string): string {
-  return createHash("sha256").update(text, "utf8").digest("hex");
 }
 
 function sessionId(ctx: ExtensionContext): string {
@@ -515,7 +512,7 @@ function createExtension(pi: ExtensionAPI, options: DistillExtensionOptions = {}
           }
           if (event.signal.aborted) throw new CompactionCancelledError();
 
-          const summaryDigest = digest(wire.wireSummary);
+          const summaryDigest = sha256Hex(wire.wireSummary);
           const reductionPct = preparation.tokensBefore > 0
             ? Math.round(((preparation.tokensBefore - wire.tokensAfter) / preparation.tokensBefore) * 100)
             : 0;
@@ -732,7 +729,7 @@ function createExtension(pi: ExtensionAPI, options: DistillExtensionOptions = {}
           && details.version === VERSION
           && details.attemptId === pending.attemptId
           && entry.firstKeptEntryId === pending.firstKeptEntryId
-          && digest(entry.summary) === pending.summaryDigest
+          && sha256Hex(entry.summary) === pending.summaryDigest
           && details.summaryDigest === pending.summaryDigest;
         if (!matches) {
           clearAttempt(runtime);

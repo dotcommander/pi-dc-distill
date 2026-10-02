@@ -1,8 +1,5 @@
 import type { CompactState } from "./types.ts"
-import { mkdirSync, renameSync, statSync } from "node:fs";
-import { appendFile } from "node:fs/promises";
-import { join } from "node:path";
-import { Path } from "./paths.ts";
+import { Diag } from "./diag-support.ts";
 
 interface MessageLike {
   role: string
@@ -130,27 +127,8 @@ export class Monitor {
     this._diagLog(msg)
   }
 
-  private _dirEnsured = false
-
   private _diagLog(msg: string): void {
-    try {
-    const dir = Path.data("dc-distill").path
-    if (!this._dirEnsured) {
-      mkdirSync(dir, { recursive: true })
-      this._dirEnsured = true
-      // Rotate once per session so diag.log stays bounded.
-      const diagPath = join(dir, "diag.log")
-      try {
-        if (statSync(diagPath).size > 5 * 1024 * 1024) renameSync(diagPath, `${diagPath}.old`)
-      } catch {
-        // missing file — nothing to rotate
-      }
-    }
-    const line = `${new Date().toISOString()} ${msg}\n`
-    appendFile(join(dir, "diag.log"), line).catch(() => {})
-    } catch {
-      // best effort
-    }
+    void Diag.monitor(msg)
   }
 
   reset(): void {

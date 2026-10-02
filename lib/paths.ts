@@ -19,7 +19,7 @@
  * @module lib/paths
  */
 
-import { createHash } from "node:crypto";
+import { sha256Hex } from "./sha256.ts";
 import { existsSync, mkdirSync, readFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { basename, isAbsolute, join, relative, resolve } from "node:path";
@@ -66,7 +66,7 @@ export function cacheDir(extName: string): string {
  * Example: vvw-a1b2c3d4
  */
 export function projectSlug(cwd: string): string {
-  const hash = createHash("sha256").update(cwd).digest("hex").slice(0, 8);
+  const hash = sha256Hex(cwd).slice(0, 8);
   const name = basename(cwd)
     .replace(/[^a-zA-Z0-9-]/g, "-")
     .slice(0, 24);

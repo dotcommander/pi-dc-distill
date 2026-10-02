@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import { recoverContinuation, type RecoveryEntryLike } from "./continuation-recovery.ts";
+import { recoverContinuation, type ContinuationRecovery, type RecoveryEntryLike } from "./continuation-recovery.ts";
 
 function autonomousCompaction(overrides: Record<string, unknown> = {}): RecoveryEntryLike {
   return {
@@ -8,10 +8,13 @@ function autonomousCompaction(overrides: Record<string, unknown> = {}): Recovery
   };
 }
 
-function continuation(overrides: Record<string, unknown> = {}): RecoveryEntryLike {
+function continuation(
+  overrides: Record<string, unknown> = {},
+  customType = "dc-distill-continuation",
+): RecoveryEntryLike {
   return {
     type: "custom_message",
-    customType: "dc-distill-continuation",
+    customType,
     details: { reason: "autonomous_compaction", attemptId: "a-1", ...overrides },
   };
 }
@@ -104,6 +107,79 @@ describe("recoverContinuation", () => {
       ]),
     ).toEqual({ phase: "delivered", action: "resume", attemptId: "a-1" });
   });
+
+  for (const version of [8, 9]) {
+    test(`v${version} delivery and resume journal each suppress repeated recovery`, () => {
+      const committed = [autonomousCompaction({ version })];
+      expect(recoverContinuation(committed)).toEqual({ phase: "committed", action: "deliver", attemptId: "a-1" });
+      const delivered = [...committed, continuation()];
+      expect(recoverContinuation(delivered)).toEqual({ phase: "delivered", action: "resume", attemptId: "a-1" });
+      const resumed = [...delivered, continuation({ resumed: true })];
+      expect(recoverContinuation(resumed)).toEqual({ phase: "delivered", action: "none", attemptId: "a-1" });
+      expect(recoverContinuation(resumed)).toEqual({ phase: "delivered", action: "none", attemptId: "a-1" });
+      expect(recoverContinuation([...delivered, message("assistant")])).toEqual({ phase: "answered", action: "none", attemptId: "a-1" });
+    });
+  }
+
+  for (const version of [8, 9]) {
+    for (const customType of ["dc-distill-continuation", "dc-shrink-continuation"]) {
+      describe(`v${version} ${customType} attempt matching`, () => {
+        const compaction = () => autonomousCompaction({ version });
+        const delivery = (overrides: Record<string, unknown> = {}) => continuation(overrides, customType);
+        const committed: ContinuationRecovery = { phase: "committed", action: "deliver", attemptId: "a-1" };
+        const delivered: ContinuationRecovery = { phase: "delivered", action: "resume", attemptId: "a-1" };
+
+        test("another attempt cannot mark delivery", () => {
+          expect(recoverContinuation([compaction(), delivery({ attemptId: "other" })])).toEqual(committed);
+        });
+
+        test("an answer to another attempt does not answer a later matching delivery", () => {
+          const entries = [compaction(), delivery({ attemptId: "other" }), message("assistant")];
+          expect(recoverContinuation(entries)).toEqual(committed);
+          expect(recoverContinuation([...entries, delivery()])).toEqual(delivered);
+        });
+
+        test("only a matching resumed marker suppresses recovery", () => {
+          const wrongMarker = delivery({ attemptId: "other", resumed: true });
+          expect(recoverContinuation([compaction(), wrongMarker])).toEqual(committed);
+          expect(recoverContinuation([compaction(), delivery(), wrongMarker])).toEqual(delivered);
+          expect(recoverContinuation([compaction(), wrongMarker, delivery()])).toEqual(delivered);
+          expect(recoverContinuation([compaction(), delivery(), delivery({ resumed: true })])).toEqual({
+            phase: "delivered", action: "none", attemptId: "a-1",
+          });
+        });
+
+        test("missing legacy ids retain delivery and resume behavior", () => {
+          const legacyDelivery = delivery();
+          delete (legacyDelivery.details as Record<string, unknown>).attemptId;
+          expect(recoverContinuation([compaction(), legacyDelivery])).toEqual(delivered);
+          expect(recoverContinuation([compaction(), delivery({ attemptId: undefined })])).toEqual(delivered);
+          expect(recoverContinuation([compaction(), legacyDelivery, message("assistant")])).toEqual({
+            phase: "answered", action: "none", attemptId: "a-1",
+          });
+          expect(recoverContinuation([compaction(), delivery(), {
+            ...legacyDelivery, details: { resumed: true },
+          }])).toEqual({ phase: "delivered", action: "none", attemptId: "a-1" });
+        });
+
+        test("explicit invalid ids are never trimmed or coerced into a match", () => {
+          for (const attemptId of [null, false, true, 1, "", " a-1", "a-1 ", "A-1", {}, ["a-1"]]) {
+            const invalidDelivery = delivery({ attemptId });
+            expect(recoverContinuation([compaction(), invalidDelivery])).toEqual(committed);
+            expect(recoverContinuation([
+              compaction(), delivery(), delivery({ attemptId, resumed: true }),
+            ])).toEqual(delivered);
+          }
+        });
+
+        test("an assistant answer after matching delivery completes the attempt", () => {
+          expect(recoverContinuation([compaction(), delivery(), message("assistant")])).toEqual({
+            phase: "answered", action: "none", attemptId: "a-1",
+          });
+        });
+      });
+    }
+  }
 
   test("ignores unrelated custom messages", () => {
     expect(

@@ -1,3 +1,4 @@
+import { hasNoDuplicateObjectKeys } from "./json-object-keys.ts";
 import { normalizeLegacyHandoffFence } from "./legacy.ts";
 
 export const DISTILL_HANDOFF_ENTRY_TYPE = "dc-distill-handoff";
@@ -93,44 +94,6 @@ function hasExactlyKeys(record: object, keys: readonly string[]): boolean {
   return actual.length === keys.length && keys.every((key) => actual.includes(key));
 }
 
-function hasNoDuplicateObjectKeys(json: string): boolean {
-  const stack: Array<{ type: "object" | "array"; keys?: Set<string>; expectingKey?: boolean }> = [];
-  for (let index = 0; index < json.length; index++) {
-    const char = json[index];
-    if (char === '"') {
-      const start = index;
-      index++;
-      while (index < json.length) {
-        if (json[index] === "\\") {
-          index += 2;
-          continue;
-        }
-        if (json[index] === '"') break;
-        index++;
-      }
-      if (index >= json.length) return false;
-      const top = stack.at(-1);
-      if (top?.type === "object" && top.expectingKey) {
-        let key: string;
-        try {
-          key = JSON.parse(json.slice(start, index + 1));
-        } catch {
-          return false;
-        }
-        if (top.keys!.has(key)) return false;
-        top.keys!.add(key);
-        top.expectingKey = false;
-      }
-      continue;
-    }
-    if (char === "{") stack.push({ type: "object", keys: new Set(), expectingKey: true });
-    else if (char === "[") stack.push({ type: "array" });
-    else if (char === "}" || char === "]") stack.pop();
-    else if (char === "," && stack.at(-1)?.type === "object") stack.at(-1)!.expectingKey = true;
-  }
-  return stack.length === 0;
-}
-
 function isNonEmptyBoundedString(value: unknown): value is string {
   return typeof value === "string" && value.trim().length > 0 &&
     withinCodePointLimit(value, STRUCTURED_HANDOFF_MAX_ITEM_CODE_POINTS);
@@ -203,12 +166,7 @@ export function parseStructuredDistillHandoff(
   if (Object.keys(record).length !== STRUCTURED_HANDOFF_KEYS.length) return undefined;
   if (Object.keys(record).some((key) =>
     !STRUCTURED_HANDOFF_KEYS.some((allowed) => allowed === key))) return undefined;
-  // JSON.parse accepts duplicate object keys. Reject any envelope whose raw key count
-  // is not exactly one per required field; false-positive rejection safely falls back.
-  for (const key of STRUCTURED_HANDOFF_KEYS) {
-    const occurrences = [...json.matchAll(new RegExp(`"${key.replace("-", "\\-")}"\\s*:`, "g"))].length;
-    if (occurrences !== 1) return undefined;
-  }
+  if (!hasNoDuplicateObjectKeys(json, true)) return undefined;
   if (typeof record.objective !== "string" || !record.objective.trim()) return undefined;
   if (!withinCodePointLimit(record.objective, STRUCTURED_HANDOFF_MAX_ITEM_CODE_POINTS)) return undefined;
   for (const key of STRUCTURED_HANDOFF_KEYS.slice(1)) {

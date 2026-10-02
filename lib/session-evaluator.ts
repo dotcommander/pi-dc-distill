@@ -1,4 +1,4 @@
-import { createHash } from "node:crypto";
+import { sha256Hex } from "./sha256.ts";
 import { mkdir, readFile, writeFile } from "node:fs/promises";
 import { basename, resolve } from "node:path";
 import { canonicalRecordFromMessage } from "./compaction-source.ts";
@@ -50,9 +50,7 @@ interface ParsedLine {
   value: Record<string, unknown>;
 }
 
-function sha256(value: string): string {
-  return createHash("sha256").update(value, "utf8").digest("hex");
-}
+
 
 function parseJsonl(content: string): ParsedLine[] {
   const parsed: ParsedLine[] = [];
@@ -147,7 +145,7 @@ export async function evaluateSession(options: SessionEvaluationOptions): Promis
     input: {
       entries: inputEntries.length,
       bytes: Buffer.byteLength(input),
-      sha256: sha256(input),
+      sha256: sha256Hex(input),
       file: inputName,
     },
     current: {
@@ -163,8 +161,8 @@ export async function evaluateSession(options: SessionEvaluationOptions): Promis
       historical: {
         characters: Array.from(historical).length,
         bytes: Buffer.byteLength(historical),
-        sha256: sha256(historical),
-        bodySha256: sha256(historicalBody(historical)),
+        sha256: sha256Hex(historical),
+        bodySha256: sha256Hex(historicalBody(historical)),
         bodyMatchesCurrent: historicalBody(historical) === result.summary,
         file: historicalName,
         ...(historicalSourceFile ? { sourceFile: historicalSourceFile } : {}),

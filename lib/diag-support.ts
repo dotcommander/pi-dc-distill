@@ -5,23 +5,60 @@
  * (`Diag.warn` in `index.ts`; `error`/`debug` kept because they share one
  * write path and the framework facade exported them together).
  *
- * Routing (preserved):
- *   • Always: append a line to ~/.pi/data/pi-dc-distill/diag.ndjson
- *   • If process.env.PI_DEBUG is truthy: also mirror to process.stderr
- *
- * Safety: callable from any context (no host, no ctx). Never throws —
- * NDJSON writes are swallowed; stderr writes are try/catch wrapped.
- *
- * Self-contained by design (support-module isolation rule): the NDJSON
- * append and the data-dir resolution are inlined rather than imported from
- * sibling support modules.
+ * NDJSON and monitor text share Path.data("dc-distill") resolution.
+ * Each sink rotates before an append when its existing size exceeds 5 MiB.
+ * Historical pi-dc-distill files and rotated archives are preserved.
+ * PI_DEBUG also mirrors NDJSON diagnostics to stderr; failures are best effort.
  *
  * @module lib/diag-support
  */
 
-import { appendFileSync, mkdirSync } from "node:fs";
-import { homedir } from "node:os";
-import { join } from "node:path";
+import { appendFileSync, existsSync, renameSync, statSync } from "node:fs";
+import { appendFile } from "node:fs/promises";
+import { Path } from "./paths.ts";
+
+const MAX_LOG_BYTES = 5 * 1024 * 1024;
+let monitorWrites: Promise<void> = Promise.resolve();
+
+/** Rotate before each append. Existing archives are never overwritten. */
+function rotate(path: string): void {
+  try {
+    if (statSync(path).size <= MAX_LOG_BYTES) return;
+    let archive = `${path}.old`;
+    if (existsSync(archive)) {
+      const base = `${archive}.${Date.now()}`;
+      archive = base;
+      for (let suffix = 1; existsSync(archive); suffix++) archive = `${base}.${suffix}`;
+    }
+    renameSync(path, archive);
+  } catch {
+    // Missing files and storage failures are best effort.
+  }
+}
+
+function appendDiagnostic(line: string): void {
+  try {
+    const path = Path.data("dc-distill").join("diag.ndjson");
+    rotate(path);
+    appendFileSync(path, line, "utf8");
+  } catch {
+    // Diagnostics must never poison their caller.
+  }
+}
+
+function appendMonitor(msg: string): Promise<void> {
+  const line = `${new Date().toISOString()} ${msg}\n`;
+  monitorWrites = monitorWrites.then(async () => {
+    try {
+      const path = Path.data("dc-distill").join("diag.log");
+      rotate(path);
+      await appendFile(path, line, "utf8");
+    } catch {
+      // Monitor writes remain asynchronous and best effort.
+    }
+  });
+  return monitorWrites;
+}
 
 export type DiagLevel = "warn" | "error" | "debug";
 
@@ -57,19 +94,8 @@ function write(
     msg,
     err: normalizeErr(err),
   };
-  try {
-    const dir = join(homedir(), ".pi", "data", "pi-dc-distill");
-    mkdirSync(dir, { recursive: true });
-    const timestamped = { ts: new Date().toISOString(), ...entry };
-    appendFileSync(
-      join(dir, "diag.ndjson"),
-      JSON.stringify(timestamped) + "\n",
-      "utf-8",
-    );
-  } catch {
-    // Swallowed: diag writes must not poison the caller or write to
-    // stderr unconditionally (which breaks pi TUI rendering).
-  }
+  const timestamped = { ts: new Date().toISOString(), ...entry };
+  appendDiagnostic(JSON.stringify(timestamped) + "\n");
   if (DEBUG_ON) {
     try {
       const errStr = entry.err ? ` — ${entry.err.message}` : "";
@@ -81,6 +107,10 @@ function write(
 }
 
 export const Diag = {
+  /** Serialized text sink used by the asynchronous compaction monitor. */
+  monitor(msg: string): Promise<void> {
+    return appendMonitor(msg);
+  },
   warn(scope: string, msg: string, err?: unknown): void {
     write("warn", scope, msg, err);
   },

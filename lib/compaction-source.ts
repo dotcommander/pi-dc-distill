@@ -92,8 +92,8 @@ export function canonicalRecordFromMessage(message: AgentMessage): Record<string
   }
 }
 
-function byteLength(records: string[]): number {
-  return Buffer.byteLength(records.join("\n") + "\n", "utf8");
+function recordBytes(record: string): number {
+  return Buffer.byteLength(record, "utf8") + 1;
 }
 
 export function canonicalizeCompactionSource(
@@ -122,25 +122,30 @@ export function canonicalizeCompactionSource(
   }
   check(signal);
 
-  let selected = [...required, ...discarded];
+  const requiredBytes = required.reduce((total, record) => total + recordBytes(record), 0);
+  const discardedBytes = discarded.map(recordBytes);
+  const totalBytes = discardedBytes.reduce((total, size) => total + size, requiredBytes);
+  let selected = discarded;
   let digestScope: CanonicalCompactionInput["digestScope"] = "compaction-input";
-  if (byteLength(selected) > MAX_INPUT_BYTES) {
-    if (byteLength(required) > MAX_INPUT_BYTES) {
+  if (totalBytes > MAX_INPUT_BYTES) {
+    if (requiredBytes > MAX_INPUT_BYTES) {
       throw new Error("required compaction metadata exceeds the 20 MiB input envelope");
     }
     digestScope = "bounded-compaction-input";
-    selected = [...required];
+    selected = [];
+    let selectedBytes = requiredBytes;
     for (let index = discarded.length - 1; index >= 0; index--) {
-      const candidate = [discarded[index], ...selected.slice(required.length)];
-      if (byteLength([...required, ...candidate]) > MAX_INPUT_BYTES) continue;
-      selected = [...required, ...candidate];
+      if (selectedBytes + discardedBytes[index] > MAX_INPUT_BYTES) continue;
+      selected.push(discarded[index]);
+      selectedBytes += discardedBytes[index];
       if (index % 128 === 0) check(signal);
     }
+    selected.reverse();
   }
   check(signal);
   return {
-    bytes: selected.join("\n") + "\n",
+    bytes: required.concat(selected).join("\n") + "\n",
     digestScope,
-    recordCount: selected.length - 1,
+    recordCount: required.length + selected.length - 1,
   };
 }

@@ -310,3 +310,10 @@ describe("output compactor", () => {
     expect(callCtx.notices).toEqual(["dc-distill output compactor failed open: disk full"]);
   });
 });
+
+test("line counting preserves interior blanks, terminal LF, and CR semantics", () => {
+  for (const text of ["", "\n", "\n\n", "a\n\nb", "a\n\n", "\r", "a\rb", "a\r\nb\r\n", "\n\r", "😀\né\n"]) {
+    const expected = text.length === 0 ? 0 : text.split("\n").length - (text.endsWith("\n") ? 1 : 0);
+    expect(countLines(text)).toBe(expected);
+  }
+});

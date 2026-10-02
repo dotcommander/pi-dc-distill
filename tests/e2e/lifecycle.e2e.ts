@@ -104,7 +104,7 @@ describe("dc-distill real-Pi lifecycle", () => {
 
       const result = end.result as { summary?: string; details?: CompactionDetails };
       expect(result.details?.compactor).toBe("dc-distill");
-      expect(result.details?.version).toBe(8);
+      expect(result.details?.version).toBe(9);
       expect(result.details?.autonomous).toBe(false);
       expect(result.summary).toContain("TASK-13");
 

@@ -213,7 +213,12 @@ report. Replay artifacts contain session content and are written locally.
 File lists mean successful tool-observed reads or tool-reported writes. They do
 not prove current existence, exact contents, or Git state. Failed or unmatched
 writes produce inspect-before-retry risks because partial effects can be unknown.
-Git receipts retain their captured working directory.
+Git receipts retain their captured working directory. Supported aliases include `view_file` for
+reads and `write_to_file`, `replace_file_content`, `patch_file`, and `create_file`
+for writes; `write_to_file` and `create_file` can create files. Path arguments
+use `path`, `file_path`, `filePath`, `file` first, then `targetFile`, `TargetFile`,
+`target_file`, `target_path`, `absolutePath`, `AbsolutePath`, in that order.
+Aliases still require a successful and unambiguous paired result.
 
 Verification receipts use exact runner, command bytes, and known working
 directory identity. Later successful writes or potentially modifying shell
@@ -222,4 +227,4 @@ commands mark earlier results as having unestablished freshness.
 The operating summary target is 8,192 Unicode code points. Complete optional
 records are removed first, and omissions are reported; the hard wire ceiling
 is 65,536. See [algorithm](algorithm.md) for scoring and eviction, and
-[architecture](architecture.md#compaction-contract) for version-8 metrics and digests.
+[architecture](architecture.md#compaction-contract) for version-9 metrics and digests.

@@ -47,7 +47,7 @@ entirely filtered input.
 ## Output Contract
 
 `session_before_compact` returns Pi's canonical shape with dc-distill details
-version 8:
+version 9:
 
 ```ts
 {
@@ -57,7 +57,7 @@ version 8:
     tokensBefore: number,
     details: {
       compactor: "dc-distill",
-      version: 8,
+      version: 9,
       tier: 1,
       attemptId: string,
       autonomous: boolean,
@@ -80,7 +80,7 @@ version 8:
 `tokensAfter` is Pi's rebuilt message-context estimate, calculated with
 `buildSessionContext()` and `estimateTokens()`. `summaryTokens` estimates the
 returned summary alone. `summaryDigest` hashes the exact returned wire summary,
-including its metric line. Version-5 through version-7 session entries remain
+including its metric line. Version-5 through version-8 session entries remain
 readable and are not rewritten.
 
 The final summary is limited to 65,536 Unicode code points and targets an 8,192-
@@ -89,6 +89,13 @@ focus is limited to 2,048 code points; read and modified file lists each keep 50
 items; individual marker items keep 512 code points. Truncated lists include
 omitted counts. Formatting must preserve complete headings and balanced XML
 markers; never apply a final substring to structured output.
+
+Version 9 adds exact lowercased tool aliases: `view_file` reads;
+`write_to_file`, `replace_file_content`, `patch_file`, and `create_file` writes;
+`write_to_file` and `create_file` are create-capable. Preserve raw tool names
+for pairing. Path precedence is `path`, `file_path`, `filePath`, `file`, followed
+by `targetFile`, `TargetFile`, `target_file`, `target_path`, `absolutePath`,
+`AbsolutePath`.
 
 File lists require an unambiguously paired successful tool result and remain
 provenance-labeled observations, not Git receipts. Failed or unmatched writes
@@ -104,11 +111,12 @@ metrics, freezes a `PendingCompaction`, and returns it. It does not emit durable
 success artifacts or reset the monitor.
 
 `session_compact` commits only when the owner session, extension identity,
-details version, attempt, first-kept ID, and exact summary digest match. Commit
+details version 9, attempt, first-kept ID, and exact summary digest match. Commit
 then resets the monitor from Pi's post-rebuild full-context usage when available,
 writes log/dump/recall, clears failure state, notifies only in a UI, and queues
 continuation only for an autonomous attempt. Continuation delivery is durable: the attempt id is journalled in the compaction details and the delivered message, and on `session_start` or tree changes a pure reducer over the active branch redelivers an unanswered autonomous continuation exactly once. Pending state and the latch are
-released in `finally`.
+released in `finally`. Historical v8 autonomous continuations retain exactly-once
+recovery alongside v9.
 
 Session replacement, shutdown, autonomous errors, cancellation, foreign
 compaction, mismatches, and duplicate events cannot create success artifacts.

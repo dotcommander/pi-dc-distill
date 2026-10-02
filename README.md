@@ -122,7 +122,11 @@ Pi's global and project compaction settings control the autonomous monitor.
 `compaction.enabled: false` disables it; manual compaction remains available.
 There are no extension-specific trigger settings. Core logs and optional
 recall/output artifacts live under `~/.pi/data/dc-distill/`; raw input dumps are
-also off by default and separately enabled with `DC_DISTILL_DUMPS=1`.
+also off by default and separately enabled with `DC_DISTILL_DUMPS=1`. Monitor diagnostics use
+`diag.log`; Diag NDJSON now uses `diag.ndjson` in the same canonical data
+directory. Both rotate before appending when their existing file exceeds 5 MiB;
+historical files remain preserved. See [architecture](docs/architecture.md#shared-recall-and-diagnostics)
+for diagnostic path changes and the removed legacy recall deep imports.
 
 The compiler is rule-based and lossy. It can miss subjective context and
 low-signal details. A handoff or focus hint helps identify what matters. File

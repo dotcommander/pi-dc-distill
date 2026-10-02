@@ -1,3 +1,4 @@
+import type { CompactionRecallEntry } from "./recall-entry.ts";
 import {
   appendFile,
   mkdir,
@@ -20,19 +21,7 @@ const localWriteQueues = new Map<string, Promise<void>>();
 
 export type RecallScope = "project" | "all";
 
-export interface StoredRecallEntry {
-  ts: string;
-  before: number;
-  after: number;
-  summary: string;
-  project?: string;
-  sessionId?: string;
-  fullContextAfter?: number;
-  fullContextAfterSource?: "pi-post-rebuild-context-usage";
-  tokenSource?: string;
-  /** Owner label used only when returning global version-5 recall. */
-  owner?: "legacy-unscoped";
-}
+export type StoredRecallEntry = CompactionRecallEntry;
 
 export interface DistillStoreOptions {
   dataDir?: string;

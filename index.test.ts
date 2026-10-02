@@ -195,7 +195,7 @@ describe("dc-distill host compaction override", () => {
           tokensBefore: 120_000,
           details: {
             compactor: "dc-distill",
-            version: 8,
+            version: 9,
             tokensAfterSource: "pi-rebuilt-message-estimate",
           },
         },
@@ -229,7 +229,7 @@ describe("dc-distill host compaction override", () => {
     );
 
     expect(result).toMatchObject({
-      compaction: { details: { compactor: "dc-distill", version: 8 } },
+      compaction: { details: { compactor: "dc-distill", version: 9 } },
     });
   });
 
@@ -372,6 +372,38 @@ describe("dc-distill host compaction override", () => {
       },
     });
     expect(notificationText(stub)).toHaveLength(notifications);
+  });
+
+  test("rejects a historical v8 append for a newly prepared v9 transaction", async () => {
+    const { stub, root } = failureReportingFixture(false);
+    await simulate.hook(stub, "session_start", {});
+    const [prepared] = await simulate.hook(stub, "session_before_compact", compactEvent("manual"));
+    const compaction = (prepared as any).compaction;
+    expect(compaction.details.version).toBe(9);
+
+    await simulate.hook(stub, "session_compact", {
+      fromExtension: true,
+      compactionEntry: {
+        type: "compaction",
+        id: "historical-version-mismatch",
+        parentId: null,
+        timestamp: new Date().toISOString(),
+        ...compaction,
+        details: { ...compaction.details, version: 8 },
+      },
+    });
+    expect(notificationText(stub).join("\n")).not.toContain("Shrunk:");
+    expect(existsSync(join(root, "data", "compact-log.jsonl"))).toBe(false);
+    expect(existsSync(join(root, "project", "recall.json"))).toBe(false);
+
+    // Releasing the mismatched attempt must leave future manual compaction usable.
+    const [replacement] = await simulate.hook(stub, "session_before_compact", compactEvent("manual"));
+    expect(replacement).toMatchObject({ compaction: { details: { version: 9 } } });
+    await simulate.hook(stub, "session_compact", {
+      fromExtension: true,
+      compactionEntry: { type: "compaction", id: "matching-v9", ...(replacement as any).compaction },
+    });
+    expect(existsSync(join(root, "data", "compact-log.jsonl"))).toBe(true);
   });
 
   test("non-owner before-compact cancels instead of allowing host fallback", async () => {
@@ -563,7 +595,7 @@ describe("dc-distill subagent safety", () => {
         },
       },
     );
-    expect(replacement).toMatchObject({ compaction: { details: { version: 8 } } });
+    expect(replacement).toMatchObject({ compaction: { details: { version: 9 } } });
   });
 });
 
@@ -630,6 +662,22 @@ describe("dc-distill durable continuation recovery", () => {
     await simulate.hook(stub, "session_tree", {});
     await tick();
     expect(continuationMessages(stub)).toHaveLength(1);
+  });
+
+  test("recovers a v9 autonomous attempt exactly once across repeated tree events", async () => {
+    const stub = createStubCtx();
+    extension(stub.pi);
+    const branch = autonomousBranch();
+    branch[1].details.version = 9;
+    stub.ctx.sessionManager.getBranch = () => branch;
+    await simulate.hook(stub, "session_start", {});
+    await tick();
+    await simulate.hook(stub, "session_tree", {});
+    await tick();
+    await simulate.hook(stub, "session_tree", {});
+    await tick();
+    expect(continuationMessages(stub)).toHaveLength(1);
+    expect(continuationMessages(stub)[0]?.details.attemptId).toBe("attempt-1");
   });
 
   test("nudges exactly once for a delivered but unanswered continuation", async () => {
@@ -783,7 +831,7 @@ describe("dc-distill durable continuation recovery", () => {
         type: "compaction",
         details: {
           compactor: "dc-distill",
-          version: 8,
+          version: 9,
           autonomous: true,
           attemptId: compaction.details.attemptId,
         },

@@ -75,7 +75,7 @@ Events.compact({
   tokensBefore: preparation.tokensBefore,
   details: {
     compactor: "dc-distill",
-    version: 8,
+    version: 9,
     tier: 1,
     attemptId,
     autonomous,
@@ -103,6 +103,8 @@ the exact rebuilt estimate.
 
 `summaryDigest` hashes the exact wire summary including its metric prefix.
 `digestScope` is `compaction-input` or `bounded-compaction-input`.
+New transactions emit details version 9 and commit only on an exact version-9
+match. Historical version-5 through version-8 entries remain readable unchanged.
 
 ## Bounded Structured Output
 
@@ -130,6 +132,15 @@ scoped Git receipt. Failed or unmatched writes produce bounded inspect-before-
 retry risks. Verification freshness uses exact runner + command + known working
 directory identity; later successful writes or non-read-only shell commands
 conservatively stale earlier passes.
+
+Tool classifications use the exact lowercased name while pairing keeps the raw
+name. Reads include `view_file`; writes also include `write_to_file`,
+`replace_file_content`, `patch_file`, and `create_file`. `write_to_file` and
+`create_file` are create-capable. Path arguments retain the precedence
+`path`, `file_path`, `filePath`, `file`, then `targetFile`, `TargetFile`,
+`target_file`, `target_path`, `absolutePath`, `AbsolutePath`. These aliases
+still require a successful, unambiguous paired result and invalidate earlier
+verification after a successful write.
 
 A strict whole-message `distill-handoff-v1` JSON fence can provide objective,
 done, next, blocker, decision, and verification-needed fields without changing
@@ -193,7 +204,8 @@ details and in the delivered message's details, so on `session_start` or a tree
 change a pure reducer over `ctx.sessionManager.getBranch()` derives the state —
 `committed`, `delivered`, `answered` — and redelivers or nudges an unanswered
 autonomous continuation exactly once; manual and pre-v8 compactions never
-recover.
+recover. Historical v8 and current v9 autonomous attempts retain the same
+exactly-once delivery and resume journal behavior.
 
 Focus echo consumes Pi's native `{ role: "compactionSummary", summary }`
 message, bounds the echo, and suppresses duplicates.
@@ -214,5 +226,22 @@ not a claim of support for those SDK versions. Unknown host versions do not
 receive a private presentation patch.
 
 The opt-in RPC suite under `tests/e2e` checks one extension-owned append,
-active discarded/focused content, version-8 metrics, continuation recovery,
+active discarded/focused content, version-9 metrics, continuation recovery,
 and zero provider summarizer requests.
+
+## Shared recall and diagnostics
+
+Recall queries consume explicit entry arrays through `searchRecallEntries`;
+`DistillStore` is the sole recall I/O owner. `RecallEntry` and
+`StoredRecallEntry` remain aliases of the shared entry type. The intentional
+legacy deep-import compatibility change removes `resetStore`, `recordSummary`,
+`getSummaries`, `hydrateSummaries`, `loadPersistedSummaries`, `persistSummary`,
+and `searchSummaries` from `lib/recall.ts`.
+
+Both diagnostic sinks resolve `Path.data("dc-distill")`. Monitor text stays in
+`diag.log` with asynchronous writes serialized within the process; synchronous
+Diag NDJSON writes now go to `diag.ndjson` there rather than the historical
+`pi-dc-distill` directory. Each sink rotates before any append whose existing
+file exceeds 5 MiB, including later writes in the same process. Historical
+files and earlier rotated files are preserved without migration or deletion.
+Timestamps, best-effort failure handling, and `PI_DEBUG` behavior are preserved.
