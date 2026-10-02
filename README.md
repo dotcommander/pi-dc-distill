@@ -3,6 +3,8 @@
 **Deterministic context compaction. No LLM required.**
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
+[![Bun](https://img.shields.io/badge/Bun-1.4.0-black?logo=bun)](https://bun.sh)
+[![Pi](https://img.shields.io/badge/Pi-1.0.0-6366f1)](https://github.com/earendil-works/pi)
 
 ![Illustrated synthetic parser session before and after compaction: 11,988 to 2,950 UTF-8 bytes, with objective, decisions, files, synthetic checks, and next action retained.](docs/assets/distill-before-after.svg)
 
@@ -160,6 +162,8 @@ Both use isolated data directories and make no provider/network requests.
 - [Troubleshooting](docs/troubleshooting.md): diagnostics and compatibility.
 - [Architecture](docs/architecture.md): ownership, lifecycle, isolation, metrics.
 - [Algorithm](docs/algorithm.md): scoring, repetition, evidence, eviction.
+- [Compiler benchmarks](docs/compiler-benchmark.md): offline compilation performance and memory efficiency.
+- [Architecture decisions](docs/adr/0002-remove-vendored-framework.md): vendoring boundary and framework separation decisions.
 - [Releasing to npm](docs/releasing.md): package checks, authentication, publication.
 
 [MIT license](LICENSE).
