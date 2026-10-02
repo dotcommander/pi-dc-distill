@@ -61,7 +61,7 @@ describe("historical rename compatibility", () => {
     expect(dumpsEnabled({ DC_DISTILL_DUMPS: "1" })).toBe(true);
   });
 
-  test("copies prior project recall and artifacts, preserves sources, and does not repeat migration", () => {
+  test("copies prior project recall and artifacts, preserves sources, and does not repeat migration", async () => {
     const root = mkdtempSync(join(tmpdir(), "dc-distill-rename-"));
     const priorDir = join(root, LEGACY_DATA_NAMESPACE);
     const currentDir = join(root, "dc-distill");
@@ -76,7 +76,7 @@ describe("historical rename compatibility", () => {
     writeFileSync(join(priorDir, ".migrated-from-legacy-shrink"), "{}");
     writeFileSync(join(priorDir, "settings.json"), "{}");
     const options = { legacyDir: join(root, "absent"), priorDir, currentDir };
-    const first = migrateDistillData(options);
+    const first = await migrateDistillData(options);
     expect(first.status).toBe("migrated");
     expect(JSON.parse(readFileSync(join(currentDir, relative, "recall.json"), "utf8")).map((x: { summary: string }) => x.summary)).toEqual(["old", "new"]);
     expect(readFileSync(join(currentDir, relative, "tool-output", "old.txt"), "utf8")).toBe("Full original output");
@@ -84,10 +84,10 @@ describe("historical rename compatibility", () => {
     expect(existsSync(join(currentDir, "settings.json"))).toBe(false);
     expect(existsSync(join(currentDir, ".migrated-from-legacy-shrink"))).toBe(false);
     expect(existsSync(join(currentDir, LEGACY_MIGRATION_FLAG))).toBe(true);
-    expect(migrateDistillData(options).status).toBe("skipped");
+    expect((await migrateDistillData(options)).status).toBe("skipped");
   });
 
-  test("failed prior-namespace migration remains retryable and preserves conflicting data", () => {
+  test("failed prior-namespace migration remains retryable and preserves conflicting data", async () => {
     const root = mkdtempSync(join(tmpdir(), "dc-distill-conflict-"));
     const priorDir = join(root, LEGACY_DATA_NAMESPACE);
     const currentDir = join(root, "dc-distill");
@@ -97,11 +97,11 @@ describe("historical rename compatibility", () => {
     writeFileSync(join(priorDir, "note.txt"), "historical");
     writeFileSync(join(currentDir, "note.txt"), "current");
     const options = { legacyDir: join(root, "absent"), priorDir, currentDir };
-    expect(migrateDistillData(options).status).toBe("failed");
+    expect((await migrateDistillData(options)).status).toBe("failed");
     expect(existsSync(join(currentDir, LEGACY_MIGRATION_FLAG))).toBe(false);
     expect(readFileSync(join(currentDir, "note.txt"), "utf8")).toBe("current");
     expect(readFileSync(join(currentDir, ".legacy-migration-conflicts", LEGACY_DATA_NAMESPACE, "note.txt"), "utf8")).toBe("historical");
     writeFileSync(join(priorDir, "recall.json"), "[]");
-    expect(migrateDistillData(options).status).toBe("migrated");
+    expect((await migrateDistillData(options)).status).toBe("migrated");
   });
 });

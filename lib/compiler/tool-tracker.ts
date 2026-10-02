@@ -1,9 +1,73 @@
-import { sliceU16, HARNESS_ERROR_SKIP, argString, OrderedSet, addMarkerLine, removeMarkerLine, removePartialEffectsRisksForPath, moveKeyToEnd, digest } from "./helpers.ts";
-import { type NormalizedBlock, type ToolCallFingerprint, type ToolResultEntry, type PendingToolCall, type VerificationReceipt } from "./types.ts";
+import { sliceU16, HARNESS_ERROR_SKIP, argString, OrderedSet, addMarkerLine, moveKeyToEnd, digest } from "./helpers.ts";
+import { type NormalizedBlock, type ToolCallFingerprint, type ToolResultEntry, type PendingToolCall, type VerificationReceipt, type VerificationObservation, type FileReadObservation, type ObservationSnapshot } from "./types.ts";
+import { observeVerification } from "./verification-observation.ts";
 import { collectSourceAnchorsFromValue, collectActiveTasks } from "./anchors.ts";
 import { LEGACY_OUTPUT_NOTICE_PREFIX } from "../legacy.ts";
 import { codePointLength } from "../unicode.ts";
-import { basename } from "node:path";
+import { basename, isAbsolute, resolve, normalize } from "node:path";
+import { analyzeShell, shellSegmentHasUnsafeOptions, shellSegmentHasUnsafeCheckOptions } from "./shell-analysis.ts";
+import { classifyToolEffect, fileReadTools, fileWriteTools, fileCreateTools, isShellTool } from "./tool-effects.ts";
+export { fileWriteTools } from "./tool-effects.ts";
+
+interface WriteRisk {
+  call: PendingToolCall;
+  identity: string;
+  path: string;
+  terminalAt?: number;
+  failed?: boolean;
+}
+interface GitObservation {
+  command: string;
+  cwd?: string;
+  scope: string;
+  evidence: string;
+  mutationEpoch: number;
+  freshnessEstablished: boolean;
+}
+export interface EvidenceState {
+  mutationEpoch: number;
+  sequence: number;
+  duplicateIds: Set<string>;
+  risks: WriteRisk[];
+  git: GitObservation[];
+  fileReads: FileReadObservation[];
+  modifiedPaths: Set<string>;
+}
+export function createEvidenceState(blocks: NormalizedBlock[] = []): EvidenceState {
+  const seen = new Set<string>();
+  const duplicateIds = new Set<string>();
+  for (const block of blocks) if (block.kind === "tool_call" && block.callId) {
+    if (seen.has(block.callId)) duplicateIds.add(block.callId);
+    seen.add(block.callId);
+  }
+  return { mutationEpoch: 0, sequence: 0, duplicateIds, risks: [], git: [], fileReads: [], modifiedPaths: new Set() };
+}
+
+/** Lexical identity only: no filesystem reads, display truncation or alias names. */
+export function pathIdentity(path: string, cwd?: string): string {
+  if (isAbsolute(path)) return normalize(path);
+  return cwd && isAbsolute(cwd) ? resolve(cwd, path) : `relative:${normalize(path)}`;
+}
+
+export function renderEvidenceRisks(state: EvidenceState, risks: OrderedSet): void {
+  for (const risk of state.risks) {
+    const label = risk.failed ? "Failed" : "Unmatched";
+    const effects = risk.failed ? "may have partial effects" : "has unknown effects";
+    // Identity and chronology are retained independently of this bounded display.
+    const rawPath = risk.path;
+    const path = codePointLength(rawPath) <= 100 ? rawPath : `${sliceU16(rawPath, 65)}… [path sha256:${digest(risk.identity).slice(0, 16)}]`;
+    addMarkerLine(risks, `${label} ${risk.call.name} for ${path} ${effects}; inspect before retry.`);
+  }
+}
+
+export function renderGitObservations(state: EvidenceState, rows: OrderedSet): void {
+  for (const receipt of state.git) {
+    const stale = !receipt.freshnessEstablished || receipt.mutationEpoch < state.mutationEpoch;
+    const cwd = receipt.cwd ?? "unknown";
+    const command = codePointLength(receipt.command) <= 512 ? receipt.command : `[command sha256:${digest(receipt.command).slice(0, 16)}]`;
+    rows.add(`[git receipt, cwd=${codePointLength(cwd) <= 200 ? cwd : `[cwd sha256:${digest(cwd).slice(0, 16)}]`}] scope=${receipt.scope}; ${command}: ${sliceU16(receipt.evidence, 300)}${stale ? " [freshness: not established]" : ""}`);
+  }
+}
 
 export function extractPath(args: Record<string, unknown> | undefined): string | undefined {
   for (const key of ["path", "file_path", "filePath", "file", "targetFile", "TargetFile", "target_file", "target_path", "absolutePath", "AbsolutePath"]) {
@@ -22,9 +86,14 @@ function stripCdPrefix(command: string): string {
   return basename(after.trim());
 }
 
-function effectiveShellCwd(command: string, fallback?: string): string | undefined {
-  const match = command.trim().match(/^cd\s+(?:'([^']+)'|"([^"]+)"|([^;&|\s]+))\s+&&\s+/);
-  return match ? (match[1] ?? match[2] ?? match[3]) : fallback;
+export function effectiveShellCwd(command: string, fallback?: string): string | undefined {
+  const analysis = analyzeShell(command);
+  const first = analysis.segments[0];
+  if (!analysis.supported || first?.[0] !== "cd" || first.length !== 2 || analysis.operators[0] !== "&&") return fallback;
+  const path = first[1];
+  if (!path || path.startsWith("-")) return undefined;
+  if (isAbsolute(path)) return resolve(path);
+  return fallback && isAbsolute(fallback) ? resolve(fallback, path) : undefined;
 }
 
 function fingerprintKey(name: string, args: Record<string, unknown> | undefined): string {
@@ -41,7 +110,7 @@ function fingerprintKey(name: string, args: Record<string, unknown> | undefined)
   return "";
 }
 
-function renderVerificationReceipt(
+export function renderVerificationReceipt(
   receipt: VerificationReceipt,
   currentMutationEpoch: number,
 ): string {
@@ -50,7 +119,7 @@ function renderVerificationReceipt(
     ? rawCwd
     : `[cwd sha256:${digest(rawCwd).slice(0, 16)}]`;
   const scope = `${receipt.tool || "shell"} cwd=${cwd}`;
-  const isStale = receipt.mutationEpoch < currentMutationEpoch;
+  const isStale = receipt.freshnessEstablished === false || receipt.mutationEpoch < currentMutationEpoch;
   const preserveExactCommand = !isStale || receipt.status === "FAIL" || receipt.status === "INCOMPLETE";
   const command = preserveExactCommand && codePointLength(receipt.command) <= 1_024
     ? receipt.command
@@ -69,9 +138,9 @@ export function limitedVerificationSlice(
 ): string[] {
   const all = [...receipts.values()];
   const current = all.filter((receipt) =>
-    receipt.mutationEpoch >= mutationEpoch || receipt.status === "FAIL" || receipt.status === "INCOMPLETE");
+    (receipt.freshnessEstablished !== false && receipt.mutationEpoch >= mutationEpoch) || receipt.status === "FAIL" || receipt.status === "INCOMPLETE");
   const stalePasses = all.filter((receipt) =>
-    receipt.mutationEpoch < mutationEpoch && receipt.status === "PASS");
+    (receipt.freshnessEstablished === false || receipt.mutationEpoch < mutationEpoch) && receipt.status === "PASS");
   const retained = [...current, ...stalePasses.slice(-1)];
   const values = retained.map((receipt) => renderVerificationReceipt(receipt, mutationEpoch));
   if (stalePasses.length > 1) {
@@ -81,22 +150,18 @@ export function limitedVerificationSlice(
   return [...values.slice(values.length - limit), `... (${values.length - limit} verification rows omitted)`];
 }
 
-const fileReadTools = new Set(["read", "read_file", "view", "view_file"]);
-
-export const fileWriteTools = new Set(["edit", "write", "edit_file", "write_file", "multiedit", "write_to_file", "replace_file_content", "patch_file", "create_file"]);
-
-const fileCreateTools = new Set(["write", "write_file", "write_to_file", "create_file"]);
-
 function popPendingToolCall(
   calls: PendingToolCall[],
   resultName: string,
   resultCallId?: string,
+  duplicateIds = new Set<string>(),
 ): { call: PendingToolCall; matched: boolean } {
   if (resultCallId) {
-    const idx = calls.findIndex((call) => call.callId === resultCallId);
-    return idx >= 0
-      ? { call: calls.splice(idx, 1)[0], matched: true }
-      : { call: { name: resultName, callId: resultCallId }, matched: false };
+    const candidates = calls.map((call, index) => ({ call, index })).filter(({ call }) => call.callId === resultCallId);
+    if (duplicateIds.has(resultCallId) || candidates.length !== 1 || candidates[0].call.name !== resultName) {
+      return { call: { name: resultName, callId: resultCallId }, matched: false };
+    }
+    return { call: calls.splice(candidates[0].index, 1)[0], matched: true };
   }
   const candidates = calls
     .map((call, index) => ({ call, index }))
@@ -105,84 +170,84 @@ function popPendingToolCall(
   return { call: calls.splice(candidates[0].index, 1)[0], matched: true };
 }
 
-function isShellTool(name: string): boolean {
-  return ["bash", "shell", "jinn_run_shell", "functions.bash"].includes(name.toLowerCase());
-}
-
 export function shellCommand(call: PendingToolCall): string | undefined {
   if (!isShellTool(call.name)) return undefined;
   const command = argString(call.args, "command") ?? argString(call.args, "cmd");
   return command && command.trim() ? command : undefined;
 }
 
-export function isVerificationCommand(command: string): boolean {
-  const controlLines: string[] = [];
-  let heredocEnd: string | undefined;
-  for (const line of command.split("\n")) {
-    if (heredocEnd) {
-      if (line.trim() === heredocEnd) heredocEnd = undefined;
-      continue;
-    }
-    controlLines.push(line);
-    const match = line.match(/<<-?\s*['"]?([A-Za-z_][A-Za-z0-9_]*)['"]?/);
-    if (match) heredocEnd = match[1];
-  }
-  const lower = controlLines.join(" ").toLowerCase().replace(/\s+/g, " ");
-  return [
-    "go test",
-    "go build",
-    "go vet",
-    "golangci-lint",
-    "go mod verify",
-    "bun test",
-    "npm test",
-    "pnpm test",
-    "yarn test",
-    "cargo test",
-    "pytest",
-    "ruff",
-    "mypy",
-    "tsc",
-    "typecheck",
-    "lint",
-    "just test",
-    "just build",
-    "git diff --check",
-  ].some((marker) => lower.includes(marker));
+function hasUnsafeReadOptions(args: string[]): boolean {
+  return shellSegmentHasUnsafeOptions(args);
 }
 
-function isKnownReadOnlyShellCommand(command: string): boolean {
-  const normalized = command.trim().toLowerCase();
-  return /^(?:pwd|ls(?:\s|$)|rg(?:\s|$)|grep(?:\s|$)|find(?:\s|$)|cat(?:\s|$)|head(?:\s|$)|tail(?:\s|$)|git\s+(?:status|diff)(?:\s|$))/.test(normalized);
+function isCheckSegment(args: string[]): boolean {
+  if (shellSegmentHasUnsafeCheckOptions(args)) return false;
+  const [exe, sub, third] = args;
+  if (exe === "go") {
+    if (args.slice(2).some((arg) => /^-(?:exec|toolexec)(?:=|$)/.test(arg))) return false;
+    return ["test", "build", "vet"].includes(sub) || (sub === "mod" && third === "verify");
+  }
+  if (exe === "bun" && sub === "x") return third === "tsc";
+  if (["bun", "npm", "pnpm", "yarn", "cargo"].includes(exe)) return sub === "test";
+  if (exe === "ruff") return sub === "check";
+  if (exe === "just") return sub === "test" || sub === "build";
+  if (exe === "git") return sub === "diff" && args.slice(2, args.indexOf("--") < 0 ? undefined : args.indexOf("--")).includes("--check");
+  if (exe === "golangci-lint") return sub === "run";
+  return ["pytest", "mypy", "tsc", "typecheck", "lint"].includes(exe);
+}
+
+export function isVerificationCommand(command: string): boolean {
+  const analysis = analyzeShell(command);
+  if (!analysis.supported || analysis.operators.some((operator) => operator !== "&&") || analysis.operators.length !== analysis.segments.length - 1) return false;
+  const segments = analysis.segments;
+  const leadingCd = segments[0]?.[0] === "cd";
+  if (leadingCd && (segments[0].length !== 2 || !segments[0][1] || segments[0][1].startsWith("-"))) return false;
+  const checks = leadingCd ? segments.slice(1) : segments;
+  return checks.length > 0 && checks.every(isCheckSegment);
+}
+
+/** Opaque recipes and emitting builds remain diagnostics, never fresh passes. */
+function canEstablishFreshVerification(command: string): boolean {
+  const analysis = analyzeShell(command);
+  return analysis.supported && analysis.segments.every((args) => {
+    if (args[0] === "cd") return true;
+    if (args[0] === "just" || (args[0] === "go" && args[1] === "build")) return false;
+    const tsc = args[0] === "tsc" || (args[0] === "bun" && args[1] === "x" && args[2] === "tsc");
+    if (tsc) {
+      let noEmit = false;
+      for (let i = 0; i < args.length; i++) {
+        if (args[i] === "--noEmit") noEmit = args[i + 1] !== "false";
+        else if (args[i].startsWith("--noEmit=")) noEmit = args[i] === "--noEmit=true";
+      }
+      return noEmit;
+    }
+    return true;
+  });
+}
+
+/** One executable probe, optionally behind a literal leading cd. */
+export function gitProbeScope(command: string): string | undefined {
+  const analysis = analyzeShell(command);
+  if (!analysis.supported) return undefined;
+  const segments = analysis.segments;
+  const leadingCd = segments[0]?.[0] === "cd";
+  if (leadingCd && (segments[0].length !== 2 || analysis.operators[0] !== "&&" || segments[0][1].startsWith("-"))) return undefined;
+  const probes = leadingCd ? segments.slice(1) : segments;
+  if (probes.length !== 1 || analysis.operators.length !== (leadingCd ? 1 : 0)) return undefined;
+  const args = probes[0];
+  if (args[0] !== "git" || hasUnsafeReadOptions(args)) return undefined;
+  const separator = args.indexOf("--");
+  const options = args.slice(2, separator < 0 ? undefined : separator);
+  const paths = separator >= 0 && separator < args.length - 1;
+  if (args[1] === "status") return `working-tree status${paths || options.some((arg) => !arg.startsWith("-")) ? " (path-limited)" : ""}${options.includes("--untracked-files=no") || options.includes("-uno") ? " (untracked excluded)" : ""}`;
+  if (args[1] !== "diff") return undefined;
+  const revisions = options.filter((arg) => !arg.startsWith("-"));
+  const scope = revisions.length ? "revision comparison" : options.some((arg) => arg === "--cached" || arg === "--staged") ? "index diff" : "worktree diff (unstaged tracked files)";
+  return `${scope}${paths ? " (path-limited)" : ""}${options.includes("--check") ? "; whitespace check" : options.includes("--stat") ? "; stat" : options.includes("--name-only") ? "; names" : ""}`;
 }
 
 export function isWorkingTreeCommand(command: string): boolean {
-  const lower = command.toLowerCase();
-  return (
-    lower.includes("git status") ||
-    lower.includes("git diff --stat") ||
-    lower.includes("git diff --name-only") ||
-    lower.includes("git diff --check")
-  );
-}
-
-function resultEvidence(result: string): string {
-  const lines = result.split("\n").map((value) => value.trim()).filter(Boolean);
-  const explicitSummary = lines.findLast((line) =>
-    /(?:\b\d+\s+(?:pass(?:ed)?|fail(?:ed)?|skip(?:ped)?|tests?)\b|\btests?:\s*\d+\b|\b(?:pass|fail|skip)(?:ed)?:\s*\d+\b)/i.test(line));
-  if (explicitSummary) return explicitSummary;
-  const statusLine = lines.findLast((line) =>
-    /^(ok\s+|PASS\b|FAIL\b|--- FAIL|\?\s+)/.test(line) || line.toLowerCase().includes("command exited with code"));
-  return statusLine ?? lines[0] ?? "no output";
-}
-
-function verificationStatus(result: string, isError: boolean): "PASS" | "FAIL" | "SKIP" {
-  // "0 failed" / "failed: 0" / "0 failures" are pass evidence, not failures.
-  const scrubbed = result.replace(/\b0 (?:failed|failures?)\b/gi, "").replace(/\bfail(?:ed|ures?)?:\s*0\b/gi, "");
-  const lower = scrubbed.toLowerCase();
-  if (isError || /command exited with code [1-9][0-9]*/.test(lower) || scrubbed.includes("FAIL") || lower.includes("failed")) return "FAIL";
-  if (lower.includes("skip") || lower.includes("no tests to run")) return "SKIP";
-  return "PASS";
+  return gitProbeScope(command) !== undefined;
 }
 
 function summarizeResultLines(result: string, empty: string): string {
@@ -193,7 +258,8 @@ function summarizeResultLines(result: string, empty: string): string {
 export function verificationIdentity(call: PendingToolCall, sessionCwd?: string): string | undefined {
   const command = shellCommand(call);
   if (!command) return undefined;
-  const cwd = argString(call.args, "cwd") ?? sessionCwd;
+  const cwd = effectiveShellCwd(command, argString(call.args, "cwd") ?? sessionCwd);
+  if (analyzeShell(command).segments[0]?.[0] === "cd" && !cwd) return undefined;
   return JSON.stringify([call.name, command, cwd ?? null]);
 }
 
@@ -205,6 +271,10 @@ function collectShellMarkers(
   workingTree: OrderedSet,
   sessionCwd: string | undefined,
   mutationEpoch: number,
+  observation?: VerificationObservation,
+  state?: EvidenceState,
+  fresh = true,
+  sourceSequence?: number,
 ): boolean {
   const command = shellCommand(call);
   if (!command) return false;
@@ -213,21 +283,26 @@ function collectShellMarkers(
   if (isVerificationCommand(command)) {
     const identity = verificationIdentity(call, sessionCwd);
     if (identity) {
+      const observed = observation ?? observeVerification(result, isError);
       verification.delete(identity);
       verification.set(identity, {
-        status: verificationStatus(result, isError),
+        sourceSequence,
+        status: observed.status,
         tool: call.name,
         command,
         cwd,
-        evidence: resultEvidence(result),
+        evidence: observed.evidence,
         mutationEpoch,
+        freshnessEstablished: fresh && canEstablishFreshVerification(command) && Boolean(cwd && isAbsolute(cwd)),
       });
     }
     captured = true;
   }
-  if (isWorkingTreeCommand(command) && !isError) {
-    const empty = command.toLowerCase().includes("diff") && !command.toLowerCase().includes("check") ? "no diff" : "clean";
-    addMarkerLine(workingTree, `[git receipt, cwd=${cwd ?? "unknown"}] ${stripCdPrefix(command)}: ${summarizeResultLines(result, empty)}`);
+  const gitScope = gitProbeScope(command);
+  if (gitScope && !isError && observation?.status !== "INCOMPLETE" && observation?.status !== "FAIL") {
+    const evidence = summarizeResultLines(result, "no output from scoped probe; working-tree cleanliness not established");
+    if (state) state.git.push({ command, cwd, scope: gitScope, evidence, mutationEpoch, freshnessEstablished: fresh && Boolean(cwd && isAbsolute(cwd)) });
+    else workingTree.add(`[git receipt, cwd=${cwd ?? "unknown"}] scope=${gitScope}; ${command}: ${evidence}`);
     captured = true;
   }
   return captured;
@@ -238,12 +313,25 @@ export function collectConversationToolCall(
   pendingCalls: PendingToolCall[],
   fingerprints: Map<string, ToolCallFingerprint>,
   fingerprintOrder: string[],
+  state?: EvidenceState,
+  sessionCwd?: string,
 ): { pendingTool: string; pendingFile: string } {
   const name = block.name ?? "";
   const args = block.args ?? {};
-  pendingCalls.push({ name, callId: block.callId, args });
+  const call: PendingToolCall = { name, callId: block.callId, args };
   const path = extractPath(args);
+  if (state) {
+    call.startedAt = ++state.sequence;
+    call.overlappingMutation = pendingCalls.some((pending) => pending.potentiallyModifying);
+    call.potentiallyModifying = classifyToolEffect(name, args).potentiallyModifying;
+    if (call.potentiallyModifying) state.mutationEpoch++;
+    call.startedEpoch = state.mutationEpoch;
+    if (fileWriteTools.has(name.toLowerCase())) state.risks.push({ call, path: path ?? "unknown target", identity: path ? pathIdentity(path, argString(args, "cwd") ?? sessionCwd) : `unknown:${state.sequence}` });
+  }
+  pendingCalls.push(call);
   recordToolFingerprint(name, args, fingerprints, fingerprintOrder);
+  const fingerprint = fingerprints.get(`${name}:${fingerprintKey(name, args)}`);
+  if (fingerprint) fingerprint.sourceSequence = block.sourceSequence;
   return { pendingTool: name, pendingFile: path ?? "" };
 }
 
@@ -297,31 +385,55 @@ export function collectConversationToolResult(
   sessionCwd: string | undefined,
   mutationEpoch: number,
   lastErrorRun?: { current?: ToolResultEntry },
+  state?: EvidenceState,
 ): { pendingError: boolean; omittedErrorResults: number; omittedRecentResults: number; mutationEpoch: number } {
   const text = (block.text ?? "").trim();
-  const { call, matched } = popPendingToolCall(pendingCalls, block.name ?? "", block.callId);
-  const isError = Boolean(block.isError);
+  const ambiguousCandidates = !block.callId
+    ? pendingCalls.filter((pending) => !pending.callId && pending.name === (block.name ?? "")).length : 0;
+  if (ambiguousCandidates > 1) {
+    // Marker rendering escapes this bounded text. Empty results must retain it too.
+    addMarkerLine(resumeRisks, `Ambiguous ID-less result for ${sliceU16(block.name ?? "", 48)}: ${ambiguousCandidates} same-name calls remain pending; effects and provenance unresolved.`);
+  }
+  const { call, matched } = popPendingToolCall(pendingCalls, block.name ?? "", block.callId, state?.duplicateIds);
+  const isError = block.isError === true;
+  const succeeded = block.isError === false;
   const path = matched ? extractPath(call.args) : undefined;
-  if (matched && !isError) {
-    collectSourceAnchorsFromValue(sourceAnchors, call.args);
-    const command = shellCommand(call);
-    if (command && !isKnownReadOnlyShellCommand(command)) mutationEpoch += 1;
-    if (path) {
-      recordToolFileAccess(call.name, path, readFiles, modifiedFiles, createdFiles);
-      if (fileWriteTools.has(call.name.toLowerCase())) {
-        mutationEpoch += 1;
-        removeMarkerLine(
-          resumeRisks,
-          `Failed ${call.name} for ${path} may have partial effects; inspect before retry.`,
-        );
-      } else if (fileReadTools.has(call.name.toLowerCase())) {
-        // A successful read of the same path is the inspection the marker asks
-        // for ("inspect before retry"); it retires the risk without a retry write.
-        removePartialEffectsRisksForPath(resumeRisks, path);
-      }
+  let fresh = true;
+  if (state) {
+    state.sequence++;
+    fresh = matched && !call.overlappingMutation && call.startedEpoch === state.mutationEpoch;
+    if (matched && call.potentiallyModifying) state.mutationEpoch++;
+    // Even an unpaired modifying completion fences older observations.
+    if (!matched && classifyToolEffect(block.name ?? "").potentiallyModifying) state.mutationEpoch++;
+    mutationEpoch = state.mutationEpoch;
+    if (!matched && fileWriteTools.has((block.name ?? "").toLowerCase()) && !pendingCalls.some((pending) => pending.callId === block.callId && pending.name === block.name)) {
+      state.risks.push({ call, path: "unknown target", identity: `orphan:${state.sequence}`, terminalAt: state.sequence, failed: isError });
     }
-  } else if (matched && isError && path && fileWriteTools.has(call.name.toLowerCase())) {
-    addMarkerLine(resumeRisks, `Failed ${call.name} for ${path} may have partial effects; inspect before retry.`);
+    const risk = state.risks.find((risk) => risk.call === call);
+    if (risk) { risk.terminalAt = state.sequence; risk.failed = isError; }
+    if (matched && succeeded && path && (fileReadTools.has(call.name.toLowerCase()) || fileWriteTools.has(call.name.toLowerCase()))) {
+      const identity = pathIdentity(path, argString(call.args, "cwd") ?? sessionCwd);
+      state.risks = state.risks.filter((risk) => risk.identity !== identity || risk.terminalAt === undefined || risk.terminalAt >= (call.startedAt ?? state.sequence));
+      if (risk) state.risks = state.risks.filter((item) => item !== risk);
+    }
+  } else {
+    if (classifyToolEffect(block.name ?? "", matched ? call.args : undefined).potentiallyModifying) mutationEpoch++;
+  }
+  if (state && matched && path) {
+    const cwd = argString(call.args, "cwd") ?? sessionCwd;
+    const identity = pathIdentity(path, cwd);
+    if (fileWriteTools.has(call.name.toLowerCase())) state.modifiedPaths.add(identity);
+    if (fileReadTools.has(call.name.toLowerCase())) state.fileReads.push({
+      id: `observation:${state.sequence}:${call.callId ?? call.name}`,
+      runner: call.name, path: identity, cwd,
+      status: isError ? "failed" : succeeded && !block.hostTruncated ? "succeeded" : "incomplete",
+      mutationEpoch, freshnessEstablished: fresh && Boolean(cwd && isAbsolute(cwd)),
+      imports: Object.freeze([...(block.suppliedImports ?? [])]),
+    });
+  }
+  if (matched && succeeded) {
+    collectSourceAnchorsFromValue(sourceAnchors, call.args);
+    if (path) recordToolFileAccess(call.name, path, readFiles, modifiedFiles, createdFiles);
   }
   const capturedAsMarker = matched && collectShellMarkers(
     call,
@@ -331,6 +443,10 @@ export function collectConversationToolResult(
     workingTree,
     sessionCwd,
     mutationEpoch,
+    block.verificationObservation ?? observeVerification(text, block.isError),
+    state,
+    fresh,
+    block.sourceSequence,
   );
   collectActiveTasks(call, text, isError, activeTasks);
   if (!text || capturedAsMarker) {
@@ -340,6 +456,7 @@ export function collectConversationToolResult(
   const artifactReceipt = extractOutputArtifactReceipt(text);
   const target = path ? `[target: ${path}] ` : "";
   const entry: ToolResultEntry = {
+    sourceSequence: block.sourceSequence,
     toolName: block.name ?? "",
     text: artifactReceipt ?? sliceU16(`${target}${text}`, isError ? 500 : 300),
     isError,
@@ -356,6 +473,7 @@ export function collectConversationToolResult(
       lastErrorRun.current.text === entry.text
     ) {
       lastErrorRun.current.count = (lastErrorRun.current.count ?? 1) + 1;
+      lastErrorRun.current.sourceSequence = block.sourceSequence;
     } else {
       errorResults.push(entry);
       if (lastErrorRun) lastErrorRun.current = entry;
@@ -383,5 +501,35 @@ function extractOutputArtifactReceipt(text: string): string | undefined {
   const path = text.match(/^Full output saved; read this path if needed:\s*(.+)$/m)?.[1]?.trim();
   const receipt = text.match(/^Receipt:\s*sha256=([a-f0-9]{64})\s+bytes=(\d+)\s+strategy=(diagnostic|diff|json|test|search|generic)$/m);
   if (!path || !receipt) return undefined;
-  return `artifact: ${path} sha256=${receipt[1]} bytes=${receipt[2]} strategy=${receipt[3]}`;
+  return `tool-reported artifact: ${path} sha256=${receipt[1]} bytes=${receipt[2]} strategy=${receipt[3]}`;
+}
+
+/** Immutable identities and chronology, taken before presentation shortening. */
+export function snapshotObservations(state: EvidenceState, receipts: Map<string, VerificationReceipt>): ObservationSnapshot {
+  return Object.freeze({ mutationEpoch: state.mutationEpoch,
+    fileReads: Object.freeze(state.fileReads.map((read) => Object.freeze({ ...read, imports: Object.freeze([...read.imports]) }))),
+    verification: Object.freeze([...receipts].map(([id, receipt]) => Object.freeze({ ...receipt, id }))),
+    modifiedPaths: Object.freeze([...state.modifiedPaths]),
+  });
+}
+
+/** Advisory priorities only; these never preserve or manufacture a fresh pass. */
+export function transcriptChangeImpact(snapshot: ObservationSnapshot): string[] {
+  const modified = new Set(snapshot.modifiedPaths);
+  if (!modified.size) return [];
+  const hints: string[] = [];
+  for (const receipt of snapshot.verification) {
+    if (!receipt.cwd || !isAbsolute(receipt.cwd)) continue;
+    const analysis = analyzeShell(receipt.command);
+    if (!analysis.supported) continue;
+    const paths = analysis.segments.flatMap((args) => args.slice(1)).filter((arg) => !arg.startsWith("-") && /(?:\/|\.[A-Za-z0-9]+$)/.test(arg));
+    const intersections = paths.map((path) => pathIdentity(path, receipt.cwd)).filter((path) => modified.has(path));
+    if (intersections.length) hints.push(`Transcript-derived rerun priority (exact command path): receipt ${receipt.id}; runner=${receipt.tool}; cwd=${receipt.cwd}; command=${receipt.command}; modified=${[...new Set(intersections)].join(", ")}`);
+  }
+  for (const read of snapshot.fileReads) {
+    if (read.status !== "succeeded" || !read.cwd || !isAbsolute(read.cwd) || !/(?:test|spec)(?:[./_-]|$)/i.test(read.path)) continue;
+    const matches = read.imports.map((path) => resolve(read.path, "..", path)).filter((path) => modified.has(path));
+    if (matches.length) hints.push(`Transcript-derived rerun priority (explicit relative import): read ${read.id}; test=${read.path}; modified=${[...new Set(matches)].join(", ")}`);
+  }
+  return hints.slice(0, 8);
 }

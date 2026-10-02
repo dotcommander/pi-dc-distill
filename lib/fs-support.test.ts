@@ -89,24 +89,21 @@ describe("withLock", () => {
     expect((threw as Error).message).toContain("Lock held by");
   });
 
-  test("stale lock (dead PID) is taken over and cleaned", async () => {
-    const lockPath = join(locksDir, "d.lock");
-    // PID 4_194_303 exceeds macOS pid_max; kill(pid, 0) → ESRCH.
-    writeFileSync(
-      lockPath,
-      JSON.stringify({ pid: 4_194_303, owner: "dead-holder", acquiredAt: new Date().toISOString() }, null, 2) + "\n",
-      "utf8",
-    );
-    const value = await withLock(lockPath, "resurrector", async () => "taken");
-    expect(value).toBe("taken");
-    expect(await Fs.exists(lockPath)).toBe(false);
+  test.each(["{not json", JSON.stringify({ pid: 4_194_303, owner: "dead", acquiredAt: "old" })])("ambiguous and dead-owner locks remain untouched: %s", async (original) => {
+    const lockPath = join(locksDir, `preserved-${crypto.randomUUID()}.lock`);
+    writeFileSync(lockPath, original);
+    await expect(withLock(lockPath, "contender", async () => {}, { retries: 0 })).rejects.toThrow("Lock held by");
+    expect(readFileSync(lockPath, "utf8")).toBe(original);
   });
 
-  test("unparseable lock is discarded via atomic rename", async () => {
-    const lockPath = join(locksDir, "e.lock");
-    writeFileSync(lockPath, "{not json", "utf8");
-    const value = await withLock(lockPath, "sweeper", async () => "cleaned");
-    expect(value).toBe("cleaned");
+  test("release preserves a lock replaced by a different owner", async () => {
+    const lockPath = join(locksDir, "replaced.lock");
+    const replacement = JSON.stringify({ nonce: "other-owner" });
+    await withLock(lockPath, "original", async () => {
+      rmSync(lockPath);
+      writeFileSync(lockPath, replacement);
+    });
+    expect(readFileSync(lockPath, "utf8")).toBe(replacement);
   });
 
   test("thrown fn still releases the lock", async () => {
@@ -135,4 +132,29 @@ describe("withLock", () => {
     expect(typeof info.acquiredAt).toBe("string");
     expect(existsSync(lockPath)).toBe(false);
   });
+});
+
+
+test("atomic pre-publication failure preserves destination and removes temporary file", async () => {
+  const target = join(dir, "publication-failure.txt");
+  writeFileSync(target, "original");
+  const { writeFileAtomic } = await import("./fs-support.ts");
+  await expect(writeFileAtomic(target, "new", 0, () => { throw new Error("stop publication"); })).rejects.toThrow("stop publication");
+  expect(readFileSync(target, "utf8")).toBe("original");
+  expect(readdirSync(dir).filter(name => name.startsWith("publication-failure.txt.tmp"))).toEqual([]);
+});
+
+test("multiprocess hard-link publication serializes complete critical sections", async () => {
+  const target = join(dir, "multiprocess.txt");
+  const lock = `${target}.lock`;
+  writeFileSync(target, "0");
+  const modulePath = new URL("./fs-support.ts", import.meta.url).pathname;
+  const script = `import {withLock} from ${JSON.stringify(modulePath)}; import {readFile,writeFile} from 'node:fs/promises';
+    for(let i=0;i<4;i++) await withLock(${JSON.stringify(lock)},'child:'+process.pid,async()=>{
+      const value=Number(await readFile(${JSON.stringify(target)},'utf8'));
+      await new Promise(r=>setTimeout(r,5)); await writeFile(${JSON.stringify(target)},String(value+1));
+    },{retries:200,delayMs:5});`;
+  const children = Array.from({length:3}, () => Bun.spawn([process.execPath, "--eval", script], { stdout: "pipe", stderr: "pipe" }));
+  expect(await Promise.all(children.map(child => child.exited))).toEqual([0,0,0]);
+  expect(readFileSync(target,"utf8")).toBe("12");
 });

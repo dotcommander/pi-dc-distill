@@ -150,3 +150,62 @@ test("selected dataDir owns default project recall and logs", async () => {
   expect(existsSync(join(store.projectRoot, "recall.json"))).toBe(true);
   expect(existsSync(join(dataDir, "compact-log.jsonl"))).toBe(true);
 });
+
+function recovered(id: string, ts = "2026-01-01T00:00:00Z"): StoredRecallEntry {
+  return { ...entry(ts, "same"), sessionId: "session", project: "/project",
+    compactionEntryId: id, summaryDigest: "a".repeat(64), attemptId: id };
+}
+
+test("recall replay bridges legacy rows one-to-one, is idempotent and preserves conflicts", async () => {
+  const dataDir = root();
+  const store = new DistillStore({ dataDir, projectIdentity: "/project" });
+  const historical = { ...entry("2025-01-01T00:00:00Z", "same"), sessionId: "session", project: "/project" };
+  await store.persistRecall(historical);
+  await store.persistRecall(historical);
+  await store.reconcileRecall([recovered("one"), recovered("two")]);
+  await store.reconcileRecall([recovered("one"), recovered("two")]);
+  const rows = await store.loadRecall();
+  expect(rows).toHaveLength(2);
+  expect(rows.every(row => row.ts === historical.ts)).toBe(true);
+  expect(rows.map(row => row.compactionEntryId).sort()).toEqual(["one", "two"]);
+  expect((await store.reconcileRecall([{ ...recovered("one"), summaryDigest: "b".repeat(64) }])).conflicts).toHaveLength(1);
+  expect((await store.loadRecall()).find(row => row.compactionEntryId === "one")!.summaryDigest).toBe("a".repeat(64));
+});
+
+test("old-branch replay never promotes original timestamps into the newest ten", async () => {
+  const dataDir = root();
+  const store = new DistillStore({ dataDir, projectIdentity: "/project" });
+  const recent = Array.from({length:10}, (_, i) => recovered(`recent-${i}`, `2026-02-${String(i+1).padStart(2,"0")}T00:00:00Z`));
+  await store.reconcileRecall(recent);
+  await store.reconcileRecall([recovered("old", "2020-01-01T00:00:00Z")]);
+  expect((await store.loadRecall()).map(row => row.compactionEntryId)).not.toContain("old");
+});
+
+test("navigation while waiting for recall lock cancels publication", async () => {
+  const { Fs } = await import("./fs-support.ts");
+  const dataDir = root();
+  const store = new DistillStore({ dataDir, projectIdentity: "/project" });
+  await mkdir(store.projectRoot, {recursive:true});
+  let release!: () => void;
+  let locked!: () => void;
+  const ready = new Promise<void>(resolve => { locked = resolve; });
+  const holding = Fs.withLock(join(store.projectRoot,"recall.json.lock"), "holder", async () => {
+    locked(); await new Promise<void>(resolve => { release = resolve; });
+  });
+  await ready;
+  let current = true;
+  const reconciliation = store.reconcileRecall([recovered("obsolete")], {isCurrent:()=>current});
+  current = false; release(); await holding;
+  expect((await reconciliation).published).toBe(false);
+  expect(await store.loadRecall()).toEqual([]);
+});
+
+test("orphan dumps cannot evict complete before/after pairs", async () => {
+  const dataDir = root();
+  const store = new DistillStore({dataDir});
+  const first = await store.writeDump("2026-01-01T00:00:00Z","input","summary",{enabled:true,maxDumps:2,attemptId:"first"});
+  await writeFile(join(dataDir,"compact-dumps","99999999-orphan-before.jsonl"),"orphan");
+  await store.writeDump("2026-01-02T00:00:00Z","input","summary",{enabled:true,maxDumps:2,attemptId:"second"});
+  expect(existsSync(first!.beforePath)).toBe(true);
+  expect(existsSync(first!.afterPath)).toBe(true);
+});

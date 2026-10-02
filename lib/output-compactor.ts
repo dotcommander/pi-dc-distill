@@ -6,6 +6,7 @@ import { Notify } from "./notify-support.ts";
 import { Path } from "./paths.ts";
 import { Events } from "./events-support.ts";
 import { Fs } from "./fs-support.ts";
+import { verificationFailureIndex, verificationSkipIndex } from "./compiler/verification-observation.ts";
 
 export interface OutputCompactorConfig {
   enabled: boolean;
@@ -21,6 +22,7 @@ export interface CompactPolicy {
   headLines: number;
   tailLines: number;
   maxChars: number;
+  maxLines?: number;
 }
 
 export interface CompactResult {
@@ -69,6 +71,8 @@ interface ContentBlock {
 interface ToolResultEvent {
   toolName?: string;
   toolCallId?: string;
+  parentToolCallId?: string;
+  structuredContent?: unknown;
   input?: unknown;
   content?: ContentBlock[];
   details?: Record<string, unknown>;
@@ -119,11 +123,13 @@ function policyFor(
         headLines: config.errorHeadLines,
         tailLines: config.errorTailLines,
         maxChars: config.maxChars,
+        maxLines: config.maxLines,
       }
     : {
         headLines: config.headLines,
         tailLines: config.tailLines,
         maxChars: config.maxChars,
+        maxLines: config.maxLines,
       };
 }
 
@@ -174,51 +180,91 @@ export function compactText(
   };
 }
 
+interface SelectedLine {
+  index: number;
+  text: string;
+  /** Higher ranks reserve decisive evidence before ordinary matches. */
+  priority?: number;
+}
+
 function boundedSelectedPreview(
   text: string,
-  selected: Array<{ index: number; text: string }>,
+  selected: SelectedLine[],
   policy: CompactPolicy,
 ): CompactResult | undefined {
   if (selected.length === 0) return undefined;
-  const unique = [...new Map(selected.map((line) => [line.index, line])).values()]
-    .sort((a, b) => a.index - b.index);
-  const kept = unique.slice(0, Math.max(1, policy.headLines + policy.tailLines));
-  const sourceLineCount = text.split("\n").length;
-  const bodyLines: string[] = [];
-  let previous = -1;
-  for (const line of kept) {
-    const gap = line.index - previous - 1;
-    if (gap > 0) bodyLines.push(`... omitted ${gap} lines ...`);
-    bodyLines.push(line.text);
-    previous = line.index;
+  const sourceLineCount = countLines(text);
+  const unique = new Map<number, SelectedLine>();
+  for (const line of selected) {
+    if (line.index >= sourceLineCount) continue;
+    if ((unique.get(line.index)?.priority ?? -1) <= (line.priority ?? 0)) unique.set(line.index, line);
   }
-  const tailGap = sourceLineCount - previous - 1;
-  if (tailGap > 0) bodyLines.push(`... omitted ${tailGap} lines ...`);
-  const body = bodyLines.join("\n");
-  const bounded = body.length <= policy.maxChars
-    ? {
-        text: body,
-        originalChars: body.length,
-        originalLines: countLines(body),
-        previewChars: body.length,
-        previewLines: countLines(body),
-      }
-    : compactText(body, policy);
+  if (unique.size === 0) return undefined;
+  const render = (kept: SelectedLine[]) => {
+    const bodyLines: string[] = [];
+    let previous = -1;
+    for (const line of [...kept].sort((a, b) => a.index - b.index)) {
+      const gap = line.index - previous - 1;
+      if (gap > 0) bodyLines.push(`... omitted ${gap} lines ...`);
+      bodyLines.push(line.text);
+      previous = line.index;
+    }
+    const tailGap = sourceLineCount - previous - 1;
+    if (tailGap > 0) bodyLines.push(`... omitted ${tailGap} lines ...`);
+    return bodyLines.join("\n");
+  };
+  const lineBudget = Math.max(1, policy.maxLines ?? policy.headLines + policy.tailLines + 2);
+  const sourceBudget = Math.max(1, policy.headLines + policy.tailLines);
+  const ranked = [...unique.values()].sort((a, b) =>
+    (b.priority ?? 0) - (a.priority ?? 0) ||
+    ((a.priority ?? 0) > 0 ? b.index - a.index : a.index - b.index));
+  const kept: SelectedLine[] = [];
+  for (const original of ranked) {
+    let line = original;
+    if ((line.priority ?? 0) > 0 && line.text.length > policy.maxChars - 64) {
+      const budget = Math.max(1, policy.maxChars - 64);
+      const markerIndex = verificationFailureIndex(line.text);
+      const start = markerIndex >= 0 ? Math.max(0, markerIndex - 20) : Math.max(0, line.text.length - budget);
+      line = { ...line, text: `${start > 0 ? "…" : ""}${line.text.slice(start, start + Math.max(0, budget - 2))}${start + budget - 2 < line.text.length ? "…" : ""}` };
+    }
+    if (kept.length >= sourceBudget) break;
+    const candidate = render([...kept, line]);
+    if (candidate.length <= policy.maxChars && countLines(candidate) <= lineBudget) kept.push(line);
+  }
+  // A single oversized line must remain bounded, too. Preserve its tail (where
+  // terminal causes commonly live) when no complete selected record can fit.
+  let body = render(kept);
+  if (kept.length === 0) {
+    const line = ranked[0];
+    const marker = "…";
+    const available = Math.max(0, policy.maxChars - render([{ ...line, text: "" }]).length - marker.length);
+    body = render([{ ...line, text: marker + line.text.slice(-available || line.text.length) }]);
+    if (body.length > policy.maxChars || countLines(body) > lineBudget) body = policy.maxChars > 0 ? line.text.slice(-policy.maxChars) : "";
+  }
   return {
-    ...bounded,
+    text: body,
     originalChars: text.length,
     originalLines: countLines(text),
+    previewChars: body.length,
+    previewLines: countLines(body),
   };
+}
+
+function decisivePriority(line: string): number {
+  if (verificationFailureIndex(line) >= 0) return 3;
+  if (verificationSkipIndex(line) >= 0) return 2;
+  if (/\b\d+\s+(?:pass(?:ed)?|fail(?:ed)?|failures?|skip(?:ped)?|tests?)\b|\b(?:tests?|pass(?:ed)?|fail(?:ed)?|skip(?:ped)?):\s*\d+\b/i.test(line)) return 2;
+  return 0;
 }
 
 function diagnosticPreview(text: string, policy: CompactPolicy, forced: boolean): CompactResult | undefined {
   const lines = text.split("\n");
-  const selected: Array<{ index: number; text: string }> = [];
+  const selected: SelectedLine[] = [];
   const diagnostic = /(?:^|\b)(?:error|fatal|exception|panic|traceback|warning|failed|failure)(?:\b|:)|\b[A-Z]{1,5}\d{3,5}\b|(?:^|[ (])[^\s:()]+:\d+(?::\d+)?/i;
   for (let index = 0; index < lines.length; index++) {
     if (!diagnostic.test(lines[index])) continue;
     for (let nearby = Math.max(0, index - 1); nearby <= Math.min(lines.length - 1, index + 1); nearby++) {
-      selected.push({ index: nearby, text: lines[nearby] });
+      selected.push({ index: nearby, text: lines[nearby], priority: nearby === index ? Math.max(2, decisivePriority(lines[nearby])) : 1 });
     }
   }
   if (forced) {
@@ -227,14 +273,14 @@ function diagnosticPreview(text: string, policy: CompactPolicy, forced: boolean)
     }
   }
   for (let index = Math.max(0, lines.length - policy.tailLines); index < lines.length; index++) {
-    selected.push({ index, text: lines[index] });
+    selected.push({ index, text: lines[index], priority: Math.max(2, decisivePriority(lines[index])) });
   }
   return boundedSelectedPreview(text, selected, policy);
 }
 
 function diffPreview(text: string, policy: CompactPolicy): CompactResult | undefined {
   const lines = text.split("\n");
-  const selected: Array<{ index: number; text: string }> = [];
+  const selected: SelectedLine[] = [];
   let sawFile = false;
   let sawHunk = false;
   for (let index = 0; index < lines.length; index++) {
@@ -311,8 +357,11 @@ function testPreview(text: string, policy: CompactPolicy): CompactResult | undef
   const runner = /(?:\b(?:bun test|vitest|jest|pytest|go test)\b|\btests?\s+(?:passed|failed|skipped)\b|\bPASS\b|\bFAIL\b)/i;
   if (!runner.test(text)) return undefined;
   const selected = lines
-    .map((line, index) => ({ index, text: line }))
+    .map((line, index) => ({ index, text: line, priority: decisivePriority(line) }))
     .filter(({ text: line }) => /(?:\bFAIL\b|\bfailed\b|\berror\b|\bpanic\b|\btests?\b|\bpass(?:ed)?\b|\bskip(?:ped)?\b|\d+\s+(?:pass|fail|skip))/i.test(line));
+  for (let index = Math.max(0, lines.length - 2); index < lines.length; index++) {
+    selected.push({ index, text: lines[index], priority: Math.max(1, decisivePriority(lines[index])) });
+  }
   return boundedSelectedPreview(text, selected, policy);
 }
 
@@ -322,15 +371,15 @@ function searchPreview(text: string, policy: CompactPolicy): CompactResult | und
   const matches = lines.map((line, index) => ({ line, index, match: match.exec(line) })).filter((item) => item.match);
   if (matches.length < 2) return undefined;
   const perPath = new Map<string, number>();
-  const selected: Array<{ index: number; text: string }> = [];
+  const selected: SelectedLine[] = [];
   for (const item of matches) {
     const path = item.match![1];
     const count = perPath.get(path) ?? 0;
     perPath.set(path, count + 1);
     if (count < 8) selected.push({ index: item.index, text: item.line });
   }
-  for (const [path, count] of perPath) {
-    if (count > 8) selected.push({ index: lines.length + selected.length, text: `... omitted ${count - 8} matches from ${path} ...` });
+  for (let index = Math.max(0, lines.length - policy.tailLines); index < lines.length; index++) {
+    selected.push({ index, text: lines[index], priority: Math.max(2, decisivePriority(lines[index])) });
   }
   return boundedSelectedPreview(text, selected, policy);
 }
@@ -428,7 +477,9 @@ async function writeArtifact(args: {
 
 async function appendLine(path: string, line: string): Promise<void> {
   await mkdir(dirname(path), { recursive: true });
-  await appendFile(path, line, "utf8");
+  await Fs.withLock(`${path}.lock`, `dc-distill-output:${process.pid}`, async () => {
+    await appendFile(path, line, "utf8");
+  });
 }
 
 export function createOutputCompactor(options: OutputCompactorOptions = {}) {
@@ -443,6 +494,7 @@ export function createOutputCompactor(options: OutputCompactorOptions = {}) {
 
   async function onToolResult(event: ToolResultEvent, ctx: any) {
     try {
+      if (event.parentToolCallId !== undefined) return;
       if (!config.enabled || (options.isEnabled && !options.isEnabled(ctx))) return;
       const content = event.content ?? [];
       const texts = textBlocks(content);
@@ -489,6 +541,7 @@ export function createOutputCompactor(options: OutputCompactorOptions = {}) {
       const nonText = content.filter((part) => part.type !== "text");
       return Events.toolPatch({
         content: [...nonText, { type: "text", text: notice }],
+        structuredContent: event.structuredContent,
         details: {
           ...(event.details ?? {}),
           dcDistillOutputCompactor: {

@@ -1,3 +1,5 @@
+import { validateCheckpoint } from "./compiler/checkpoint.ts";
+import { sha256Hex } from "./sha256.ts";
 import { isDistillCompactor, LEGACY_CONTINUATION_MESSAGE_TYPE } from "./legacy.ts";
 import { DISTILL_CONTINUATION_MESSAGE_TYPE } from "./continuation.ts";
 
@@ -7,7 +9,8 @@ import { DISTILL_CONTINUATION_MESSAGE_TYPE } from "./continuation.ts";
  * Derives the continuation state of the latest autonomous dc-distill
  * compaction from active-branch session entries, so a restart, reload, or
  * tree switch can redeliver or suppress the continuation without trusting
- * process memory. Journaling comes from the ledger itself: the autonomous
+ * process memory after a true process restart. Same-process uncertain submissions
+ * require the separate process fence registry. Journaling comes from the ledger itself: the autonomous
  * compaction entry's details and the persisted `dc-distill-continuation`
  * custom message. No I/O, no clock, deterministic.
  */
@@ -29,6 +32,7 @@ export interface ContinuationRecovery {
 export interface RecoveryEntryLike {
   type?: string;
   customType?: string;
+  summary?: string;
   details?: unknown;
   message?: { role?: string };
 }
@@ -48,7 +52,7 @@ function detailsOf(entry: RecoveryEntryLike): Record<string, unknown> {
 function autonomousAttemptId(entry: RecoveryEntryLike): string | null {
   if (entry.type !== "compaction") return null;
   const details = detailsOf(entry);
-  if (!isDistillCompactor(details.compactor)) return null;
+  if (!isDistillCompactor(details.compactor) || ![8, 9, 10, 11, 12, 13].includes(details.version as number)) return null;
   if (details.autonomous !== true) return null;
   const attemptId = details.attemptId;
   return typeof attemptId === "string" && attemptId.length > 0 ? attemptId : null;
@@ -70,7 +74,16 @@ export function recoverContinuation(entries: RecoveryEntryLike[]): ContinuationR
   let attemptId: string | null = null;
   let compactionIndex = -1;
   for (let i = entries.length - 1; i >= 0; i--) {
-    const found = autonomousAttemptId(entries[i]!);
+    const entry = entries[i]!;
+    const details = detailsOf(entry);
+    if (entry.type === "compaction" && isDistillCompactor(details.compactor) && details.version === 13) {
+      try {
+        if (typeof details.checkpointDigest !== "string" || typeof entry.summary !== "string"
+          || sha256Hex(entry.summary) !== details.summaryDigest) return { ...NONE };
+        validateCheckpoint(details.checkpoint, details.checkpointDigest);
+      } catch { return { ...NONE }; }
+    }
+    const found = autonomousAttemptId(entry);
     if (found !== null) {
       attemptId = found;
       compactionIndex = i;
@@ -80,6 +93,12 @@ export function recoverContinuation(entries: RecoveryEntryLike[]): ContinuationR
   if (attemptId === null || compactionIndex === -1) return { ...NONE };
 
   const afterCompaction = entries.slice(compactionIndex + 1);
+  // A later user objective or any later compaction replaces the older intent,
+  // even when delivery had not yet been acknowledged in the journal.
+  if (afterCompaction.some((entry) => entry.type === "compaction"
+    || (entry.type === "message" && entry.message?.role === "user"))) {
+    return { phase: "answered", action: "none", attemptId };
+  }
   const deliveryIndex = afterCompaction.findIndex((entry) => matchesContinuationAttempt(entry, attemptId));
   if (deliveryIndex === -1) {
     return { phase: "committed", action: "deliver", attemptId };

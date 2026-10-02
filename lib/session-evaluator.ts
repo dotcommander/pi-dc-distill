@@ -1,6 +1,10 @@
 import { createCacheRun, protectCacheOutput, type CacheRun } from "./cache-runs.ts";
 import { sha256Hex } from "./sha256.ts";
-import { mkdir, readFile, writeFile } from "node:fs/promises";
+import { mkdir, readFile, readdir, writeFile } from "node:fs/promises";
+import { fileURLToPath } from "node:url";
+import { spawnSync } from "node:child_process";
+import { estimateTokens } from "./sdk.ts";
+import { TARGET_RESUME_SUMMARY_CODE_POINTS } from "./compiler/helpers.ts";
 import { resolve } from "node:path";
 import { canonicalRecordFromMessage } from "./compaction-source.ts";
 import { compileSessionJsonl, type LocalCompileResult } from "./local-compact.ts";
@@ -17,6 +21,8 @@ export interface SessionEvaluationOptions {
   historicalFile?: string;
   focus?: string;
   force?: boolean;
+  /** Diagnostic compatibility default is true. */
+  recallEnabled?: boolean;
 }
 
 export interface SessionEvaluationReport {
@@ -30,6 +36,17 @@ export interface SessionEvaluationReport {
     id?: string;
     timestamp?: string;
   };
+  measurements: {
+    semantics: { characters: "unicode-code-points"; lines: "logical-lines-without-terminal-empty-line"; tokens: "Pi SDK estimateTokens on summary text only; not rebuilt host context" };
+    input: TextMeasurements;
+    current: SummaryMeasurements;
+    historical?: SummaryMeasurements;
+    inputToCurrentReductionPct: { bytes: number; characters: number; lines: number };
+    historicalToCurrentReductionPct?: { bytes: number; characters: number; lines: number; summaryTokens: number };
+  };
+  compiler: { focus: string | null; recallEnabled: boolean };
+  provenance: Awaited<ReturnType<typeof evaluationProvenance>>;
+  historicalHostContextMetrics?: { source: "selected-compaction-details"; tokensBefore?: number; tokensAfter?: number; summaryTokens?: number; tokensAfterSource?: string };
   input: { entries: number; bytes: number; sha256: string; file: string };
   current: Pick<LocalCompileResult, "inputDigest" | "summaryDigest" | "digestScope" | "usefulRecordCount"> & {
     characters: number;
@@ -44,6 +61,73 @@ export interface SessionEvaluationReport {
     bodyMatchesCurrent: boolean;
     file: string;
     sourceFile?: string;
+  };
+}
+
+interface TextMeasurements {
+  bytes: number;
+  characters: number;
+  lines: number;
+}
+
+interface SummaryMeasurements extends TextMeasurements {
+  summaryTokens: number;
+  budget: { operatingCodePoints: number; hardCodePoints: number; withinOperatingTarget: boolean; withinHardLimit: boolean };
+}
+
+/** A final newline terminates a line; it does not create another empty line. */
+export function measureEvaluationText(text: string): TextMeasurements {
+  return {
+    bytes: Buffer.byteLength(text),
+    characters: Array.from(text).length,
+    lines: text.length === 0 ? 0 : text.split(/\r\n|\r|\n/).length - (/[\r\n]$/.test(text) ? 1 : 0),
+  };
+}
+
+function measureSummary(summary: string): SummaryMeasurements {
+  const measurement = measureEvaluationText(summary);
+  return {
+    ...measurement,
+    summaryTokens: estimateTokens({ role: "user", content: summary, timestamp: 0 }),
+    budget: {
+      operatingCodePoints: TARGET_RESUME_SUMMARY_CODE_POINTS,
+      hardCodePoints: 65_536,
+      withinOperatingTarget: measurement.characters <= TARGET_RESUME_SUMMARY_CODE_POINTS,
+      withinHardLimit: measurement.characters <= 65_536,
+    },
+  };
+}
+
+function reduction(before: number, after: number): number {
+  return before === 0 ? 0 : (1 - after / before) * 100;
+}
+
+async function evaluationProvenance() {
+  const root = fileURLToPath(new URL("../", import.meta.url));
+  const sources = ["package.json", "bun.lock", "bin/dc-distill-session.ts", "lib/bm25.ts", "lib/legacy.ts", "lib/json-object-keys.ts", "lib/local-compact.ts", "lib/unicode.ts", "lib/sha256.ts", "lib/handoff.ts", "lib/compaction-source.ts", "lib/session-evaluator.ts", "lib/sdk.ts",
+    ...(await readdir(resolve(root, "lib/compiler"))).filter((name) => name.endsWith(".ts") && !name.endsWith(".test.ts")).map((name) => `lib/compiler/${name}`),
+  ].sort();
+  const files = await Promise.all(sources.map(async (file) => ({ file, sha256: sha256Hex(await readFile(resolve(root, file), "utf8")) })));
+  const pkg = JSON.parse(await readFile(resolve(root, "package.json"), "utf8"));
+  const sdkPackages = ["@earendil-works/pi-coding-agent", "@earendil-works/pi-ai", "@earendil-works/pi-agent-core", "@earendil-works/pi-tui"];
+  const sdkVersions = Object.fromEntries(await Promise.all(sdkPackages.map(async (name) => {
+    const sdk = JSON.parse(await readFile(new URL("../package.json", import.meta.resolve(name)), "utf8"));
+    return [name, String(sdk.version)];
+  })));
+  const git = (args: string[]) => {
+    const result = spawnSync("git", args, { cwd: root, encoding: "utf8" });
+    return result.status === 0 ? result.stdout.trimEnd() : null;
+  };
+  const status = git(["status", "--porcelain", "--untracked-files=normal"]);
+  return {
+    sourceFingerprint: sha256Hex(JSON.stringify(files)),
+    sourceFiles: files,
+    packageVersion: String(pkg.version),
+    sdkVersion: sdkVersions["@earendil-works/pi-coding-agent"],
+    sdkVersions,
+    revision: git(["rev-parse", "HEAD"]),
+    dirty: status === null ? null : status.length > 0,
+    gitStatus: status === null ? null : status.split("\n").filter(Boolean),
   };
 }
 
@@ -118,7 +202,7 @@ export async function evaluateSession(options: SessionEvaluationOptions): Promis
     })
     : inputEntries.map(({ raw }) => raw);
   const input = `${inputRecords.join("\n")}\n`;
-  const result = compileSessionJsonl(input, options.focus);
+  const result = compileSessionJsonl(input, options.focus, undefined, options.recallEnabled ?? true);
   const historicalSourceFile = options.historicalFile ? resolve(options.historicalFile) : undefined;
   const historical = historicalSourceFile
     ? await readFile(historicalSourceFile, "utf8")
@@ -133,9 +217,40 @@ export async function evaluateSession(options: SessionEvaluationOptions): Promis
   const ordinal = selected
     ? entries.filter(({ value, line }) => value.type === "compaction" && line <= selected.line).length
     : undefined;
+  const inputMeasurement = measureEvaluationText(input);
+  const currentMeasurement = measureSummary(result.summary);
+  const historicalMeasurement = historical === undefined ? undefined : measureSummary(historical);
+  const details = selected?.value.details as Record<string, unknown> | undefined;
+  const hostMetrics = details && typeof details === "object" && !Array.isArray(details)
+    ? Object.fromEntries(["tokensAfter", "summaryTokens"].filter((key) => typeof details[key] === "number").map((key) => [key, details[key]]))
+    : {};
   const report: SessionEvaluationReport = {
     schemaVersion: 1,
     sessionFile,
+    compiler: { focus: options.focus ?? null, recallEnabled: options.recallEnabled ?? true },
+    provenance: await evaluationProvenance(),
+    measurements: {
+      semantics: { characters: "unicode-code-points", lines: "logical-lines-without-terminal-empty-line", tokens: "Pi SDK estimateTokens on summary text only; not rebuilt host context" },
+      input: inputMeasurement,
+      current: currentMeasurement,
+      ...(historicalMeasurement ? { historical: historicalMeasurement, historicalToCurrentReductionPct: {
+        bytes: reduction(historicalMeasurement.bytes, currentMeasurement.bytes),
+        characters: reduction(historicalMeasurement.characters, currentMeasurement.characters),
+        lines: reduction(historicalMeasurement.lines, currentMeasurement.lines),
+        summaryTokens: reduction(historicalMeasurement.summaryTokens, currentMeasurement.summaryTokens),
+      } } : {}),
+      inputToCurrentReductionPct: {
+        bytes: reduction(inputMeasurement.bytes, currentMeasurement.bytes),
+        characters: reduction(inputMeasurement.characters, currentMeasurement.characters),
+        lines: reduction(inputMeasurement.lines, currentMeasurement.lines),
+      },
+    },
+    ...(selected ? { historicalHostContextMetrics: {
+      source: "selected-compaction-details" as const,
+      ...(typeof selected.value.tokensBefore === "number" ? { tokensBefore: selected.value.tokensBefore } : {}),
+      ...hostMetrics,
+      ...(typeof details?.tokensAfterSource === "string" ? { tokensAfterSource: details.tokensAfterSource } : {}),
+    } } : {}),
     mode: selected ? "prefix-before-compaction" : "whole-session",
     inputFormat: legacyMessageInput ? "legacy-message-jsonl" : "session-jsonl",
     ...(selected && ordinal ? {

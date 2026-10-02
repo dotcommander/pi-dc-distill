@@ -32,6 +32,8 @@ export interface CompactEvent {
   after: number;
   rebuiltMessageAfter?: number;
   fullContextAfter?: number;
+  tokenObservation?: "observed" | "unavailable";
+  observedTokenDelta?: number;
   fullContextAfterSource?: "pi-post-rebuild-context-usage";
   tokenSource?: "pi-rebuilt-message-estimate";
   removed: number;

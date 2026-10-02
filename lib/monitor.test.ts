@@ -366,3 +366,15 @@ describe("Monitor", () => {
     expect(monitor.state.compactionCount).toBe(1) // unchanged
   })
 })
+
+test("nonfinite usage cannot poison the last finite estimate or API count", () => {
+  const monitor = new Monitor();
+  monitor.syncFromPi(123_000);
+  monitor.recordApiUsage({ totalTokens: 122_000 });
+  for (const tokens of [NaN, Infinity, -Infinity]) {
+    expect(monitor.syncFromPi(tokens)).toBe(false);
+    expect(monitor.state.tokenEstimate).toBe(123_000);
+    monitor.recordApiUsage({ totalTokens: tokens });
+    expect(monitor.state.apiTokenCount).toBe(122_000);
+  }
+});

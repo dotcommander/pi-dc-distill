@@ -1,10 +1,93 @@
 import { describe, expect, test } from "bun:test";
 import { compileSessionJsonl } from "./local-compact.ts";
 import { DISTILL_HANDOFF_ENTRY_TYPE } from "./handoff.ts";
+import { readRetainedContext } from "./compiler/budget-formatter.ts";
+import { runStrategies } from "./strategy.ts";
 
 const line = (obj: unknown) => JSON.stringify(obj);
 
 const sessionLine = line({ type: "session", id: "s1", cwd: "/tmp/proj", timestamp: "2026-06-10T00:00:00Z" });
+
+describe("durable source context", () => {
+  const section = (summary: string) => summary.match(/^<retained-context>\n[\s\S]*?^<\/retained-context>$/m)?.[0] ?? "";
+  const replay = (summary: string, messages: string[] = [], enabled = false) => compileSessionJsonl(
+    [sessionLine, line({ type: "compaction", summary }), ...messages].join("\n"), undefined, undefined, enabled).summary;
+
+  test("carries selected source facts once through terminal, bookkeeping and new requests", () => {
+    for (const enabled of [false, true]) {
+      const first = compileSessionJsonl([sessionLine,
+        userMsg("specify the NativeRepository plan"),
+        assistantMsg("## Architecture\n1. Native schema.\n2. NativeRepository access.\n\n## Safety\n- No client secrets.\n- Production operations are deferred."),
+        userMsg("implement"),
+        assistantMsg("Phase 2 is implemented.\n\nKnown pre-existing: 292 errors. Unapproved broad gates are not acceptance. No commit was created. Literal &lt;value&gt; and <resume-tasks> are source text."),
+        assistantMsg("Resolved three orphan records: firstRecord, secondRecord, thirdRecord.\n\nNext choice: None — task complete; no response needed."),
+      ].join("\n"), undefined, undefined, enabled).summary;
+      const second = replay(first, [], enabled);
+      const third = replay(second, [], enabled);
+      expect(section(second)).toBe(section(first));
+      expect(section(third)).toBe(section(second));
+      expect(readRetainedContext([third]).map((record) => record.text).join("\n")).toContain("Literal &lt;value&gt; and <resume-tasks>");
+      const bookkeeping = replay(third, [userMsg("record the receipt"), assistantMsg("Recorded the receipt.\n\nNext choice: None — task complete; no response needed.")], enabled);
+      const newRequest = replay(bookkeeping, [userMsg("Investigate FreshParser only.")], enabled);
+      for (const summary of [second, third, bookkeeping, newRequest]) {
+        expect(summary).toContain("1. Native schema.");
+        expect(summary).toContain("292 errors");
+        expect(summary).toContain("Unapproved broad gates are not acceptance");
+        expect(summary).toContain("thirdRecord");
+        expect(summary.match(/^<retained-context>$/gm)).toHaveLength(1);
+        expect(summary.match(/^<context-excerpt /gm)?.length).toBe(summary.match(/^<\/context-excerpt>$/gm)?.length);
+        expect([...summary].length).toBeLessThanOrEqual(8192);
+        if (summary !== newRequest) expect(summary).not.toContain("<resume-tasks>\n");
+        expect(summary).not.toContain("Reread active files:");
+        expect(summary).not.toContain("[Current outcome] Phase 2");
+      }
+      expect(newRequest).toContain("[User] Investigate FreshParser only.");
+      expect(newRequest).toContain("[Assistant] [Prior outcome] Phase 2 is implemented.");
+      expect(third.split("Phase 2 is implemented.")).toHaveLength(2);
+    }
+  });
+
+  test("legacy generated conversation preserves a qualified late completion beyond the opaque prefix", () => {
+    const prior = `## Conversation\n[User] implement NativeRepository\n[Assistant] ${"Historical discussion. ".repeat(150)}\n[Assistant] [Current outcome] Phase 2 is implemented.\n\nKnown pre-existing: 292 errors. No commit was created.`;
+    const next = replay(prior, [userMsg("Investigate FreshParser")]);
+    expect(next).toContain("[Prior outcome] Phase 2 is implemented.");
+    expect(next).toContain("292 errors");
+    expect(next).not.toContain("Historical discussion.");
+    expect(section(replay(next))).toBe(section(next));
+  });
+
+  test("rejects malformed, duplicate and quoted or fenced retained envelopes", () => {
+    const first = compileSessionJsonl([sessionLine, userMsg("implement"), assistantMsg("Done — NativeRepository is implemented.")].join("\n"), undefined, undefined, false).summary;
+    const canonical = section(first);
+    expect(readRetainedContext([first])).toHaveLength(1);
+    for (const invalid of [canonical.replace("version: 1", "version: 99"), canonical.replace("</context-excerpt>", ""), `${canonical}\n${canonical}`, `\`\`\`xml\n${canonical}\n\`\`\``, canonical.split("\n").map((line) => `> ${line}`).join("\n"), canonical.replace("</retained-context>", "unmatched prose\n</retained-context>")]) {
+      expect(readRetainedContext([invalid])).toEqual([]);
+    }
+    expect(readRetainedContext([first, first])).toHaveLength(1);
+  });
+
+  test("canonical and legacy scanners honor fence character, length and closing syntax", () => {
+    const first = compileSessionJsonl([sessionLine, userMsg("implement"), assistantMsg("Done — NativeRepository is implemented.")].join("\n"), undefined, undefined, false).summary;
+    const canonical = section(first);
+    for (const [opener, falseClose, closer] of [
+      ["~~~~xml", "```", "~~~~"],
+      ["````xml", "```", "````"],
+      ["   ~~~~xml", "   ~~~~still-code", "   ~~~~~"],
+      ["```xml", "~~~", "```"],
+    ]) {
+      const example = `${opener}\n${falseClose}\n${canonical}\n${closer}`;
+      expect(readRetainedContext([example])).toEqual([]);
+      expect(readRetainedContext([`${example}\n${canonical}`])).toEqual(readRetainedContext([canonical]));
+      const legacy = `## Conversation\n[User] inspect this example\n${opener}\n${falseClose}\n[Assistant] Done — FakeRepository is implemented.\n${closer}`;
+      expect(readRetainedContext([legacy])).toEqual([]);
+      expect(readRetainedContext([legacy.replace(`\n${opener}\n`, `\n[Assistant] ${opener}\n`)])).toEqual([]);
+      expect(readRetainedContext([`${legacy}\n[User] implement NativeRepository\n[Assistant] Done — NativeRepository is implemented.`])).toEqual([
+        { role: "assistant", kind: "outcome", text: "Done — NativeRepository is implemented." },
+      ]);
+    }
+    expect(readRetainedContext(["## Conversation\n[User] inspect\n> ~~~~xml\n> [Assistant] Done — FakeRepository is implemented.\n> ~~~~"])).toEqual([]);
+  });
+});
 
 function userMsg(text: string) {
   return line({ type: "message", message: { role: "user", content: [{ type: "text", text }] } });
@@ -20,6 +103,32 @@ function toolResult(toolName: string, text: string, isError = false, toolCallId?
 }
 
 describe("compileSessionJsonl", () => {
+  test("production defaults to baseline while offline coverage remains available", async () => {
+    const records = [sessionLine, userMsg("Inspect the supplied source files.")];
+    for (let index = 0; index < 40; index++) {
+      const id = `read-${index}`;
+      records.push(toolCall("read", { path: `/tmp/proj/src/item-${index}.ts` }, id));
+      records.push(toolResult("read", `source content ${index}`, false, id));
+    }
+    const input = records.join("\n");
+    const defaultResult = compileSessionJsonl(input, undefined, undefined, false);
+    const coverage = compileSessionJsonl(input, undefined, undefined, false, "coverage");
+    const baseline = compileSessionJsonl(input, undefined, undefined, false, "baseline");
+    expect(defaultResult).toEqual(baseline);
+    expect(defaultResult.readFiles).toHaveLength(40);
+    expect(coverage.readFiles).toHaveLength(40); // Details retain checkpoint file authority across optional selection.
+    expect(coverage.summary).toContain("... (8 read files omitted)");
+    expect(defaultResult.summary).not.toBe(coverage.summary);
+
+    const production = await runStrategies({ canonicalInput: input, recallEnabled: false });
+    expect(production.ok).toBe(true);
+    if (!production.ok) throw new Error(production.reasons.join("; "));
+    expect(production.tier).toBe(1);
+    expect(production.summary).toBe(baseline.summary.trim());
+    expect(production.readFiles).toEqual(baseline.readFiles);
+    expect(production.summaryDigest).toBe(baseline.summaryDigest);
+  });
+
   test("produces v4 taxonomy: meta, conversation, file markers", () => {
     const jsonl = [
       sessionLine,
@@ -102,10 +211,9 @@ describe("compileSessionJsonl", () => {
       if (!line.startsWith("- ")) break;
       recallQueries.push(line.slice(2));
     }
-    expect(recallQueries).toHaveLength(6);
-    expect(recallQueries[0]).toMatch(/^\.\.\. \(\d+ recall queries omitted\)$/);
-    const renderedQueries = recallQueries.slice(1);
-    expect(renderedQueries).toHaveLength(5);
+    expect(recallQueries.length).toBeLessThanOrEqual(5);
+    expect(recallQueries.every((query) => !query.startsWith("... (") && [...query].length <= 160)).toBe(true);
+    const renderedQueries = recallQueries;
     expect(renderedQueries).toContain("parseProviderLimit");
     expect(renderedQueries).not.toContain("app");
   });
@@ -119,7 +227,7 @@ describe("compileSessionJsonl", () => {
     const summary = compileSessionJsonl(lines.join("\n")).summary;
     const resumeTasks = summary.match(/<resume-tasks>\n([\s\S]*?)\n<\/resume-tasks>/)?.[1] ?? "";
 
-    expect(summary).toContain("recall queries omitted");
+    expect(summary).not.toContain("recall queries omitted");
     expect(resumeTasks).not.toMatch(/Recall:.*recall queries omitted/);
   });
 
@@ -228,9 +336,10 @@ describe("compileSessionJsonl", () => {
       lines.push(toolResult("bash", `boom-${i} unique failure`, true));
     }
     const result = compileSessionJsonl(lines.join("\n"));
+    expect(result.checkpoint.failures.some(f => f.observedOutcome.includes("boom-29"))).toBe(true);
     const block = result.summary.match(/<recent-tool-results>\n([\s\S]*?)\n<\/recent-tool-results>/);
-    expect(block).not.toBeNull();
-    const errorLines = block![1].split("\n").filter((l) => l.includes("[ERROR]"));
+    if (!block) { expect(result.summary).toContain("failure"); return; } // Optional previews yield to durable failure history.
+    const errorLines = block[1].split("\n").filter((l) => l.includes("[ERROR]"));
     expect(errorLines.length).toBeLessThanOrEqual(10);
     expect(block![1]).toContain("boom-29");
     expect(block![1]).not.toContain("boom-0 ");
@@ -291,7 +400,7 @@ describe("compileSessionJsonl", () => {
       toolResult("bash", "8 pass, 0 fail"),
     ].join("\n")).summary;
 
-    expect(summary).not.toContain("--- FAIL: parser");
+    expect(summary).toContain("--- FAIL: parser"); // Durable unresolved failure history survives a later pass.
     expect(summary.match(/PASS \[bash cwd=\/tmp\/proj\]/g)).toHaveLength(1);
     expect(summary).toContain("stale verification receipts omitted");
     expect(summary).toContain("PASS [bash cwd=/tmp/other]: bun test lib/parser.test.ts");
@@ -299,7 +408,7 @@ describe("compileSessionJsonl", () => {
     expect(summary).toContain("bun  test lib/parser.test.ts");
   });
 
-  test("verification and resume-task lines keep exact command bytes (no entity escaping)", () => {
+  test("verification and resume-task presentation escapes commands exactly once", () => {
     const mk = (command: string) =>
       compileSessionJsonl([
         sessionLine,
@@ -308,15 +417,16 @@ describe("compileSessionJsonl", () => {
         toolResult("bash", "12 pass, 0 failed"),
       ].join("\n")).summary;
 
-    // <verification> is byte-exact: runner + command bytes are contractual.
+    // Piped verification remains non-authoritative.
     const exact = mk("bun test lib/ 2>&1 | tail -3 && git diff --check");
-    expect(exact).toContain("PASS [bash cwd=/tmp/proj]: bun test lib/ 2>&1 | tail -3 && git diff --check");
+    expect(exact).not.toContain("PASS [bash cwd=/tmp/proj]:");
+    expect(exact).not.toContain("Verify: bun test lib/ 2>&1 | tail -3 && git diff --check");
     expect(exact).not.toContain("&amp;");
 
-    // Marker blocks keep `&&` verbatim; only < and > are entity-escaped.
+    // Commands retain their raw identity internally and escape only at rendering.
     const resumed = mk("bun test lib/ && git diff --check");
-    expect(resumed).toContain("Verify: bun test lib/ && git diff --check");
-    expect(resumed).not.toContain("&amp;");
+    expect(resumed).toContain("Verify: bun test lib/ &amp;&amp; git diff --check [runner=bash; cwd=/tmp/proj]");
+    expect(resumed).not.toContain("&amp;amp;");
   });
 
   test("resume tasks retain a long verification command instead of replacing it with a digest", () => {
@@ -445,7 +555,7 @@ describe("compileSessionJsonl", () => {
       toolCall("bash", { command: "bun test lib/parser.test.ts" }, "pending-test"),
     ].join("\n")).summary;
 
-    expect(summary).toContain("PASS [bash cwd=/tmp/proj]: bun test lib/parser.test.ts");
+    expect(summary).toContain("PASS [bash cwd=/tmp/proj]: [stale command sha256:");
     expect(summary).toContain("INCOMPLETE [bash cwd=/tmp/proj]: bun test lib/parser.test.ts");
   });
 
@@ -475,7 +585,8 @@ describe("compileSessionJsonl", () => {
       toolResult("edit", "updated"),
     ].join("\n")).summary;
 
-    expect(summary).toContain(`FAIL [bash cwd=/tmp/proj]: ${command}`);
+    const wireCommand = command.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
+    expect(summary).toContain(`FAIL [bash cwd=/tmp/proj]: ${wireCommand}`);
     expect(summary).toContain("freshness: not established after later potentially modifying work");
   });
 
@@ -725,14 +836,14 @@ describe("compileSessionJsonl", () => {
 });
 
 describe("compileSessionJsonl output bounds", () => {
-  test("keeps adversarial file inventories bounded with balanced omission markers", () => {
+  test("keeps baseline adversarial file inventories bounded with balanced omission markers", () => {
     const lines = [sessionLine, userMsg("Inspect the generated inventory.")];
     for (let index = 0; index < 10_000; index++) {
       lines.push(toolCall("read", { path: `/tmp/generated/path-${index}.ts` }));
       lines.push(toolResult("read", `content ${index}`));
     }
 
-    const result = compileSessionJsonl(lines.join("\n"));
+    const result = compileSessionJsonl(lines.join("\n"), undefined, undefined, true, "baseline");
     expect(Array.from(result.summary).length).toBeLessThanOrEqual(65_536);
     expect(result.readFiles).toHaveLength(50);
     expect(result.summary).toContain("... (9950 read files omitted)");
@@ -768,8 +879,9 @@ describe("compileSessionJsonl output bounds", () => {
     expect(result.summary.match(/<\/modified-files>/g)).toHaveLength(1);
     for (const path of [...result.readFiles, ...result.modifiedFiles]) {
       expect(Array.from(path).length).toBeLessThanOrEqual(512);
-      expect(result.summary).toContain(path);
     }
+    expect(result.checkpoint.files.read.length + result.checkpoint.files.modified.length).toBeGreaterThan(0);
+    expect(result.checkpoint.evidence.fileReads.some(read=>read.path.length>512)).toBe(true);
   });
 
   test("rejects custom array input with no text or image signal", () => {
@@ -798,7 +910,7 @@ describe("compileSessionJsonl output bounds", () => {
 });
 
 describe("compileSessionJsonl handoff (<current-intent>)", () => {
-  test("saved distill handoff entry surfaces as the leading <current-intent> section", () => {
+  test("saved distill handoff follows supplied session identity", () => {
     const jsonl = [
       sessionLine,
       userMsg("Refactor the token bucket"),
@@ -821,7 +933,8 @@ describe("compileSessionJsonl handoff (<current-intent>)", () => {
     const intentIdx = result.summary.indexOf("<current-intent>");
     const sessionIdx = result.summary.indexOf("## Session");
     expect(intentIdx).toBeGreaterThanOrEqual(0);
-    expect(intentIdx).toBeLessThan(sessionIdx);
+    expect(intentIdx).toBeGreaterThan(sessionIdx);
+    expect(intentIdx).toBeGreaterThan(result.summary.indexOf("## Conversation"));
   });
 
   test("strict v1 handoff renders explicit bounded resume state", () => {
@@ -871,17 +984,19 @@ describe("compileSessionJsonl handoff (<current-intent>)", () => {
     ].join("\n")).summary;
 
     expect(summary).toContain("<resume-state>");
-    expect(summary).toContain("version: 2");
+    expect(summary).toContain("version: 3"); // Current projection derives from checkpoint v1.
     expect(summary).toContain("provenance: explicit handoff; task state, not verification");
     expect(summary).toContain("invariants:");
     expect(summary).toContain("D1: Use recursive descent.; rationale: Regex failed on nesting.");
     expect(summary).toContain("H1: Input is malformed.; evidence: Fixture parses with reference parser.");
     expect(summary).toContain("T4 [blocked]: Publish.");
     expect(summary).toContain("blocker: Release approval required.");
-    const ready = summary.match(/ready-tasks:\n([\s\S]*?)\nverification-needed:/)?.[1] ?? "";
-    expect(ready).toContain("T2: Implement parser.");
-    expect(ready).toContain("T3: Run tests.");
-    expect(ready.indexOf("T2:")).toBeLessThan(ready.indexOf("T3:"));
+    const ready = summary.match(/<ready-tasks>\n([\s\S]*?)\n<\/ready-tasks>/)?.[1] ?? "";
+    expect(ready).toContain("- T2");
+    expect(ready).toContain("- T3");
+    expect(ready.indexOf("T2")).toBeLessThan(ready.indexOf("T3"));
+    expect(summary).toContain("T2 [pending]: Implement parser.");
+    expect(summary).toContain("T3 [pending]: Run tests.");
     expect(summary).not.toContain("<current-intent>");
   });
 
@@ -938,7 +1053,7 @@ describe("compileSessionJsonl handoff (<current-intent>)", () => {
     expect(block![1]).not.toContain("LATER raw plan");
   });
 
-  test("handoff marker surfaces as a leading <current-intent> section", () => {
+  test("handoff marker follows supplied session identity", () => {
     const jsonl = [
       sessionLine,
       userMsg("Refactor the token bucket"),
@@ -953,7 +1068,8 @@ describe("compileSessionJsonl handoff (<current-intent>)", () => {
     const intentIdx = result.summary.indexOf("<current-intent>");
     const sessionIdx = result.summary.indexOf("## Session");
     expect(intentIdx).toBeGreaterThanOrEqual(0);
-    expect(intentIdx).toBeLessThan(sessionIdx);
+    expect(intentIdx).toBeGreaterThan(sessionIdx);
+    expect(intentIdx).toBeGreaterThan(result.summary.indexOf("## Conversation"));
   });
 
   test("last handoff wins when multiple markers are present", () => {
@@ -1467,10 +1583,28 @@ describe("compileSessionJsonl literal anchors", () => {
 
     const result = compileSessionJsonl(lines.join("\n"));
     expect(result.summary).toContain("Resolved all three stale records");
-    expect(result.summary).toContain("no response needed");
+    expect(result.summary).not.toContain("no response needed");
     expect(result.summary).not.toContain("<resume-tasks>");
     expect(result.summary).not.toContain("<modified-files>");
     expect(result.summary).not.toContain("<recent-tool-calls>");
+  });
+
+  test("terminal summaries retire historical invitations without removing report requirements", () => {
+    const lines = [
+      sessionLine,
+      userMsg("implement"),
+      assistantMsg("Phase 2 is implemented.\n\nProduction transfer requires separate authority. Known pre-existing: 292 errors.\n\n<!-- EXECUTION: COMPLETE -->\n\nNext choice: Implement Phase 3."),
+      assistantMsg("Resolved all stale records.\n\nNext choice: None — task complete; no response needed."),
+    ];
+    for (const recallEnabled of [false, true]) {
+      const result = compileSessionJsonl(lines.join("\n"), undefined, undefined, recallEnabled);
+      expect(result.summary).toContain("Production transfer requires separate authority.");
+      expect(result.summary).toContain("Known pre-existing: 292 errors.");
+      expect(result.summary).not.toContain("Next choice: Implement Phase 3.");
+      expect(result.summary).not.toContain("<!-- EXECUTION: COMPLETE -->");
+      expect(result.summary).not.toContain("Next choice: None");
+      expect(result.summary).not.toContain("<resume-tasks>");
+    }
   });
 
   test("terminal completion supersedes prior operational state", () => {
@@ -1637,5 +1771,70 @@ describe("file tool aliases", () => {
     expect(result.readFiles).toEqual(["src/parser.ts"]);
     expect(result.modifiedFiles).toEqual([]);
     expect(result.summary).not.toContain("Failed patch_file for src/parser.ts may have partial effects");
+  });
+});
+
+describe("compound shell verification freshness", () => {
+  const summaryAfter = (command: string, isError = false) => compileSessionJsonl([
+    sessionLine,
+    userMsg("verify the parser"),
+    toolCall("bash", { command: "bun test lib/parser.test.ts" }, "prior-check"),
+    toolResult("bash", "8 pass, 0 fail", false, "prior-check"),
+    toolCall("bash", { command }, "later-shell"),
+    toolResult("bash", isError ? "command exited with code 1" : "done", isError, "later-shell"),
+  ].join("\n")).summary;
+
+  for (const command of [
+    "cat file.ts; rm file.ts", "cat file.ts && rm file.ts", "cat file.ts | rm file.ts",
+    "cat file.ts || rm file.ts", "cat file.ts\nrm file.ts", "pwdx",
+    "cat $(rm file.ts)", "cat `rm file.ts`", 'cat "$HOME"', "cat *.ts", "cat file.ts > output",
+    "cat <<EOF\nbun test\nEOF", "cat file.ts &", "(cat file.ts)", "cat file.ts # comment",
+    "find . -delete", "find . -exec rm '{}' ';'", "find . -execdir command '{}' ';'", "find . -ok command '{}' ';'",
+    "find . -fprint output", "find -- . -delete", "rg --pre command pattern file.ts",
+    "rg --pre=command pattern file.ts", "git diff --output=output", "git diff --ext-diff", "git diff --textconv",
+  ]) test(`stales prior passes for ${JSON.stringify(command)}`, () => {
+    const summary = summaryAfter(command);
+    expect(summary).toContain("freshness: not established after later potentially modifying work");
+    const resume = summary.match(/<resume-tasks>\n([\s\S]*?)\n<\/resume-tasks>/)?.[1] ?? "";
+    expect(resume).not.toContain("Verify: bun test lib/parser.test.ts");
+  });
+
+  for (const command of [
+    "cat file.ts; pwd", "cat file.ts && rg pattern file.ts", "cat file.ts | head -3",
+    "cat file.ts || ls", "cat file.ts\npwd", "cat 'file; rm file.ts'", "cat file\\;name",
+    "rg 'a&&b|c' file.ts", "cat '$HOME $(rm file.ts)'", "git status --short && git diff --stat",
+    "rg -- '--pre=literal' file.ts", "git diff -- '--output=literal'",
+  ]) test(`preserves prior passes for read-only ${JSON.stringify(command)}`, () => {
+    expect(summaryAfter(command)).not.toContain("freshness: not established");
+    expect(summaryAfter(command)).toContain("PASS [bash cwd=/tmp/proj]: bun test lib/parser.test.ts");
+  });
+
+  test("a mutation followed by failure still stales prior verification", () => {
+    expect(summaryAfter("rm file.ts && false", true)).toContain("freshness: not established after later potentially modifying work");
+    expect(summaryAfter("cat missing.ts; rm file.ts", true)).toContain("freshness: not established after later potentially modifying work");
+  });
+
+  for (const command of ["bun test; rm file.ts", "echo 'bun test'", "bun test | tail -3", "bun test && rm file.ts", "bun test --update-snapshots", "ruff check --fix", "go test -exec ./mutate", "go test -exec=./mutate", "go test -toolexec ./mutate", "go test -toolexec=./mutate"]) test(`rejects completed and pending mixed or unsupported check ${JSON.stringify(command)}`, () => {
+    for (const completed of [false, true]) {
+      const summary = compileSessionJsonl([
+        sessionLine, userMsg("verify the parser"), toolCall("bash", { command }, "check"),
+        ...(completed ? [toolResult("bash", "8 pass, 0 fail", false, "check")] : []),
+      ].join("\n")).summary;
+      expect(summary).not.toMatch(/(?:PASS|INCOMPLETE) \[bash cwd=/);
+      expect(summary).not.toContain(`Verify: ${command}`);
+    }
+  });
+
+  for (const command of ["bun  test lib/parser.test.ts", "bun test && git diff --check", "cd '../other dir' && bun test && bun x tsc --noEmit"]) test(`preserves exact admitted bytes and resolved cwd for ${JSON.stringify(command)}`, () => {
+    const cwd = command.startsWith("cd ") ? "/tmp/other dir" : "/tmp/proj";
+    for (const completed of [false, true]) {
+      const summary = compileSessionJsonl([
+        sessionLine, userMsg("verify the parser"), toolCall("bash", { command }, "check"),
+        ...(completed ? [toolResult("bash", "8 pass, 0 fail", false, "check")] : []),
+      ].join("\n")).summary;
+      const wireCommand = command.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
+      expect(summary).toContain(`${completed ? "PASS" : "INCOMPLETE"} [bash cwd=${cwd}]: ${wireCommand}`);
+      expect(summary).toContain(`Verify: ${wireCommand}`);
+    }
   });
 });

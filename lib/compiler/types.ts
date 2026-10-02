@@ -1,3 +1,5 @@
+import type { LexicalBudget } from "./lexical-budget.ts";
+import type { ResumeCheckpointV1, CheckpointUpdate, CheckpointSourceReference } from "./checkpoint.ts";
 export const KIND_USER = "user";
 
 export const KIND_ASSISTANT = "assistant";
@@ -18,19 +20,33 @@ type BlockKind =
   | typeof KIND_THINKING
   | typeof KIND_COMPACTION;
 
+export interface VerificationObservation {
+  status: "PASS" | "FAIL" | "SKIP" | "INCOMPLETE";
+  evidence: string;
+}
+
 export interface NormalizedBlock {
+  sourceSequence?: number;
   kind: BlockKind;
+  sourceReference?: CheckpointSourceReference;
+  sourceKind?: "user" | "bash" | "agent-declaration" | "tool-observation" | "legacy";
   text?: string;
   name?: string;
   callId?: string;
   args?: Record<string, unknown>;
   isError?: boolean;
+  /** Internal bounded observation; never serialized into canonical input or details. */
+  verificationObservation?: VerificationObservation;
+  /** Relative imports extracted from all supplied output before preview shortening. */
+  suppliedImports?: string[];
+  hostTruncated?: boolean;
   redacted?: boolean;
   origin?: "human" | "custom";
   customType?: string;
 }
 
 export interface ConversationTurn {
+  sourceSequence?: number;
   role: "user" | "assistant";
   text: string;
   origin?: "human" | "custom";
@@ -40,12 +56,14 @@ export interface ConversationTurn {
 }
 
 export interface ToolCallFingerprint {
+  sourceSequence?: number;
   name: string;
   key: string;
   count: number;
 }
 
 export interface ToolResultEntry {
+  sourceSequence?: number;
   toolName: string;
   text: string;
   isError: boolean;
@@ -62,13 +80,20 @@ export interface SessionMeta {
    *  time. Surfaced as the leading <current-intent> section. Undefined when
    *  the agent emitted no handoff — summary then degrades byte-identically. */
   handoff?: string;
+  declarations?: string[];
+  declarationSources?: Array<CheckpointSourceReference | undefined>;
   handoffSource?: "assistant" | "saved";
   goalStatus?: string;
   goalObjective?: string;
+  checkpoint?: ResumeCheckpointV1;
+  checkpointDigest?: string;
+  predecessorEntryId?: string;
+  checkpointUpdates?: CheckpointUpdate[];
   priorSummaries: string[];
 }
 
 export interface ResumeIndex {
+  checkpoint?: ResumeCheckpointV1;
   activeFiles: string[];
   recentUserIntents: string[];
   continuationHints: string[];
@@ -76,6 +101,17 @@ export interface ResumeIndex {
 }
 
 export interface ConversationResult {
+  lexical?: LexicalBudget;
+  checkpoint?: ResumeCheckpointV1;
+  observedFiles?: { read: string[]; modified: string[] };
+  /** Internal source chronology for string-valued optional records. */
+  selectionSourceSequences?: Record<string, number>;
+  /** Authoritative obligations captured before display reduction; never persisted. */
+  resumePlan?: ResumePlan;
+  /** Internal whole source excerpts; serialized only in the text summary. */
+  retainedContext?: Array<{ role: "user" | "assistant"; kind: "outcome" | "proposal" | "context"; text: string }>;
+  /** Internal pre-trim terminal state; never serialized into compaction details. */
+  terminalComplete?: boolean;
   turns: ConversationTurn[];
   /** Successful tool-observed reads; not proof of current existence. */
   readFiles: string[];
@@ -94,10 +130,14 @@ export interface ConversationResult {
   budgetOmissions: string[];
   resumeTasks: string[];
   resumeIndex: ResumeIndex;
+  observationSnapshot?: ObservationSnapshot;
+  changeImpact?: string[];
   pathRoot?: string;
 }
 
 export interface LocalCompileResult {
+  checkpoint: ResumeCheckpointV1;
+  checkpointDigest: string;
   summary: string;
   readFiles: string[];
   modifiedFiles: string[];
@@ -115,16 +155,48 @@ export interface ToolAdjacent {
 }
 
 export interface PendingToolCall {
+  startedEpoch?: number;
+  startedAt?: number;
+  overlappingMutation?: boolean;
+  potentiallyModifying?: boolean;
   name: string;
   callId?: string;
   args?: Record<string, unknown>;
 }
 
 export interface VerificationReceipt {
+  sourceSequence?: number;
   status: "PASS" | "FAIL" | "SKIP" | "INCOMPLETE";
   tool: string;
   command: string;
   cwd?: string;
   evidence: string;
   mutationEpoch: number;
+  freshnessEstablished?: boolean;
+}
+
+export interface ResumePlan {
+  readonly terminalComplete: boolean;
+  readonly delegateObligation?: string;
+  readonly verification?: Readonly<VerificationReceipt>;
+  readonly inspectVerification: boolean;
+  readonly inspectGit: boolean;
+}
+
+export interface FileReadObservation {
+  readonly id: string;
+  readonly runner: string;
+  readonly path: string;
+  readonly cwd?: string;
+  readonly status: "succeeded" | "failed" | "incomplete";
+  readonly mutationEpoch: number;
+  readonly freshnessEstablished: boolean;
+  readonly imports: readonly string[];
+}
+export interface ObservationSnapshot {
+  readonly pendingMutations?: readonly Readonly<PendingToolCall>[];
+  readonly mutationEpoch: number;
+  readonly fileReads: readonly Readonly<FileReadObservation>[];
+  readonly verification: readonly Readonly<VerificationReceipt & { id: string }>[];
+  readonly modifiedPaths: readonly string[];
 }

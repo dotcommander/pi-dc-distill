@@ -1,3 +1,4 @@
+import { isAbsolute } from "node:path";
 import { hasNoDuplicateObjectKeys } from "./json-object-keys.ts";
 import { normalizeLegacyHandoffFence } from "./legacy.ts";
 
@@ -48,9 +49,25 @@ export interface StructuredDistillHandoffV2 {
   "verification-needed": string[];
 }
 
+export interface DistillHandoffTaskV3 extends DistillHandoffTask {
+  requires: string[];
+}
+
+export type DistillHandoffPrecondition =
+  | { id: string; kind: "file-read-succeeded"; path: string; cwd: string }
+  | { id: string; kind: "verification-pass"; runner: string; command: string; cwd: string };
+
+/** Observation requirements supplement graph readiness without changing task status. */
+export interface StructuredDistillHandoffV3 extends Omit<StructuredDistillHandoffV2, "version" | "tasks"> {
+  version: 3;
+  tasks: DistillHandoffTaskV3[];
+  preconditions: DistillHandoffPrecondition[];
+}
+
 export type ParsedStructuredDistillHandoff =
   | StructuredDistillHandoff
-  | StructuredDistillHandoffV2;
+  | StructuredDistillHandoffV2
+  | StructuredDistillHandoffV3;
 
 const STRUCTURED_HANDOFF_KEYS = [
   "objective",
@@ -65,6 +82,7 @@ const STRUCTURED_HANDOFF_MAX_ITEMS = 32;
 const STRUCTURED_HANDOFF_MAX_ITEM_CODE_POINTS = 2_048;
 const STRUCTURED_HANDOFF_RE = /^\s*```distill-handoff-v1\n([\s\S]*?)\n```\s*$/;
 const STRUCTURED_HANDOFF_V2_RE = /^\s*```distill-handoff-v2\n([\s\S]*?)\n```\s*$/;
+const STRUCTURED_HANDOFF_V3_RE = /^\s*```distill-handoff-v3\n([\s\S]*?)\n```\s*$/;
 const STRUCTURED_HANDOFF_V2_KEYS = [
   "objective",
   "invariants",
@@ -122,15 +140,23 @@ function hasCycle(tasks: DistillHandoffTask[]): boolean {
 
 /** Returns ready pending tasks in a stable topological (then source) order. */
 export function readyDistillHandoffTasks(
-  handoff: StructuredDistillHandoffV2,
+  handoff: StructuredDistillHandoffV3,
+): DistillHandoffTaskV3[];
+export function readyDistillHandoffTasks(
+  handoff: StructuredDistillHandoffV2 | StructuredDistillHandoffV3,
+): DistillHandoffTask[];
+export function readyDistillHandoffTasks(
+  handoff: StructuredDistillHandoffV2 | StructuredDistillHandoffV3,
 ): DistillHandoffTask[] {
-  const sourceIndex = new Map(handoff.tasks.map((task, index) => [task.id, index]));
-  const dependents = new Map(handoff.tasks.map((task) => [task.id, [] as string[]]));
-  const remaining = new Map(handoff.tasks.map((task) => [task.id, task["depends-on"].length]));
-  for (const task of handoff.tasks) {
+  // Widen the array view for stable inference across v2/v3; retain task objects.
+  const tasks: DistillHandoffTask[] = handoff.tasks;
+  const sourceIndex = new Map(tasks.map((task, index) => [task.id, index]));
+  const dependents = new Map(tasks.map((task) => [task.id, [] as string[]]));
+  const remaining = new Map(tasks.map((task) => [task.id, task["depends-on"].length]));
+  for (const task of tasks) {
     for (const dependency of task["depends-on"]) dependents.get(dependency)!.push(task.id);
   }
-  const available = handoff.tasks.filter((task) => remaining.get(task.id) === 0);
+  const available = tasks.filter((task) => remaining.get(task.id) === 0);
   const ordered: DistillHandoffTask[] = [];
   while (available.length > 0) {
     available.sort((left, right) => sourceIndex.get(left.id)! - sourceIndex.get(right.id)!);
@@ -139,10 +165,10 @@ export function readyDistillHandoffTasks(
     for (const dependent of dependents.get(task.id)!) {
       const count = remaining.get(dependent)! - 1;
       remaining.set(dependent, count);
-      if (count === 0) available.push(handoff.tasks[sourceIndex.get(dependent)!]);
+      if (count === 0) available.push(tasks[sourceIndex.get(dependent)!]);
     }
   }
-  const status = new Map(handoff.tasks.map((task) => [task.id, task.status]));
+  const status = new Map(tasks.map((task) => [task.id, task.status]));
   return ordered.filter((task) =>
     task.status === "pending" && task["depends-on"].every((dependency) => status.get(dependency) === "done"));
 }
@@ -190,8 +216,26 @@ export function parseStructuredDistillHandoff(
 export function parseStructuredDistillHandoffV2(
   text: string,
 ): StructuredDistillHandoffV2 | undefined {
+  return parseGraphHandoff(text, 2) as StructuredDistillHandoffV2 | undefined;
+}
+
+/** Parse the strict whole-message v3 envelope, retaining exact predicate identities. */
+export function parseStructuredDistillHandoffV3(text: string): StructuredDistillHandoffV3 | undefined {
+  return parseGraphHandoff(text, 3) as StructuredDistillHandoffV3 | undefined;
+}
+
+export function isStructuredDistillHandoffV3(
+  handoff: ParsedStructuredDistillHandoff,
+): handoff is StructuredDistillHandoffV3 {
+  return "version" in handoff && handoff.version === 3;
+}
+
+function parseGraphHandoff(
+  text: string,
+  version: 2 | 3,
+): StructuredDistillHandoffV2 | StructuredDistillHandoffV3 | undefined {
   if (!withinCodePointLimit(text, STRUCTURED_HANDOFF_MAX_CODE_POINTS)) return undefined;
-  const match = normalizeLegacyHandoffFence(text).match(STRUCTURED_HANDOFF_V2_RE);
+  const match = normalizeLegacyHandoffFence(text).match(version === 2 ? STRUCTURED_HANDOFF_V2_RE : STRUCTURED_HANDOFF_V3_RE);
   if (!match) return undefined;
   const json = match[1];
   let value: unknown;
@@ -202,7 +246,7 @@ export function parseStructuredDistillHandoffV2(
   }
   if (typeof value !== "object" || value === null || Array.isArray(value)) return undefined;
   const record = value as Record<string, unknown>;
-  if (!hasExactlyKeys(record, STRUCTURED_HANDOFF_V2_KEYS) || !hasNoDuplicateObjectKeys(json)) return undefined;
+  if (!hasExactlyKeys(record, version === 2 ? STRUCTURED_HANDOFF_V2_KEYS : [...STRUCTURED_HANDOFF_V2_KEYS, "preconditions"]) || !hasNoDuplicateObjectKeys(json)) return undefined;
   if (!isNonEmptyBoundedString(record.objective)) return undefined;
 
   const invariants = record.invariants;
@@ -230,12 +274,32 @@ export function parseStructuredDistillHandoffV2(
     !isNonEmptyBoundedString(hypothesis.id) || !isNonEmptyBoundedString(hypothesis.claim) ||
     !isNonEmptyBoundedString(hypothesis.evidence)) || !hasUniqueBoundedIds(typedHypotheses)) return undefined;
 
+  const preconditions: DistillHandoffPrecondition[] = [];
+  if (version === 3) {
+    if (!Array.isArray(record.preconditions) || record.preconditions.length > STRUCTURED_HANDOFF_MAX_ITEMS) return undefined;
+    for (const value of record.preconditions) {
+      if (typeof value !== "object" || value === null || Array.isArray(value)) return undefined;
+      const predicate = value as Record<string, unknown>;
+      if (!isNonEmptyBoundedString(predicate.id) || !isLexicalPath(predicate.cwd) || !isAbsolute(predicate.cwd)) return undefined;
+      if (predicate.kind === "file-read-succeeded") {
+        if (!hasExactlyKeys(predicate, ["id", "kind", "path", "cwd"]) || !isLexicalPath(predicate.path)) return undefined;
+      } else if (predicate.kind === "verification-pass") {
+        if (!hasExactlyKeys(predicate, ["id", "kind", "runner", "command", "cwd"]) ||
+          !isNonEmptyBoundedString(predicate.runner) ||
+          !["bash", "shell", "jinn_run_shell", "functions.bash"].includes(predicate.runner.toLowerCase()) ||
+          !isNonEmptyBoundedString(predicate.command) || predicate.command.includes("\0")) return undefined;
+      } else return undefined;
+      preconditions.push(value as DistillHandoffPrecondition);
+    }
+    if (!hasUniqueBoundedIds(preconditions)) return undefined;
+  }
+
   const tasks = record.tasks;
   if (!Array.isArray(tasks) || tasks.length > STRUCTURED_HANDOFF_MAX_ITEMS ||
     tasks.some((task) => typeof task !== "object" || task === null || Array.isArray(task))) return undefined;
   const typedTasks = tasks as DistillHandoffTask[];
   if (typedTasks.some((task) =>
-    !hasExactlyKeys(task, ["id", "status", "action", "depends-on", "blocker"]) ||
+    !hasExactlyKeys(task, version === 2 ? ["id", "status", "action", "depends-on", "blocker"] : ["id", "status", "action", "depends-on", "blocker", "requires"]) ||
     !isNonEmptyBoundedString(task.id) ||
     (task.status !== "done" && task.status !== "pending" && task.status !== "blocked") ||
     !isNonEmptyBoundedString(task.action) ||
@@ -244,11 +308,20 @@ export function parseStructuredDistillHandoffV2(
     typeof task.blocker !== "string" || !withinCodePointLimit(task.blocker, STRUCTURED_HANDOFF_MAX_ITEM_CODE_POINTS) ||
     (task.status === "blocked" ? !task.blocker.trim() : task.blocker !== "")) ||
     !hasUniqueBoundedIds(typedTasks)) return undefined;
+  if (version === 3) {
+    const predicateIds = new Set(preconditions.map((predicate) => predicate.id));
+    for (const task of typedTasks as DistillHandoffTaskV3[]) {
+      if (!Array.isArray(task.requires) || task.requires.length > STRUCTURED_HANDOFF_MAX_ITEMS ||
+        task.requires.some((id) => typeof id !== "string" || !HANDOFF_ID_RE.test(id) || !predicateIds.has(id)) ||
+        new Set(task.requires).size !== task.requires.length ||
+        new Set(task["depends-on"]).size !== task["depends-on"].length) return undefined;
+    }
+  }
   const taskIds = new Set(typedTasks.map((task) => task.id));
   if (typedTasks.some((task) => task["depends-on"].some((dependency) =>
     dependency === task.id || !taskIds.has(dependency))) || hasCycle(typedTasks)) return undefined;
 
-  return {
+  const parsed: StructuredDistillHandoffV2 = {
     version: 2,
     objective: record.objective.trim(),
     invariants: (invariants as string[]).map((item) => item.trim()),
@@ -263,13 +336,24 @@ export function parseStructuredDistillHandoffV2(
     })),
     "verification-needed": (verificationNeeded as string[]).map((item) => item.trim()),
   };
+  return version === 2 ? parsed : {
+    ...parsed,
+    version: 3,
+    preconditions: preconditions.map((predicate) => ({ ...predicate })),
+    tasks: parsed.tasks.map((task, index) => ({ ...task, requires: [...(typedTasks[index] as DistillHandoffTaskV3).requires] })),
+  };
 }
 
-/** Parse either supported strict handoff version; unknown versions remain opaque. */
+/** Match transcript path semantics without filesystem enrichment or shell expansion. */
+function isLexicalPath(value: unknown): value is string {
+  return isNonEmptyBoundedString(value) && !/[\x00-\x1f\x7f]/.test(value) && value.trim() === value;
+}
+
+/** Parse supported strict handoff versions; unknown versions remain opaque. */
 export function parseAnyStructuredDistillHandoff(
   text: string,
 ): ParsedStructuredDistillHandoff | undefined {
-  return parseStructuredDistillHandoff(text) ?? parseStructuredDistillHandoffV2(text);
+  return parseStructuredDistillHandoff(text) ?? parseStructuredDistillHandoffV2(text) ?? parseStructuredDistillHandoffV3(text);
 }
 
 export function handoffTextFromEntryData(data: unknown): string | undefined {

@@ -1,9 +1,10 @@
 import { sliceU16, OrderedSet, addMarkerLine, addExactMarkerLine, boundedListMarker, boundedValues, isBareConfirmation } from "./helpers.ts";
-import { type ConversationTurn, type ToolCallFingerprint, type ResumeIndex } from "./types.ts";
+import { type ConversationTurn, type ToolCallFingerprint, type ResumeIndex, type ResumePlan, type VerificationReceipt } from "./types.ts";
+import { codePointLength } from "../unicode.ts";
 import { isVerificationCommand, isWorkingTreeCommand } from "./tool-tracker.ts";
-import { extractSignals } from "./conversation-reducer.ts";
+import { extractSignals, isReferentialImplementation, hasTerminalNoWorkCompletion, resolvedFrontierIntent } from "./conversation-reducer.ts";
 import { displayPath } from "./path-roots.ts";
-import { basename } from "node:path";
+import { LexicalBudget } from "./lexical-budget.ts";
 
 function trimResumeLine(text: string): string {
   return sliceU16(text.trim().split(/\s+/).filter(Boolean).join(" "), 160);
@@ -39,7 +40,15 @@ const RECALL_STOPWORDS = new Set([
   "set",
 ]);
 
-function recallSeedSalience(seed: string): number {
+const SCRATCH_TOKENS = new Set([
+  "temp",
+  "tmp",
+  "scratch",
+  "untitled",
+  "dummy",
+]);
+
+function recallSeedSalience(seed: string, intentTokens?: Set<string>, lexical = new LexicalBudget()): number {
   const s = seed.trim();
   if (!s) return Number.NEGATIVE_INFINITY;
   let score = 0;
@@ -50,24 +59,59 @@ function recallSeedSalience(seed: string): number {
   if (s.length <= 3) score -= 3;
   const firstWord = s.toLowerCase().split(/\s+/)[0];
   if (RECALL_STOPWORDS.has(firstWord)) score -= 4;
+
+  if (intentTokens && intentTokens.size > 0) {
+    const tokens = new Set(lexical.tokenize(s));
+    let matches = 0;
+    let isScratch = false;
+    for (const t of tokens) {
+      if (RECALL_STOPWORDS.has(t)) continue;
+      if (SCRATCH_TOKENS.has(t)) isScratch = true;
+      if (intentTokens.has(t)) matches++;
+    }
+    if (matches > 0) score += Math.min(6, matches * 2);
+    if (isScratch) score -= 2;
+  }
+
   return score;
 }
 
-function appendUniqueLimited(out: string[], seen: Set<string>, limit: number, values: string[]): string[] {
-  for (const raw of values) {
-    const value = raw.trim();
-    if (!value || seen.has(value)) continue;
-    seen.add(value);
-    out.push(value);
-    if (out.length >= limit) return out;
-  }
-  return out;
+function isReferentialRequest(text: string): boolean {
+  return isReferentialImplementation(text) || /^(?:please\s+)?(?:spec|review|test|explain|summarize|update|change|remove|add|try)\s+(?:it|this|that|them|those)[.!?]?$/i.test(text.trim());
 }
 
-function isReferentialRequest(text: string): boolean {
-  const normalized = text.trim();
-  if (normalized.length > 100) return false;
-  return /^(?:please\s+)?(?:spec|fix|do|implement|review|test|run|ship|commit|explain|summarize|update|change|remove|add|try|finish)\s+(?:it|this|that|them|those)(?:[.!?]|\s+please)?$/i.test(normalized);
+/** Recovery lookup seeds are observations, never instructions to resume work. */
+export function recoveryRecallQueries(turns: ConversationTurn[], anchors: string[] = [], lexical = new LexicalBudget()): string[] {
+  const observed = new Set(anchors.map((value) => value.toLowerCase()));
+  const literals = new Set(turns.flatMap((turn) => [...turn.text.matchAll(/`([^`\n]+)`/g)]
+    .map((match) => match[1].toLowerCase())));
+  const eligible = (value: string): boolean => {
+    const tokens = lexical.tokenize(value);
+    return !!value && codePointLength(value) <= 160 && !/\s/.test(value) &&
+      !/^[a-f0-9-]{8,}$/i.test(value) && !/^https?:/i.test(value) &&
+      !/(?:^|[\/])(?:tmp|temp|scratch|\.work)(?:[\/]|$)/i.test(value) &&
+      !tokens.some((token) => SCRATCH_TOKENS.has(token) || /^(?:notes|output|build_output)(?:\.|$)/i.test(token)) &&
+      !RECALL_STOPWORDS.has(value.toLowerCase()) &&
+      (observed.has(value.toLowerCase()) ||
+        /[a-z][A-Z]|[A-Z][a-z]+[A-Z]|[a-z]+_[a-z]+|[\w.-]+\.(?:ts|js|go|py|sql|md|json|toml|yaml|yml)/.test(value) ||
+        (value.includes("/") && literals.has(value.toLowerCase())));
+  };
+  const raw = [...anchors];
+  for (const turn of turns) {
+    raw.push(...(turn.text.match(/`([^`\n]+)`/g) ?? []).map((v) => v.slice(1, -1)));
+    raw.push(...(turn.text.match(/[A-Za-z_][A-Za-z0-9_./-]*/g) ?? []));
+  }
+  const seen = new Set<string>();
+  const candidates = raw.map((seed) => seed.replace(/[.,;:!?]+$/g, "")).filter(eligible).filter((seed) => {
+    const key = seed.toLowerCase();
+    if (seen.has(key)) return false;
+    seen.add(key); return true;
+  });
+  const query = resolvedFrontierIntent(turns);
+  const intentTokens = new Set(lexical.tokenize(query));
+  return candidates.map((seed, i) => ({ seed, i, score: recallSeedSalience(seed, intentTokens, lexical) }))
+    .filter((entry) => entry.score > 0)
+    .sort((a, b) => b.score - a.score || a.i - b.i).slice(0, 5).map((entry) => entry.seed);
 }
 
 function resolvedUserIntent(turns: ConversationTurn[], index: number): string {
@@ -88,10 +132,12 @@ function resolvedUserIntent(turns: ConversationTurn[], index: number): string {
 }
 
 function selectActiveFiles(readFiles: string[], modifiedFiles: string[]): string[] {
-  return boundedValues([...modifiedFiles, ...readFiles], 10, "active files");
+  return boundedValues([...modifiedFiles, ...readFiles], 10, "active files", "highest");
 }
 
-export function buildResumeIndex(turns: ConversationTurn[], readFiles: string[], modifiedFiles: string[], recentToolCalls: ToolCallFingerprint[]): ResumeIndex {
+export function buildResumeIndex(turns: ConversationTurn[], readFiles: string[], modifiedFiles: string[], recentToolCalls: ToolCallFingerprint[], lexical = new LexicalBudget()): ResumeIndex {
+  const recallQueries = recoveryRecallQueries(turns, [...modifiedFiles, ...readFiles, ...recentToolCalls.map((call) => call.key)], lexical);
+  if (hasTerminalNoWorkCompletion(turns)) return { activeFiles: [], recentUserIntents: [], continuationHints: [], recallQueries };
   const activeFiles = selectActiveFiles(readFiles, modifiedFiles);
   const allRecentUserIntents: string[] = [];
   for (let i = 0; i < turns.length; i++) {
@@ -122,32 +168,42 @@ export function buildResumeIndex(turns: ConversationTurn[], readFiles: string[],
     if (line) allContinuationHints.push(line);
   }
   const continuationHints = boundedValues(allContinuationHints, 5, "continuation hints");
-  const recallCandidates = [
-    ...activeFiles.filter((file) => !file.startsWith("... (")).map((file) => basename(file)),
-    ...recentToolCalls.map((call) => call.key).filter(Boolean),
-    ...recentUserIntents.filter((intent) => !intent.startsWith("... (")),
-  ];
-  const rankedRecall = recallCandidates
-    .map((seed, i) => ({ seed, i, score: recallSeedSalience(seed) }))
-    .sort((a, b) => b.score - a.score || a.i - b.i)
-    .map((entry) => entry.seed);
-  const recallQueries = boundedValues(rankedRecall, 5, "recall queries", "highest");
+
   return { activeFiles, recentUserIntents, continuationHints, recallQueries };
 }
 
-function recallQueryFromAnchor(anchor: string): string {
-  const trimmed = anchor.trim().replace(/\/+$/g, "");
-  if (!trimmed || trimmed.startsWith("http://") || trimmed.startsWith("https://")) return trimmed;
-  return basename(trimmed);
+/** Copy source obligations before any evidence display caps or eviction. */
+export function buildResumePlan(input: {
+  terminalComplete: boolean;
+  activeTasks: string[];
+  verificationReceipts?: VerificationReceipt[];
+  mutationEpoch?: number;
+  verification?: string[];
+  workingTree: string[];
+}): ResumePlan {
+  const receipts = input.verificationReceipts ?? [];
+  const eligible = receipts.filter((receipt) => receipt.status === "FAIL" || receipt.status === "INCOMPLETE" || !receipt.cwd ||
+    (receipt.freshnessEstablished !== false && receipt.mutationEpoch >= (input.mutationEpoch ?? 0)));
+  const selected = eligible.findLast((receipt) => receipt.status === "FAIL" || receipt.status === "INCOMPLETE") ?? eligible.at(-1);
+  return Object.freeze({
+    terminalComplete: input.terminalComplete,
+    delegateObligation: input.activeTasks.findLast((line) => !line.startsWith("... (")),
+    verification: selected ? Object.freeze({ ...selected }) : undefined,
+    // Display strings cannot recover exact command identity safely.
+    inspectVerification: !selected && !input.verificationReceipts && !!input.verification?.some((line) => !line.startsWith("... (")),
+    inspectGit: input.workingTree.length > 0,
+  });
 }
 
-function verificationCommand(line: string): string {
-  let out = line.trim();
-  const colon = out.indexOf(": ");
-  if (colon >= 0) out = out.slice(colon + 2).trim();
-  const dash = out.indexOf(" — ");
-  if (dash >= 0) out = out.slice(0, dash).trim();
-  return out;
+function verificationTask(receipt: Readonly<VerificationReceipt>): string {
+  const line = `Verify: ${receipt.command} [runner=${receipt.tool}; cwd=${receipt.cwd}]`;
+  // Never emit a clipped, sanitized or scope-incomplete command as runnable work.
+  if (!receipt.tool || !receipt.cwd || !receipt.command || codePointLength(receipt.command) > 1_024 ||
+      codePointLength(receipt.cwd) > 200 || codePointLength(line) > 1_200 ||
+      /[\u0000-\u001f\u007f]/.test(line) || receipt.command.trim() !== receipt.command) {
+    return "Inspect verification command and runner/working-directory scope before rerunning; exact presentation unavailable.";
+  }
+  return line;
 }
 
 function quoteRecallQuery(query: string): string {
@@ -163,37 +219,25 @@ export function buildResumeTasks(input: {
   resumeIndex: ResumeIndex;
   pathRoot?: string;
   recallEnabled?: boolean;
+  terminalComplete?: boolean;
+  resumePlan?: ResumePlan;
 }): string[] {
+  const plan = input.resumePlan ?? buildResumePlan({ ...input, terminalComplete: input.terminalComplete ?? false });
+  if (plan.terminalComplete) return [];
   const out = new OrderedSet();
   const continuation = input.resumeIndex.continuationHints.at(-1);
-  if (continuation && /Next choice:\s*None\b.*no response needed/i.test(continuation)) return [];
+  if (!input.resumePlan && continuation && /Next choice:\s*None\b.*no response needed/i.test(continuation)) return [];
   const activeFiles = input.resumeIndex.activeFiles.filter((file) => !file.startsWith("... (")).slice(0, 4);
-  const activeTask = input.activeTasks.findLast((line) => !line.startsWith("... ("));
+  const activeTask = plan.delegateObligation;
   if (activeTask) addMarkerLine(out, `Await/check existing delegated task; do not launch a duplicate: ${activeTask}`);
   if (activeFiles.length > 0) {
     addExactMarkerLine(out, boundedListMarker("Reread active files: ", activeFiles.map((file) => displayPath(file, input.pathRoot))));
   }
   if (continuation) addMarkerLine(out, `Continue: ${continuation}`);
-  const verificationLines = input.verification.filter((line) =>
-    !line.startsWith("... (") && !line.includes("[freshness: not established"),
-  );
-  const gate = verificationLines.findLast((line) => /^(?:FAIL|INCOMPLETE|BLOCKED)\b/.test(line))
-    ?? verificationLines.at(-1);
-  const verify = gate ? verificationCommand(gate) : "";
-  if (verify) addExactMarkerLine(out, `Verify: ${verify}`, 1_200);
-  const activeBases = new Set(activeFiles.map(recallQueryFromAnchor));
-  const querySources = [
-    ...input.sourceAnchors.map(recallQueryFromAnchor),
-    ...input.recentToolCalls.map((call) => call.key),
-    ...(activeFiles.length === 0 && input.sourceAnchors.length === 0 ? [] : input.resumeIndex.recallQueries),
-  ];
-  const queries = querySources.filter((query) =>
-    query &&
-    !query.startsWith("... (") &&
-    !activeBases.has(query) &&
-    !isVerificationCommand(query) &&
-    !isWorkingTreeCommand(query));
+  if (plan.verification) addExactMarkerLine(out, verificationTask(plan.verification), 1_200);
+  else if (plan.inspectVerification) addExactMarkerLine(out, "Inspect verification command and runner/working-directory scope before rerunning; exact presentation unavailable.");
+  const queries = input.resumeIndex.recallQueries.filter((query) => !isVerificationCommand(query) && !isWorkingTreeCommand(query));
   if (input.recallEnabled !== false && queries[0]) addMarkerLine(out, `Recall: recall_compaction ${quoteRecallQuery(queries[0])}`);
-  if (input.workingTree.length > 0) addMarkerLine(out, "Check working tree: git status --short");
+  if (plan.inspectGit) addMarkerLine(out, "Check working tree: git status --short");
   return out.slice().slice(0, 4);
 }

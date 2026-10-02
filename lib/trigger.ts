@@ -11,8 +11,10 @@ const FALLBACK_AUTO_THRESHOLD = 100_000;
 const FALLBACK_WARN_THRESHOLD = 140_000;
 const FALLBACK_EMERGENCY_THRESHOLD = 160_000;
 /** Preferred autonomous boundary when Pi's own safety geometry allows it. */
+export const TRIGGER_POLICY_VERSION = 1;
+export const TRIGGER_POLICY_NAME = "distill-fixed-cap-lead";
 export const AUTO_TARGET_TOKENS = 120_000;
-/** dc-distill stays at least this far before Pi's own automatic trigger. */
+/** dc-distill prefers this lead before Pi's own automatic trigger. */
 export const DISTILL_LEAD_TOKENS = 20_000;
 /** Floors make Pi's reserve geometry usable on very small windows. */
 const MIN_AUTO_THRESHOLD = 8_000;
@@ -23,7 +25,7 @@ const MIN_WARN_THRESHOLD = 4_000;
  *
  * Pi owns the native automatic trigger. dc-distill prefers a fixed 120,000-token
  * autonomous boundary, capped lower when necessary to stay at least 20,000
- * tokens ahead of Pi's reserve-derived trigger. No extension settings are read.
+ * tokens ahead of Pi's reserve-derived trigger when small-window floors allow. No extension settings are read.
  */
 export interface TriggerOptions {
   cooldownMs?: number;
@@ -51,6 +53,8 @@ export interface ResolvedTriggerThresholds {
 }
 
 export type CompactBlockReason =
+  | "invalid-geometry"
+  | "invalid-estimate"
   | "disabled"
   | "missing-pi-sync"
   | "post-compaction-sample"
@@ -128,6 +132,16 @@ export function validateTriggerGeometry(
   }
 
   const thresholds = resolveTriggerThresholds(options);
+  for (const [band, threshold] of Object.entries(thresholds)) {
+    if (!Number.isFinite(threshold.effective) || threshold.effective <= 0) {
+      violations.push({ field: `${band}Threshold`, value: threshold.effective,
+        message: `effective ${band} threshold must be finite and positive` });
+    }
+  }
+  if (options.contextWindow !== undefined && Number.isFinite(options.contextWindow) && options.contextWindow < 3) {
+    violations.push({ field: "contextWindow", value: options.contextWindow,
+      message: "autonomous admission requires a window of at least three tokens" });
+  }
   if (thresholds.auto.effective >= thresholds.warn.effective) {
     violations.push({
       field: "warnThreshold",
@@ -153,18 +167,27 @@ export function validateTriggerGeometry(
   return violations;
 }
 
-export function evaluateCompaction(
-  state: CompactState,
-  piSynced = true,
-  options: TriggerOptions = {},
-): CompactEvaluation {
+export interface CompactionAssessment extends CompactEvaluation {
+  updates: Partial<Pick<CompactState, "awaitingPostCompactionSample" | "repeatBaselineTokens">>;
+}
+
+/** Pure assessment: callers explicitly apply returned state updates. */
+export function assessCompaction(
+  state: Readonly<CompactState>,
+  piSynced: boolean,
+  options: TriggerOptions,
+  now: number,
+): CompactionAssessment {
   const thresholds = resolveTriggerThresholds(options);
-  const blocked = (blockedBy: CompactBlockReason): CompactEvaluation => ({
+  const updates: CompactionAssessment["updates"] = {};
+  const blocked = (blockedBy: CompactBlockReason): CompactionAssessment => ({
+    updates,
     decision: null,
     blockedBy,
     thresholds,
   });
-  const decided = (decision: CompactDecision): CompactEvaluation => ({
+  const decided = (decision: CompactDecision): CompactionAssessment => ({
+    updates,
     decision,
     blockedBy: null,
     thresholds,
@@ -173,6 +196,9 @@ export function evaluateCompaction(
   // Disabling Pi's auto-compaction also disables dc-distill's monitor. Manual
   // /compact still reaches session_before_compact independently of this path.
   if (options.compaction?.enabled === false) return blocked("disabled");
+  if (validateTriggerGeometry(options).length > 0) return blocked("invalid-geometry");
+
+  if (!Number.isFinite(state.tokenEstimate) || state.tokenEstimate < 0) return blocked("invalid-estimate");
 
   const cooldownMs = options.cooldownMs ?? COOLDOWN_MS;
   const effectiveAuto = thresholds.auto.effective;
@@ -193,18 +219,18 @@ export function evaluateCompaction(
   if (!piSynced) return blocked("missing-pi-sync");
 
   if (state.awaitingPostCompactionSample) {
-    state.awaitingPostCompactionSample = false;
-    state.repeatBaselineTokens =
+    updates.awaitingPostCompactionSample = false;
+    updates.repeatBaselineTokens =
       state.tokenEstimate >= effectiveAuto ? state.tokenEstimate : null;
     return blocked("post-compaction-sample");
   }
 
   if (state.tokenEstimate < effectiveAuto) {
-    state.repeatBaselineTokens = null;
+    updates.repeatBaselineTokens = null;
     return blocked("below-auto");
   }
 
-  if (Date.now() - state.lastCompactionTime < cooldownMs) return blocked("cooldown");
+  if (now - state.lastCompactionTime < cooldownMs) return blocked("cooldown");
 
   if (state.repeatBaselineTokens !== null) {
     const growth = state.tokenEstimate - state.repeatBaselineTokens;
@@ -222,6 +248,17 @@ export function evaluateCompaction(
     tier: Tier.Mechanical,
     reason: `auto: context exceeded ${formatCompactTokens(effectiveAuto)} tokens`,
   });
+}
+
+/** Compatibility wrapper retains the historical state-update contract. */
+export function evaluateCompaction(
+  state: CompactState,
+  piSynced = true,
+  options: TriggerOptions = {},
+): CompactEvaluation {
+  const { updates, ...evaluation } = assessCompaction(state, piSynced, options, Date.now());
+  Object.assign(state, updates);
+  return evaluation;
 }
 
 export function shouldCompact(

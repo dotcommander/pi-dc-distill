@@ -3,6 +3,8 @@
 // The context transform is ephemeral (not persisted), so the echo is rebuilt
 // and re-injected every turn while a distill summary is present in context.
 
+import { codePointLength } from "./unicode.ts";
+
 interface EchoMessage {
   role?: string;
   content?: unknown;
@@ -15,9 +17,9 @@ export interface FocusEchoResult {
 }
 
 const ECHO_MARKER = "<distill-focus-echo>";
-const MAX_ITEMS = 6;
-const MAX_LINE = 180;
-const MAX_ECHO_CHARS = 1200;
+const MAX_ECHO_POINTS = 1200;
+const points = codePointLength;
+const safeText = (text: string): string => text.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
 
 function textFromContent(content: unknown): string {
   if (typeof content === "string") return content;
@@ -55,8 +57,7 @@ function cleanLine(line: string): string {
     .replace(/^[-*]\s+/, "")
     .replace(/^\d+[.)]\s+/, "")
     .replace(/\s+/g, " ")
-    .trim()
-    .slice(0, MAX_LINE);
+    .trim();
 }
 
 function linesFromBlock(block: string): string[] {
@@ -64,8 +65,7 @@ function linesFromBlock(block: string): string[] {
     .split(/\n/)
     .map(cleanLine)
     .filter((line) => line.length > 0)
-    .filter((line) => !/^#+\s+/.test(line))
-    .slice(0, MAX_ITEMS);
+    .filter((line) => !/^#+\s+/.test(line));
 }
 
 function extractHeading(text: string, heading: string): string {
@@ -91,7 +91,7 @@ function uniq(items: string[]): string[] {
 }
 
 function compactItems(items: string[]): string[] {
-  return uniq(items.map(cleanLine).filter(Boolean)).slice(0, MAX_ITEMS);
+  return uniq(items.map(cleanLine).filter(Boolean));
 }
 
 function buildEcho(summary: string): string | null {
@@ -108,30 +108,30 @@ function buildEcho(summary: string): string | null {
     return null;
   }
 
-  const lines = [ECHO_MARKER];
-  if (structuredState.length > 0) {
-    lines.push("Explicit resume state:");
-    for (const item of structuredState) lines.push(`- ${item}`);
-  } else if (currentIntent.length > 0) {
-    lines.push(`Current intent: ${currentIntent.join(" ")}`);
+  const blockers = structuredState.filter((line) => /^blocker(?:s)?\s*:/i.test(line));
+  const state = structuredState.filter((line) => !/^blocker(?:s)?\s*:/i.test(line));
+  // Complete lines keep paths and structured references intact. Prioritized records
+  // consume the budget before supporting references; framing and omissions count.
+  const records = uniq([
+    ...blockers.map((item) => `Blocker: ${item}`),
+    ...risks.map((item) => `Resume risks: ${item}`),
+    ...currentIntent.map((item) => `Current intent: ${item}`),
+    ...(userFocus ? [`Focus: ${userFocus}`] : []),
+    ...(state.length ? ["Explicit resume state:", ...state.map((item) => `- ${item}`)] : []),
+    ...modifiedFiles.map((item) => `Modified files: ${item}`),
+    ...readFiles.map((item) => `Read files: ${item}`),
+    ...(resume.length ? ["Resume index:", ...resume.map((item) => `- ${item}`)] : []),
+  ]).map(safeText);
+  const closing = "</distill-focus-echo>";
+  const omissionNotice = (count: number) => `[Focus echo omitted ${count} item(s).]`;
+  const reserve = points(`${ECHO_MARKER}\n\n${closing}\n${omissionNotice(records.length)}`);
+  const kept: string[] = [];
+  let omitted = 0;
+  for (const record of records) {
+    if (points([...kept, record].join("\n")) + reserve <= MAX_ECHO_POINTS) kept.push(record);
+    else omitted++;
   }
-  if (userFocus) lines.push(`Focus: ${userFocus}`);
-  if (risks.length > 0) lines.push(`Resume risks: ${risks.join("; ")}`);
-  if (modifiedFiles.length > 0) lines.push(`Modified files: ${modifiedFiles.join(", ")}`);
-  if (readFiles.length > 0) lines.push(`Read files: ${readFiles.join(", ")}`);
-  if (resume.length > 0) {
-    lines.push("Resume index:");
-    for (const item of resume) lines.push(`- ${item}`);
-  }
-  lines.push("</distill-focus-echo>");
-
-  const echo = lines.join("\n");
-  if (echo.length <= MAX_ECHO_CHARS) return echo;
-  const closing = `\n</distill-focus-echo>`;
-  const prefix = `${ECHO_MARKER}\n`;
-  const body = lines.slice(1, -1).join("\n");
-  const budget = MAX_ECHO_CHARS - prefix.length - closing.length - "\n...".length;
-  return `${prefix}${Array.from(body).slice(0, Math.max(0, budget)).join("").trimEnd()}\n...${closing}`;
+  return [ECHO_MARKER, ...kept, ...(omitted ? [omissionNotice(omitted)] : []), closing].join("\n");
 }
 
 function hasEchoSignal(

@@ -13,6 +13,7 @@ Options:
   --historical <file>          Compare with a retained historical summary/after dump
   --out <directory>            Write artifacts here (default: Pi agent cache/dc-distill/evaluations/<unique-run>)
   --focus <text>               Supply the same optional focus accepted by /compact
+  --no-recall                  Omit recall guidance (diagnostic default: recall on)
   --force                      Replace evaluator artifacts already in the output directory
   --help                       Show this help
 
@@ -42,9 +43,12 @@ async function main(args: string[]): Promise<void> {
   let historicalFile: string | undefined;
   let force = false;
   let wholeSession = false;
+  let recallEnabled = true;
   for (let index = 0; index < args.length; index++) {
     const arg = args[index];
-    if (arg === "--force") {
+    if (arg === "--no-recall") {
+      recallEnabled = false;
+    } else if (arg === "--force") {
       force = true;
     } else if (arg === "--whole") {
       wholeSession = true;
@@ -77,6 +81,7 @@ async function main(args: string[]): Promise<void> {
       force,
       wholeSession,
       historicalFile,
+      recallEnabled,
     });
     console.log(JSON.stringify({ outputDirectory: out, ...report }, null, 2));
     success = true;

@@ -1,8 +1,9 @@
 /** Real-host spies for native automatic interception; no autonomous cooldown wait. */
 import { expect, test } from "bun:test";
-import { readFileSync } from "node:fs";
+import { existsSync, readFileSync } from "node:fs";
+import { join } from "node:path";
 import { RpcClient, eventsOfType } from "./harness/rpc-client.ts";
-import { makeTestDir, piEnv, scriptedArgs, latestSessionFile } from "./harness/env.ts";
+import { makeTestDir, piEnv, scriptedArgs, latestSessionFile, REPO_ROOT } from "./harness/env.ts";
 
 function records(file: string): Array<Record<string, any>> {
   return readFileSync(file, "utf8").split("\n").filter((line) => line.trim()).map((line) => JSON.parse(line));
@@ -65,6 +66,46 @@ for (const scenario of [
         await client.close();
       }
 
+      passed = true;
+    } finally { await t.finalize(passed); }
+  }, 60000);
+}
+
+// Mutate the host preparation before dc-distill runs. Unlike a throwing hook,
+// this exercises dc-distill's own catch/cancel boundary rather than Pi's
+// extension-error fallback behavior.
+for (const fault of ["previous-summary", "discarded-partition", "unicode"] as const) {
+  test(`preparation fault ${fault} cancels without default summarization or success artifacts`, async () => {
+    const t = makeTestDir(`preparation-${fault}`, { keepRecentTokens: 1024 });
+    let passed = false;
+    try {
+      const args = scriptedArgs(t);
+      args.splice(args.indexOf("-e"), 0, "-e", join(REPO_ROOT, "tests/e2e/harness/preparation-fault.ts"));
+      const client = new RpcClient({ args, cwd: t.dir, logFile: t.logFile,
+        env: piEnv(t, { DISTILL_PREPARATION_FAULT: fault, DISTILL_FAKE_BASE: "4000", DISTILL_FAKE_STEP: "500" }) });
+      try {
+        for (let i = 0; i < 3; i++) {
+          const since = client.mark();
+          expect((await client.request({ type: "prompt", message: `TASK-13 turn ${i}. ` + "source material ".repeat(3000) })).success).toBe(true);
+          await client.waitFor((event) => event.type === "agent_settled", 30000, { since });
+        }
+        const compact = await client.request({ type: "compact" }, 30000);
+        expect(compact.success).toBe(false);
+        expect(records(t.traceFile).filter((entry) => entry.kind === "summary")).toHaveLength(0);
+        expect(records(latestSessionFile(t)!).filter((entry) => entry.type === "compaction")).toHaveLength(0);
+        expect(eventsOfType(client.events, "compaction_end").every((event) => event.aborted === true)).toBe(true);
+        const data = join(t.agentHome, "data", "dc-distill");
+        const logFile = join(data, "compact-log.jsonl");
+        // Pre-commit failure diagnostics are allowed; success records are not.
+        const logEntries = existsSync(logFile) ? records(logFile) : [];
+        expect(logEntries.filter((entry) => entry.kind !== "failure")).toHaveLength(0);
+        expect(client.events.some((event) => (event.message as any)?.customType === "dc-distill-continuation")).toBe(false);
+        // A cancelled attempt must still leave a usable native session.
+        const since = client.mark();
+        expect((await client.request({ type: "prompt", message: "Proceed with the user request after cancelled preparation." })).success).toBe(true);
+        await client.waitFor((event) => event.type === "agent_settled", 30000, { since });
+        expect(records(t.traceFile).filter((entry) => entry.kind === "summary")).toHaveLength(0);
+      } finally { await client.close(); }
       passed = true;
     } finally { await t.finalize(passed); }
   }, 60000);

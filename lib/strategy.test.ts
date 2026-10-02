@@ -95,7 +95,8 @@ describe("runStrategies", () => {
     expect(result.summary).toContain("## Conversation");
     expect(result.readFiles).toEqual(["extensions/dc-distill/index.ts"]);
     expect(result.modifiedFiles).toEqual(["extensions/dc-distill/lib/recall.ts"]);
-    expect(result.summary).toContain("<verification>\nPASS [Bash cwd=/tmp/project]: bun test extensions/dc-distill");
+    expect(result.summary).toMatch(/<verification>\nPASS \[Bash cwd=\/tmp\/project\]: \[stale command sha256:[a-f0-9]{16}\]/);
+    expect(result.summary).toContain("freshness: not established after later potentially modifying work");
     expect(result.literalAnchors).toContain("TASK-88");
     expect(result.inputDigest).toMatch(/^[0-9a-f]{64}$/);
     expect(result.summaryDigest).toMatch(/^[0-9a-f]{64}$/);

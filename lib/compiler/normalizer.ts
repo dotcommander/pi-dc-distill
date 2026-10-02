@@ -1,7 +1,11 @@
+import { CompactionInputError } from "./errors.ts";
+import { assertStructuralBounds, validateCheckpoint } from "./checkpoint.ts";
+import { outsideExampleLines } from "./section-scanner.ts";
 import { sanitize, sliceU16, isRecord, checkAbort } from "./helpers.ts";
 import { KIND_USER, KIND_ASSISTANT, KIND_TOOL_CALL, KIND_TOOL_RESULT, KIND_THINKING, KIND_COMPACTION, type NormalizedBlock, type SessionMeta } from "./types.ts";
 import { isDistillHandoffType, LEGACY_CONTINUATION_MESSAGE_TYPE } from "../legacy.ts";
 import { handoffTextFromEntryData } from "../handoff.ts";
+import { observeVerification } from "./verification-observation.ts";
 
 function textJoin(content: unknown): string {
   if (typeof content === "string") return content;
@@ -73,44 +77,13 @@ const noiseCustomTypes = new Set([
   "dc-audit-run",
 ]);
 
-function isSystemUserContent(text: string): boolean {
-  const trimmed = text.trim();
-  return (
-    trimmed.startsWith("<skill ") ||
-    trimmed.startsWith("<skill>") ||
-    trimmed.startsWith("Context was compacted") ||
-    trimmed.startsWith("## Active Tasks") ||
-    trimmed.startsWith('<bard type="BARD">')
-  );
-}
-
-const compactionMetricRE = /^_\d+.*tokens.*reduction_/;
-
-const compactionNoisePrefixes = [
-  "[User] Working directory:",
-  "[User] # Project-specific rules",
-  "[User] ## Memory",
-  "[User] ## Active Tasks",
-  "[User] [OCPD EXTENSION ACTIVE]",
-  "[User] # Recent Pi Sessions",
-  "[User] Memory reminder:",
-];
-
-const compactionNoiseContains = ["skill matches", "kb matches", "[rtk filter active]"];
-
-function isCompactionNoiseLine(line: string): boolean {
-  if (compactionMetricRE.test(line)) return false;
-  if (!line.startsWith("[User] ")) return false;
-  if (compactionNoisePrefixes.some((prefix) => line.startsWith(prefix))) return true;
-  const content = line.slice("[User] ".length);
-  return compactionNoiseContains.some((needle) => content.includes(needle));
-}
-
+// Historical summaries have lost typed provenance. Remove only exact standalone
+// filler there; headings, prefixes, and substring matches may be human instructions.
 function stripNoiseFromCompaction(text: string): string {
-  return text
-    .split("\n")
-    .filter((line) => !isCompactionNoiseLine(line))
-    .join("\n");
+  return text.split("\n").filter((line) => {
+    if (!line.startsWith("[User] ")) return true;
+    return !noiseStrings.includes(line.slice("[User] ".length).trim());
+  }).join("\n");
 }
 
 function normalizeUser(blocks: Array<Record<string, unknown>>): NormalizedBlock[] {
@@ -118,7 +91,6 @@ function normalizeUser(blocks: Array<Record<string, unknown>>): NormalizedBlock[
   const raw = textJoin(blocks);
   const text = sanitize(raw).trim();
   if (text) {
-    if (isSystemUserContent(text)) return [];
     out.push({ kind: KIND_USER, text, origin: "human" });
   }
   for (const block of blocks) {
@@ -158,15 +130,54 @@ function normalizeAssistant(blocks: Array<Record<string, unknown>>): NormalizedB
 // when the text contains no handoff marker — the summary then degrades to
 // byte-identical output.
 
-const handoffRE = /<handoff>([\s\S]*?)<\/handoff>/gi;
-
 function extractHandoff(text: string): string | undefined {
-  let last: string | undefined;
-  for (const match of text.matchAll(handoffRE)) {
-    const inner = match[1].trim();
-    if (inner) last = inner;
+  if (text.length > 262_144) return undefined;
+  const lines = text.split("\n"), outside = outsideExampleLines(lines);
+  // Inline backticks and quotations cannot authorize a handoff. Markers still
+  // support inline prose and multiline bodies at unquoted boundaries.
+  let offset = 0;
+  const eligible = new Set<number>();
+  let delimiter: string | undefined;
+  for (let line = 0; line < lines.length; line++) {
+    const value = lines[line];
+    if (outside[line] || delimiter?.startsWith("`")) for (let i = 0; i < value.length; i++) {
+      const ch = value[i];
+      if (ch === "\\") { i++; continue; }
+      if (ch === "`") {
+        let end = i + 1;
+        while (value[end] === "`") end++;
+        const run = value.slice(i, end);
+        if (delimiter === run) delimiter = undefined;
+        else if (!delimiter) delimiter = run;
+        i = end - 1;
+        continue;
+      }
+      if (delimiter) {
+        if (ch === delimiter && (ch !== "'" || i + 1 === value.length || /[\s).,;:!?]/.test(value[i + 1]))) delimiter = undefined;
+        continue;
+      }
+      // Apostrophes inside words are contractions, not quotation boundaries.
+      if ((ch === "'" || ch === '"' || ch === "“") && (i === 0 || /[\s([{:=]/.test(value[i - 1]))) {
+        delimiter = ch === "“" ? "”" : ch;
+        continue;
+      }
+      if (ch === "<" && /^<\/?handoff>/i.test(value.slice(i))) eligible.add(offset + i);
+    }
+    offset += value.length + 1;
   }
-  return last;
+  let start: number | undefined, last: string | undefined;
+  for (const match of text.matchAll(/<\/?handoff>/gi)) {
+    if (!eligible.has(match.index!)) continue;
+    if (match[0].toLowerCase() === "<handoff>") {
+      if (start !== undefined) return undefined;
+      start = match.index! + match[0].length;
+    } else {
+      if (start === undefined) return undefined;
+      const inner = text.slice(start, match.index).trim(); if (inner) last = inner;
+      start = undefined;
+    }
+  }
+  return start === undefined ? last : undefined;
 }
 
 function parseLine(line: string): unknown {
@@ -190,6 +201,13 @@ const emptyNormalizedEntry: NormalizedEntry = {
 function normalizeSessionEntry(entry: Record<string, unknown>, meta: SessionMeta): NormalizedEntry {
   switch (entry.type) {
     case "session":
+      if (entry.checkpoint !== undefined) { if (typeof entry.checkpointDigest !== "string") throw new CompactionInputError("missing checkpoint digest", "invalid_checkpoint"); meta.checkpoint = validateCheckpoint(entry.checkpoint, entry.checkpointDigest); }
+      if (typeof entry.checkpointDigest === "string") meta.checkpointDigest = entry.checkpointDigest;
+      if (typeof entry.predecessorEntryId === "string") meta.predecessorEntryId = entry.predecessorEntryId;
+      if (Array.isArray(entry.checkpointUpdates)) meta.checkpointUpdates = entry.checkpointUpdates.map((update: unknown) => {
+        if (!isRecord(update) || typeof update.entryId !== "string" || typeof update.checkpointDigest !== "string") throw new CompactionInputError("invalid saved checkpoint update", "invalid_checkpoint");
+        return { checkpoint: validateCheckpoint(update.checkpoint, update.checkpointDigest), checkpointDigest: update.checkpointDigest, entryId: update.entryId };
+      });
       meta.id = typeof entry.id === "string" ? entry.id : meta.id;
       meta.cwd = typeof entry.cwd === "string" ? entry.cwd : meta.cwd;
       meta.timestamp = typeof entry.timestamp === "string" ? entry.timestamp : meta.timestamp;
@@ -204,6 +222,12 @@ function normalizeSessionEntry(entry: Record<string, unknown>, meta: SessionMeta
     case "message":
       return normalizeMessageEntry(entry, meta);
     case "compaction":
+      if (isRecord(entry.details) && entry.details.compactor === "dc-distill" && entry.details.version === 13) {
+        if (typeof entry.details.checkpointDigest !== "string") throw new CompactionInputError("missing v13 checkpoint digest", "invalid_checkpoint");
+        meta.checkpoint = validateCheckpoint(entry.details.checkpoint, entry.details.checkpointDigest);
+        meta.checkpointDigest = entry.details.checkpointDigest;
+        meta.predecessorEntryId = typeof entry.id === "string" ? entry.id : undefined;
+      }
       return normalizeSummaryEntry(entry.summary, meta, stripNoiseFromCompaction);
     case "branch_summary":
       return normalizeSummaryEntry(entry.summary, meta, (text) => text);
@@ -271,6 +295,7 @@ function normalizeCustomEntry(entry: Record<string, unknown>, meta: SessionMeta)
 
 function saveHandoff(meta: SessionMeta, handoff: string | undefined): NormalizedEntry {
   if (!handoff) return emptyNormalizedEntry;
+  (meta.declarations ??= []).push(sanitize(handoff));
   meta.handoff = sanitize(handoff);
   meta.handoffSource = "saved";
   return { ...emptyNormalizedEntry, usefulRecordCount: 1 };
@@ -293,7 +318,8 @@ function normalizeMessageEntry(entry: Record<string, unknown>, meta: SessionMeta
         name: typeof message.toolName === "string" ? message.toolName : "",
         callId: typeof message.toolCallId === "string" ? message.toolCallId : undefined,
         text: sanitize(textJoin(blocks)),
-        isError: Boolean(message.isError),
+        hostTruncated: message.truncated === true || (isRecord(message.details) && (message.details.truncated === true || (isRecord(message.details.truncation) && message.details.truncation.truncated === true))),
+        isError: typeof message.isError === "boolean" ? message.isError : undefined,
       }],
       usefulRecordCount: 1,
     };
@@ -303,6 +329,7 @@ function normalizeMessageEntry(entry: Record<string, unknown>, meta: SessionMeta
 
 function captureAssistantHandoff(blocks: Array<Record<string, unknown>>, meta: SessionMeta): void {
   const handoff = extractHandoff(sanitize(textJoin(blocks)));
+  if (handoff) (meta.declarations ??= []).push(handoff);
   if (handoff && meta.handoffSource !== "saved") {
     meta.handoff = handoff;
     meta.handoffSource = "assistant";
@@ -330,6 +357,8 @@ export function normalizeSessionJsonl(content: string, signal?: AbortSignal): { 
   let invalidRecordCount = 0;
 
   let lineNumber = 0;
+  let recordCount = 0;
+  const budget = { visited: 0, containers: 0 };
   for (const line of content.split(/\n/)) {
     if (lineNumber++ % 128 === 0) checkAbort(signal);
     if (!line.trim()) continue;
@@ -339,15 +368,42 @@ export function normalizeSessionJsonl(content: string, signal?: AbortSignal): { 
       continue;
     }
 
+    if (entry.type !== "session" && ++recordCount > 50_000) throw new CompactionInputError("discarded record limit exceeded", "required_analysis_overflow");
+    assertStructuralBounds(entry, budget);
+    const priorDeclarations = meta.declarations?.length ?? 0;
     const normalized = normalizeSessionEntry(entry, meta);
+    const message = isRecord(entry.message) ? entry.message : {};
+    const hasBlockReferences = Array.isArray(entry.sourceReferences);
+    const original = hasBlockReferences ? contentBlocks(message.content) : [];
+    const assistantIndices = hasBlockReferences && message.role === "assistant"
+      ? original.flatMap((block,index) => ["text","thinking","toolCall"].includes(String(block.type)) ? [index] : []) : [];
+    const referenceFor = (index: number) => {
+      if (!Array.isArray(entry.sourceReferences)) return isRecord(entry.sourceReference) ? entry.sourceReference as unknown as NormalizedBlock["sourceReference"] : undefined;
+      const blockIndex = message.role === "assistant" ? assistantIndices[index] : original.length === 1 ? 0 : undefined;
+      const references = entry.sourceReferences.filter(ref => isRecord(ref) && ref.blockIndex === blockIndex);
+      return blockIndex !== undefined && references.length === 1 ? references[0] as NormalizedBlock["sourceReference"] : undefined;
+    };
+    for (let index = priorDeclarations; index < (meta.declarations?.length ?? 0); index++) {
+      let source = referenceFor(0);
+      if (message.role === "assistant" && Array.isArray(entry.sourceReferences)) {
+        const handoff = meta.declarations![index];
+        const matches = original.flatMap((block,blockIndex) => block.type === "text" && sanitize(String(block.text ?? "")).includes(handoff) ? [blockIndex] : []);
+        if (matches.length !== 1) throw new CompactionInputError("ambiguous declaration source occurrence", "invalid_checkpoint");
+        const references = entry.sourceReferences.filter(ref => isRecord(ref) && ref.blockIndex === matches[0]);
+        if (references.length !== 1) throw new CompactionInputError("missing declaration source occurrence", "invalid_checkpoint");
+        source = references[0] as NormalizedBlock["sourceReference"];
+      }
+      (meta.declarationSources ??= [])[index] = source;
+    }
     usefulRecordCount += normalized.usefulRecordCount;
-    main.push(...normalized.main);
+    main.push(...normalized.main.map((block,index) => ({ ...block,
+      sourceReference: referenceFor(index),
+      sourceKind: ["user", "bash", "agent-declaration", "tool-observation", "legacy"].includes(String(entry.sourceKind)) ? entry.sourceKind as NormalizedBlock["sourceKind"] : block.kind === KIND_USER && block.origin !== "custom" ? "user" : block.kind === KIND_ASSISTANT ? "agent-declaration" : block.kind === KIND_TOOL_RESULT ? "tool-observation" : "legacy",
+    })));
   }
 
   return { blocks: main, meta, usefulRecordCount, invalidRecordCount };
 }
-
-const noiseTools = new Set(["TodoWrite", "TodoRead", "ToolSearch", "WebSearch", "AskUser", "ExitSpecMode", "GenerateDroid"]);
 
 const noiseStrings = [
   "Continue from where you left off.",
@@ -356,26 +412,21 @@ const noiseStrings = [
 ];
 
 const noiseXMLWrappers = [
-  /<system-reminder[^>]*>[\s\S]*?<\/system-reminder>/g,
-  /<ide_opened_file[^>]*>[\s\S]*?<\/ide_opened_file>/g,
-  /<command-message[^>]*>[\s\S]*?<\/command-message>/g,
-  /<context-window-usage[^>]*>[\s\S]*?<\/context-window-usage>/g,
+  /<\/?system-reminder\b[^>]*>/g,
+  /<\/?ide_opened_file\b[^>]*>/g,
+  /<\/?command-message\b[^>]*>/g,
+  /<\/?context-window-usage\b[^>]*>/g,
 ];
 
 export function filterNoise(blocks: NormalizedBlock[]): NormalizedBlock[] {
   const out: NormalizedBlock[] = [];
   for (const block of blocks) {
     if (block.kind === KIND_THINKING) continue;
-    if ((block.kind === KIND_TOOL_CALL || block.kind === KIND_TOOL_RESULT) && noiseTools.has(block.name ?? "")) {
-      continue;
-    }
     if (block.kind === KIND_USER) {
-      const trimmed = (block.text ?? "").trim();
-      if (noiseStrings.some((needle) => trimmed.includes(needle))) continue;
       let cleaned = block.text ?? "";
       for (const wrapper of noiseXMLWrappers) cleaned = cleaned.replace(wrapper, "");
       cleaned = cleaned.trim();
-      if (!cleaned) continue;
+      if (!cleaned || noiseStrings.includes(cleaned)) continue;
       out.push({ ...block, kind: KIND_USER, text: cleaned });
       continue;
     }
@@ -396,36 +447,42 @@ const filePathRE = /(?:^|[\s:])(\/?(?:[A-Za-z0-9._-]+\/)+[A-Za-z0-9._-]+\.[A-Za-
 
 const exitCodeRE = /\b(?:exit code|Exit code|exit)\s*[:=]?\s*(\d+)\b/;
 
-const errorLineRE = /^\s*(?:Error|error|ERROR|Fatal|fatal|FATAL|Exception|Traceback|FAIL|Warning:)/;
+const errorLineRE = /^\s*(?:[A-Za-z]*Error\b|Fatal\b|Exception\b|Traceback\b|(?:---\s+)?FAIL\b|Warning:)/i;
 
 function compressResultText(text: string, isError: boolean): string {
   const trimmed = text.trimEnd();
   if (trimmed.length <= maxCompressedLen) return trimmed;
   const lines = trimmed.split("\n");
-  const parts: string[] = [];
-  const firstLine = (lines[0] ?? "").trim().slice(0, 200);
-  if (firstLine) parts.push(firstLine);
   if (isError) {
-    for (const line of lines) {
-      if (!errorLineRE.test(line)) continue;
-      const errorLine = line.trim().slice(0, 200);
-      if (errorLine && errorLine !== firstLine) parts.push(errorLine);
-      if (parts.length >= errorHeadLines) break;
+    // Source positions, rather than text equality, define retained/omitted lines.
+    // Reserve the final two nonblank lines before selecting explicit diagnostics.
+    const positions = lines.flatMap((line, index) => line.trim() ? [index] : []);
+    const selected = new Set(positions.slice(-errorTailLines));
+    let diagnostics = 0;
+    for (let index = 0; index < lines.length && diagnostics < errorHeadLines; index++) {
+      if (!selected.has(index) && errorLineRE.test(lines[index])) {
+        selected.add(index);
+        diagnostics++;
+      }
     }
+    const kept = [...selected].sort((a, b) => a - b);
+    const compressed = kept.map((index) => sliceU16(lines[index].trim(), 200)).join("\n");
+    if (trimmed.length - compressed.length < 100) return trimmed;
+    return `${compressed}\n...(${lines.length - selected.size} lines omitted)`;
   }
+  const parts: string[] = [];
+  const firstLine = sliceU16((lines[0] ?? "").trim(), 200);
+  if (firstLine) parts.push(firstLine);
   const paths = Array.from(new Set(Array.from(trimmed.matchAll(filePathRE)).map((m) => m[0].trim())))
     .filter((path) => !path.startsWith("/dev/") && !path.startsWith("/proc/"))
     .slice(0, 5);
   if (paths.length > 0) parts.push(`paths: ${paths.join(", ")}`);
   const exitCode = lines.slice(-3).map((line) => exitCodeRE.exec(line)?.[1]).find(Boolean);
   if (exitCode && exitCode !== "0") parts.push(`exit: ${exitCode}`);
-  const lastLine = (lines.at(-1) ?? "").trim().slice(0, 200);
+  const lastLine = sliceU16((lines.at(-1) ?? "").trim(), 200);
   if (lastLine && lastLine !== firstLine && !parts.includes(lastLine)) parts.push(lastLine);
 
-  const keptLines =
-    isError && parts.length > 6
-      ? [...parts.slice(0, errorHeadLines), ...parts.slice(parts.length - errorTailLines)]
-      : parts.slice(0, toolResultHeadLines);
+  const keptLines = parts.slice(0, toolResultHeadLines);
 
   const compressed = keptLines.join("\n");
   if (trimmed.length - compressed.length < 100) return trimmed;
@@ -435,7 +492,12 @@ function compressResultText(text: string, isError: boolean): string {
 export function compressToolResults(blocks: NormalizedBlock[]): NormalizedBlock[] {
   return blocks.map((block) =>
     block.kind === KIND_TOOL_RESULT
-      ? { ...block, text: compressResultText(block.text ?? "", Boolean(block.isError)) }
+      ? {
+          ...block,
+          suppliedImports: [...new Set(Array.from((block.text ?? "").matchAll(/(?:\bfrom\s*|\bimport\s*\(\s*|\brequire\s*\(\s*|\bimport\s*)["'](\.\.?\/[^"'\n]+\.[A-Za-z0-9]+)["']/g), (match) => match[1]))],
+          verificationObservation: block.verificationObservation ?? observeVerification(block.text ?? "", block.hostTruncated && block.isError !== true ? undefined : block.isError),
+          text: compressResultText(block.text ?? "", Boolean(block.isError)),
+        }
       : block,
   );
 }

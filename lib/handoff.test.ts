@@ -4,9 +4,12 @@ import {
   parseAnyStructuredDistillHandoff,
   parseStructuredDistillHandoff,
   parseStructuredDistillHandoffV2,
+  parseStructuredDistillHandoffV3,
+  isStructuredDistillHandoffV3,
   readyDistillHandoffTasks,
   distillHandoffEntry,
   type StructuredDistillHandoffV2,
+  type StructuredDistillHandoffV3,
 } from "./handoff.ts";
 
 function envelope(json: string): string {
@@ -165,5 +168,114 @@ describe("structured distill handoff", () => {
   test("retains conservative v1 raw-key validation", () => {
     const json = JSON.stringify(valid).replace('"objective":', '"obj\\u0065ctive":');
     expect(parseStructuredDistillHandoff(envelope(json))).toBeUndefined();
+  });
+});
+
+function envelopeV3(value: unknown): string {
+  return `\`\`\`distill-handoff-v3\n${JSON.stringify(value)}\n\`\`\``;
+}
+
+const validV3: Omit<StructuredDistillHandoffV3, "version"> = {
+  ...validV2,
+  tasks: validV2.tasks.map((task) => ({ ...task, requires: task.id === "T2" ? ["P1", "P2"] : [] })),
+  preconditions: [
+    { id: "P1", kind: "file-read-succeeded", path: "src/../src/parser.ts", cwd: "/tmp/project" },
+    { id: "P2", kind: "verification-pass", runner: "Bash", command: " bun test lib/handoff.test.ts\n", cwd: "/tmp/project" },
+  ],
+};
+
+describe("observed-readiness v3 handoff parser", () => {
+  test("retains exact predicate identity and intact graph readiness", () => {
+    const text = envelopeV3(validV3);
+    const parsed = parseStructuredDistillHandoffV3(text)!;
+    expect(parsed).toEqual({ version: 3, ...validV3 });
+    expect(parseAnyStructuredDistillHandoff(text)).toEqual(parsed);
+    expect(isStructuredDistillHandoffV3(parsed)).toBe(true);
+    expect(readyDistillHandoffTasks(parsed).map((task) => task.id)).toEqual(["T2", "T3"]);
+    expect(readyDistillHandoffTasks(parsed)[0].requires).toEqual(["P1", "P2"]);
+    expect(parseStructuredDistillHandoffV2(text)).toBeUndefined();
+    expect(isStructuredDistillHandoffV3({ version: 2, ...validV2 })).toBe(false);
+  });
+
+  test("permits empty predicates and requirements", () => {
+    const value = { ...validV3, preconditions: [], tasks: validV3.tasks.map((task) => ({ ...task, requires: [] })) };
+    expect(parseStructuredDistillHandoffV3(envelopeV3(value))).toEqual({ version: 3, ...value });
+  });
+
+  test("accepts the exact 32-predicate cap with unique complete references", () => {
+    const preconditions = Array.from({ length: 32 }, (_, i) => ({ ...validV3.preconditions[0], id: `P${i}` }));
+    const value = { ...validV3, preconditions, tasks: [{ ...validV3.tasks[0], status: "pending", requires: preconditions.map(({ id }) => id) }] };
+    expect(parseStructuredDistillHandoffV3(envelopeV3(value))?.preconditions).toHaveLength(32);
+  });
+
+  test("rejects invalid, duplicated and unknown predicate identities and kinds", () => {
+    const first = validV3.preconditions[0];
+    const values = [
+      { ...validV3, preconditions: [first, first] },
+      { ...validV3, preconditions: [{ ...first, id: "1bad" }] },
+      { ...validV3, preconditions: [{ ...first, kind: "file-exists" }] },
+      { ...validV3, preconditions: Array.from({ length: 33 }, (_, i) => ({ ...first, id: `P${i}` })) },
+      { ...validV3, tasks: [{ ...validV3.tasks[0], requires: ["missing"] }] },
+      { ...validV3, tasks: [{ ...validV3.tasks[0], requires: ["P1", "P1"] }] },
+      { ...validV3, tasks: [{ ...validV3.tasks[0], requires: "P1" }] },
+      { ...validV3, tasks: [{ ...validV3.tasks[0], requires: [null] }] },
+    ];
+    for (const value of values) expect(parseAnyStructuredDistillHandoff(envelopeV3(value))).toBeUndefined();
+  });
+
+  test("requires exact predicate shapes and task requirement fields", () => {
+    for (const predicate of validV3.preconditions) {
+      for (const key of Object.keys(predicate)) {
+        const missing = { ...predicate } as Record<string, unknown>;
+        delete missing[key];
+        expect(parseStructuredDistillHandoffV3(envelopeV3({ ...validV3, preconditions: [missing] }))).toBeUndefined();
+      }
+      expect(parseStructuredDistillHandoffV3(envelopeV3({ ...validV3, preconditions: [{ ...predicate, unknown: true }] }))).toBeUndefined();
+    }
+    const missing = { ...validV3.tasks[0] } as Record<string, unknown>;
+    delete missing.requires;
+    expect(parseStructuredDistillHandoffV3(envelopeV3({ ...validV3, tasks: [missing] }))).toBeUndefined();
+    expect(parseStructuredDistillHandoffV3(envelopeV3({ ...validV3, unknown: true }))).toBeUndefined();
+  });
+
+  test("rejects unknown cwd, unsafe paths, incompatible runners and invalid commands", () => {
+    const read = validV3.preconditions[0];
+    const pass = validV3.preconditions[1];
+    const invalid = [
+      ...[".", "relative/dir", "unknown", " /tmp/project", "/tmp/\0project"].map((cwd) => ({ ...read, cwd })),
+      ...["", " src/parser.ts", "src/\nparser.ts", "src/\0parser.ts"].map((path) => ({ ...read, path })),
+      ...["", "read", "bash ", "exec_command"].map((runner) => ({ ...pass, runner })),
+      ...["", "   ", "bun test\0", "x".repeat(2_049)].map((command) => ({ ...pass, command })),
+    ];
+    for (const predicate of invalid) {
+      expect(parseStructuredDistillHandoffV3(envelopeV3({ ...validV3, preconditions: [predicate] }))).toBeUndefined();
+    }
+  });
+
+  test("rejects cycles, duplicate dependencies and missing references without changing v2", () => {
+    const tasks = [
+      { ...validV3.tasks[0], "depends-on": ["T2"] },
+      { ...validV3.tasks[1], "depends-on": ["T1"] },
+    ];
+    expect(parseStructuredDistillHandoffV3(envelopeV3({ ...validV3, tasks }))).toBeUndefined();
+    for (const dependsOn of [["missing"], ["T1", "T1"], ["T2"]]) {
+      expect(parseStructuredDistillHandoffV3(envelopeV3({ ...validV3, tasks: [validV3.tasks[0], { ...validV3.tasks[1], "depends-on": dependsOn }] }))).toBeUndefined();
+    }
+    const v2 = { ...validV2, tasks: [validV2.tasks[0], { ...validV2.tasks[1], "depends-on": ["T1", "T1"] }] };
+    expect(parseStructuredDistillHandoffV2(envelopeV2(JSON.stringify(v2)))).toBeDefined();
+  });
+
+  test("rejects decoded duplicate predicate keys and trailing prose", () => {
+    const text = envelopeV3(validV3);
+    expect(parseStructuredDistillHandoffV3(text.replace('"kind":', '"k\\u0069nd":"duplicate","kind":'))).toBeUndefined();
+    expect(parseStructuredDistillHandoffV3(`${text}\ntrailing prose`)).toBeUndefined();
+    expect(parseStructuredDistillHandoffV3(text.replace('"kind":', '"k\\u0069nd":'))).toEqual({ version: 3, ...validV3 });
+  });
+
+  test("counts Unicode field boundaries without shortening predicate bytes", () => {
+    const command = "😀".repeat(2_048);
+    const value = { ...validV3, preconditions: [{ ...validV3.preconditions[1], command }], tasks: validV3.tasks.map((task) => ({ ...task, requires: [] })) };
+    expect(parseStructuredDistillHandoffV3(envelopeV3(value))?.preconditions).toEqual(value.preconditions);
+    expect(parseStructuredDistillHandoffV3(envelopeV3({ ...value, preconditions: [{ ...value.preconditions[0], command: `${command}😀` }] }))).toBeUndefined();
   });
 });

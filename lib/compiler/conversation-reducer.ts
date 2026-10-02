@@ -1,5 +1,8 @@
+import { compareCodeUnits } from "../wire-format.ts";
 import { RECENT_REQUEST_GROUPS_TO_KEEP, sliceU16, isBareConfirmation } from "./helpers.ts";
 import { type ConversationTurn, type ToolAdjacent } from "./types.ts";
+import { codePointLength } from "../unicode.ts";
+import { LexicalBudget } from "./lexical-budget.ts";
 
 export function extractSignals(text: string): {
   hasTable: boolean;
@@ -60,9 +63,71 @@ function isSubstantive(signals: Signals): boolean {
 }
 
 function isCompletionReport(text: string): boolean {
-  const trimmed = text.trim();
-  return /(?:<!--\s*EXECUTION:\s*COMPLETE\s*-->|Phase\s+\d+\s+is\s+implemented|\b(?:all\s+tests\s+passed|is\s+implemented|tasks?\s+completed|requested work is complete)\b)/i.test(trimmed) ||
-    /^(?:done|fixed|implemented|completed|shipped)\b[\s\p{P}]/iu.test(trimmed);
+  const prose = terminalText(text);
+  return prose.split(/(?<=[.!?])\s+|\n/).some((statement) => {
+    if (/\b(?:not|never|neither|no|cannot|can't|hasn't|haven't|isn't|aren't|wasn't|weren't|didn't)\b/i.test(statement)) return false;
+    return /^\s*<!--\s*EXECUTION:\s*COMPLETE\s*-->\s*$/i.test(statement) ||
+      /(?:Phase\s+\d+\s+is\s+implemented|\b(?:all\s+tests\s+passed|is\s+implemented|tasks?\s+completed|requested work is complete)\b)/i.test(statement) ||
+      /^(?:done|fixed|implemented|completed|shipped)\b(?:$|[\s\p{P}])/iu.test(statement.trim());
+  });
+}
+
+function hasResumeConstraint(text: string): boolean {
+  return /\b(?:blocked|unresolved|incomplete|unfinished|still failing|approval|permission|authority|do not|don't|must not|only|correction|actually|instead|not verified|still needed)\b/i.test(terminalText(text));
+}
+
+function sameProvenance(left: ConversationTurn, right: ConversationTurn): boolean {
+  return left.requestGroup === right.requestGroup && left.origin === right.origin && left.customType === right.customType;
+}
+
+/** One selection shared by procedural reduction and budget eviction. */
+export function selectAssistantFrontier(turns: ConversationTurn[]): {
+  latestUser: number; latestReply: number; completion: number; proposal: number; pinned: number[];
+} {
+  const latestUser = turns.findLastIndex((turn) => turn.role === "user" && turn.origin !== "custom");
+  const latestReply = turns.findLastIndex((turn) => turn.role === "assistant");
+  let completion = -1;
+  for (let i = turns.length - 1; i > latestUser; i--) {
+    if (turns[i].role === "assistant" && isCompletionReport(terminalText(turns[i].text))) {
+      completion = i;
+      break;
+    }
+  }
+  let proposal = -1;
+  if (latestUser >= 0 && isReferentialImplementation(turns[latestUser].text)) {
+    for (let i = latestUser - 1; i >= 0; i--) {
+      if (turns[i].role === "assistant" && !extractSignals(turns[i].text).pureAck) { proposal = i; break; }
+    }
+  }
+  return { latestUser, latestReply, completion, proposal,
+    pinned: [latestUser, latestReply, completion, proposal].filter((i) => i >= 0) };
+}
+
+export function isReferentialImplementation(text: string): boolean {
+  return isBareConfirmation(text) || /^(?:please\s+)?(?:implement|fix|do|run|ship|finish)(?:\s+(?:it|this|that))?[.!]?$/i.test(text.trim());
+}
+
+function trimCompletion(text: string): string {
+  if (codePointLength(text) <= 2_048) return text;
+  // Completion markers carry no evidence once the report is selected.
+  let out = text.replace(/\n*<!--\s*EXECUTION:\s*COMPLETE\s*-->\s*$/i, "");
+  if (codePointLength(out) <= 2_048) return out;
+  const sections = out.split(/(?=^#{1,6}\s)/m);
+  // Drop complete optional sections, retaining outcomes, caveats and safety.
+  for (let i = sections.length - 1; i > 0 && codePointLength(sections.join("")) > 2_048; i--) {
+    if (/^#{1,6}\s+(?:changed|files|affected files|implementation details)\b/i.test(sections[i]) &&
+        !/\b(?:pre-existing|unapproved|not verified|deferred|caveat|limitation)\b/i.test(sections[i])) sections.splice(i, 1);
+  }
+  out = sections.join("");
+  // Whole paragraph omission preserves complete fences, lists and headings.
+  if (codePointLength(out) > 2_048 && !out.includes("```")) {
+    const paragraphs = out.split(/\n\s*\n/);
+    for (let i = paragraphs.length - 2; i > 0 && codePointLength(paragraphs.join("\n\n")) > 2_048; i--) {
+      if (!/\b(?:pre-existing|unapproved|not verified|deferred|caveat|limitation|safety|current state)\b/i.test(paragraphs[i])) paragraphs.splice(i, 1);
+    }
+    out = paragraphs.join("\n\n");
+  }
+  return out;
 }
 
 function isRecencyExemptTurn(text: string, signals = extractSignals(text)): boolean {
@@ -71,31 +136,46 @@ function isRecencyExemptTurn(text: string, signals = extractSignals(text)): bool
     /(?:<resume-state>|<verification>|sha256=[a-f0-9]{64}|Full output saved;|artifactPath|`[^`]+`)/i.test(text);
 }
 
-export function conversationEvictionCandidates(turns: ConversationTurn[]): Array<{ index: number; priority: number; score: number }> {
-  const pinned = new Set<number>();
-  const latestUser = turns.findLastIndex((turn) => turn.role === "user" && turn.origin !== "custom");
-  const latestAssistant = turns.findLastIndex((turn) => turn.role === "assistant");
-  const latestSubstantive = turns.findLastIndex(
-    (turn) => turn.role === "assistant" && (isCompletionReport(turn.text) || isSubstantive(extractSignals(turn.text))),
-  );
-  for (const index of [latestUser, latestAssistant, latestSubstantive]) {
-    if (index >= 0) pinned.add(index);
-  }
+/** Latest human intent; bare implementation inherits its pinned proposal. */
+export function resolvedFrontierIntent(turns: ConversationTurn[], frontierQuery?: string): string {
+  if (frontierQuery?.trim()) return frontierQuery;
+  const { latestUser, proposal } = selectAssistantFrontier(turns);
+  const request = latestUser >= 0 ? turns[latestUser].text : "";
+  return proposal >= 0 ? request + "\n" + turns[proposal].text : request;
+}
 
+/** Distinct anchored query tokens; sparse prose uses distinct intent tokens. */
+export function technicalAnchorOverlap(text: string, query: string, lexical = new LexicalBudget()): number {
+  const literals = [...query.matchAll(/`([^`\n]+)`/g)].map((match) => match[1]);
+  const identifiers = (query.match(/[A-Za-z_][A-Za-z0-9_./-]*/g) ?? []).filter((value) =>
+    /[a-z][A-Z]|[A-Z]{2,}|_|[\/.]/.test(value));
+  const anchored = literals.concat(identifiers);
+  const intent = new Set(lexical.tokenize(anchored.length ? anchored.join(" ") : query)
+    .filter((token) => token.length > 2 && !/^(?:the|and|for|with|this|that|please|implement|fix|update|change|from|into|use)$/.test(token)));
+  const observed = new Set(lexical.tokenize(text));
+  return Math.min(8, [...intent].filter((token) => observed.has(token)).length);
+}
+
+export function conversationEvictionCandidates(
+  turns: ConversationTurn[], frontierQuery?: string, lexical = new LexicalBudget(),
+): Array<{ index: number; priority: number; score: number }> {
+  const pinned = new Set(selectAssistantFrontier(turns).pinned);
+  const query = resolvedFrontierIntent(turns, frontierQuery);
   const recentFloor = Math.max(0, turns.length - 8);
-  return turns
-    .map((turn, index) => ({
-      index,
-      // Age dominates evidence shape: an old path/diff remains valuable, but it
-      // cannot make the budget impossible or displace the live frontier.
-      priority: (index >= recentFloor ? 1_000 : 0) + (isRecencyExemptTurn(turn.text) ? 100 : 0),
-      score: signalScore(extractSignals(turn.text)),
-    }))
-    .filter(({ index }) => !pinned.has(index) && !turns[index].protectedRequest)
+  return turns.map((turn, index) => {
+    const evidence = isCompletionReport(terminalText(turn.text)) || extractSignals(turn.text).hasErrDiag ||
+      /\b(?:pre-existing|unapproved|not verified|deferred|caveat|limitation)\b/i.test(turn.text);
+    return { index,
+      // Structural retention bands dominate topical overlap; syntax alone does not.
+      priority: (index >= recentFloor ? 1_000 : 0) + (turn.protectedRequest ? 200 : 0) + (evidence ? 100 : 0),
+      score: technicalAnchorOverlap(turn.text, query, lexical),
+    };
+  }).filter(({ index }) => !pinned.has(index))
     .sort((a, b) => a.priority - b.priority || a.score - b.score || a.index - b.index);
 }
 
 export function trimTurn(text: string, ageFromNewest = 0): string {
+  if (isCompletionReport(terminalText(text))) return trimCompletion(text);
   const signals = extractSignals(text);
   const baseLimit = turnTrimLimit(signals);
   const factor = ageFromNewest < 5 ? 1 : ageFromNewest < 20 ? 0.5 : 0.25;
@@ -103,7 +183,7 @@ export function trimTurn(text: string, ageFromNewest = 0): string {
     ? baseLimit
     : Math.max(160, Math.floor(baseLimit * factor));
   if (text.length <= limit) return text;
-  const clipped = text.slice(0, limit);
+  const clipped = sliceU16(text, limit);
   const cutAt = Math.max(clipped.lastIndexOf(" "), clipped.lastIndexOf("\n"));
   return `${cutAt > limit / 2 ? clipped.slice(0, cutAt) : clipped}…`;
 }
@@ -130,7 +210,7 @@ function firstNonEmptyLine(text: string): string {
 
 function topK(counts: Map<string, number>, limit: number): string {
   return [...counts.entries()]
-    .sort((a, b) => b[1] - a[1] || a[0].localeCompare(b[0]))
+    .sort((a, b) => b[1] - a[1] || compareCodeUnits(a[0], b[0]))
     .slice(0, limit)
     .map(([key, count]) => count > 1 ? `${key} (×${count})` : key)
     .join(", ");
@@ -166,12 +246,14 @@ function synthesizeRun(run: ScoredTurn[], precededByUser: ConversationTurn | und
     const last = sliceU16(firstNonEmptyLine(run.at(-1)?.turn.text ?? ""), 300);
     const context = tools || files ? ` — tools: ${tools}; files: ${files}` : "";
     return {
+      ...run[0].turn,
       role: "assistant",
       text: `[${run.length} turns after correction${context} — first: ${JSON.stringify(first)}; last: ${JSON.stringify(last)}]`,
     };
   }
   const tail = sliceU16(firstNonEmptyLine(run.at(-1)?.turn.text ?? ""), 160);
   return {
+    ...run[0].turn,
     role: "assistant",
     text: `[${run.length} procedural turns — tools: ${tools}; files: ${files}] last: ${JSON.stringify(tail)}`,
   };
@@ -209,8 +291,9 @@ function collapseEditLoops(scored: ScoredTurn[]): void {
       scored[start] = {
         ...scored[start],
         turn: {
+          ...scored[start].turn,
           role: "assistant",
-          text: `[loop: ${tool} ${target} × ${attempts} attempts, ${failures} failed — last: ${JSON.stringify(last)}]`,
+          text: `[loop: ${tool} ${target} × ${attempts} attempts, ${failures} errors observed; outcome unverified — last: ${JSON.stringify(last)}]`,
         },
         drop: false,
         keep: true,
@@ -227,7 +310,7 @@ function collapseEditLoops(scored: ScoredTurn[]): void {
   };
   for (let i = 0; i < scored.length; i++) {
     const st = scored[i];
-    if (st.drop || st.turn.role !== "assistant") {
+    if (st.drop || st.keep || st.turn.role !== "assistant") {
       flush();
       continue;
     }
@@ -237,7 +320,7 @@ function collapseEditLoops(scored: ScoredTurn[]): void {
       flush();
       continue;
     }
-    const same = start >= 0 && tool === t && target === tgt;
+    const same = start >= 0 && tool === t && target === tgt && sameProvenance(scored[start].turn, st.turn);
     if (!same) {
       flush();
       start = i;
@@ -270,6 +353,7 @@ function collapseDenseRepetition(scored: ScoredTurn[]): void {
   };
   const marked = new Set<number>();
   for (let i = 0; i + REP_WINDOW <= scored.length; i++) {
+    if (scored.slice(i, i + REP_WINDOW).some((st) => st.keep || st.turn.role !== "assistant" || !sameProvenance(scored[i].turn, st.turn))) continue;
     let count = 0;
     for (let j = i; j < i + REP_WINDOW; j++) {
       if (qualifies(j)) count++;
@@ -289,7 +373,7 @@ function collapseDenseRepetition(scored: ScoredTurn[]): void {
     if (regionFirst >= 0 && regionCount > 0) {
       scored[regionFirst] = {
         ...scored[regionFirst],
-        turn: { role: "assistant", text: `[${regionCount} repeated procedural turns]` },
+        turn: { ...scored[regionFirst].turn, role: "assistant", text: `[${regionCount} repeated procedural turns]` },
         drop: false,
         keep: true,
       };
@@ -304,7 +388,7 @@ function collapseDenseRepetition(scored: ScoredTurn[]): void {
       prevIdx = idx;
       continue;
     }
-    if (idx - prevIdx > REP_WINDOW) {
+    if (idx - prevIdx > REP_WINDOW || scored.slice(prevIdx + 1, idx + 1).some((st) => st.keep || st.turn.role !== "assistant" || !sameProvenance(scored[regionFirst].turn, st.turn))) {
       close();
       regionFirst = idx;
       regionCount = 1;
@@ -319,21 +403,15 @@ function collapseDenseRepetition(scored: ScoredTurn[]): void {
 }
 
 export function compactAssistantTurns(turns: ConversationTurn[], toolAdj: ToolAdjacent[]): ConversationTurn[] {
-  const pinned = new Set([
-    turns.findLastIndex((turn) => turn.role === "user" && turn.origin !== "custom"),
-    turns.findLastIndex((turn) => turn.role === "assistant"),
-    turns.findLastIndex(
-      (turn) => turn.role === "assistant" && (isCompletionReport(turn.text) || isSubstantive(extractSignals(turn.text))),
-    ),
-  ]);
+  const pinned = new Set(selectAssistantFrontier(turns).pinned);
   const scored = turns.map((turn, index): ScoredTurn => ({
     turn,
     signals: turn.role === "assistant" ? extractSignals(turn.text) : extractSignals(""),
     tools: toolAdj[index]?.tools ?? [],
     files: toolAdj[index]?.files ?? [],
     hadError: toolAdj[index]?.hadError ?? false,
-    keep: pinned.has(index) || turn.protectedRequest === true,
-  })).filter((item) => item.turn.role !== "assistant" || !item.signals.pureAck);
+    keep: pinned.has(index) || turn.protectedRequest === true || hasResumeConstraint(turn.text),
+  })).filter((item) => item.keep || item.turn.role !== "assistant" || !item.signals.pureAck);
 
   collapseEditLoops(scored);
   collapseDenseRepetition(scored);
@@ -358,6 +436,7 @@ export function compactAssistantTurns(turns: ConversationTurn[], toolAdj: ToolAd
       result.push(item.turn);
       continue;
     }
+    if (run.length && !sameProvenance(run[0].turn, item.turn)) flush();
     run.push(item);
   }
   flush();
@@ -366,12 +445,28 @@ export function compactAssistantTurns(turns: ConversationTurn[], toolAdj: ToolAd
 
 type RequestState = "complete" | "open" | "unknown";
 
+/** Shared Markdown boundary scan; an unfinished fence stays excluded to EOF. */
+function outsideCodeLines(lines: string[]): boolean[] {
+  let fence: { character: string; length: number } | undefined;
+  return lines.map((line) => {
+    if (/^\s*>/.test(line)) return false;
+    const marker = /^ {0,3}(`{3,}|~{3,})(.*)$/.exec(line);
+    if (marker) {
+      if (!fence) fence = { character: marker[1][0], length: marker[1].length };
+      else if (marker[1][0] === fence.character && marker[1].length >= fence.length && !marker[2].trim()) fence = undefined;
+      return false;
+    }
+    return !fence && !/^(?: {4}|\t)/.test(line);
+  });
+}
+
 function terminalText(text: string): string {
-  return text
-    .replace(/```[\s\S]*?```/g, "")
-    .split("\n")
-    .filter((line) => !/^\s*>/.test(line))
-    .join("\n")
+  const lines = text.split("\n");
+  const outside = outsideCodeLines(lines);
+  return lines.filter((_, index) => outside[index]).join("\n")
+    .replace(/(`+)[^\n]*?\1/g, "")
+    .replace(/"[^"\n]*"|“[^”\n]*”/g, "")
+    .replace(/(^|[\s(])'[^'\n]+'(?=$|[\s).,;])/g, "$1")
     .trim();
 }
 
@@ -383,11 +478,12 @@ function requestState(turns: ConversationTurn[], group: number): RequestState {
   const text = terminalText(latest.text);
   const informationalRequest = /\b(?:explain|review|audit|analy[sz]e|summari[sz]e|assess|inspect|investigate|diagnose|report)\b/i.test(userText) &&
     !/\b(?:fix|implement|change|update|remove|add|write|build|finish|complete|resolve|repair)\b/i.test(userText);
-  const explicitContinuation = /\b(?:still\s+(?:working|investigating)|i(?:'m| am)\s+(?:working|investigating)|investigation\s+is\s+still\s+open|work\s+remains?\s+open|next\s+[—:-]|todo:|remaining\s+(?:work|task|step)|needs?\s+(?:work|verification))\b/i.test(text);
+  const explicitContinuation = /\b(?:still\s+(?:working|investigating)|i(?:'m| am)\s+(?:working|investigating)|investigation\s+is\s+still\s+open|work\s+remains?\s+open|next\s+[—:-]|todo:|remaining\s+(?:work|task|step)|needs?\s+(?:work|verification)|not\s+all\s+tests\s+passed)\b/i.test(text) ||
+    /^(?:(?:currently\s+|still\s+)?(?:investigating|checking|working|looking|reviewing|analy[sz]ing)|(?:investigation|review|analysis|inspection|diagnosis)\s+(?:is\s+)?(?:running|ongoing|pending|in progress)|i(?:'m| am)\s+(?:currently\s+|still\s+)?(?:working|investigating|reviewing|checking|looking|analy[sz]ing)|i(?:'ll| will)\s+(?:investigate|check|review|look))\b/i.test(text);
   if (explicitContinuation || (!informationalRequest && /\b(?:blocked|incomplete|unfinished|unresolved|still\s+(?:open|failing|needed)|remains?\s+(?:broken|open|unfinished|unimplemented)|not\s+(?:implemented|verified|complete)|needs?\s+(?:fix)|remaining\s+issue)\b/i.test(text))) {
     return "open";
   }
-  if (isCompletionReport(text) || /<!--\s*(?:DISPOSITION:\s*IMPLEMENT|EXECUTION:\s*COMPLETE)\s*-->/i.test(text)) {
+  if (isCompletionReport(text) || /^\s*<!--\s*(?:DISPOSITION:\s*IMPLEMENT|EXECUTION:\s*COMPLETE)\s*-->\s*$/im.test(text)) {
     return "complete";
   }
   return informationalRequest && text.length >= 24 ? "complete" : "unknown";
@@ -397,8 +493,30 @@ export function hasTerminalNoWorkCompletion(turns: ConversationTurn[]): boolean 
   const latest = turns.findLast((turn) => turn.role === "assistant");
   if (!latest) return false;
   const text = terminalText(latest.text);
-  return /Next choice:\s*None\b[^\n]*(?:no response needed|task complete)/i.test(text) ||
-    /\b(?:remaining work:\s*none|nothing to pick up)\b/i.test(text);
+  return text.split("\n").some((line) => !/\b(?:not|never|isn't|is not|cannot|can't)\b/i.test(line) &&
+    (/\bNext choice:\s*None\b[^\n]*(?:no response needed|task complete)/i.test(line) ||
+    /\b(?:remaining work:\s*none|nothing to pick up)\b/i.test(line)));
+}
+
+/** Retire workflow controls, never the surrounding historical report. */
+export function retireHistoricalControls(turns: ConversationTurn[], terminalComplete = hasTerminalNoWorkCompletion(turns)): void {
+  if (!terminalComplete) return;
+  const latest = turns.findLastIndex((turn) => turn.role === "assistant");
+  const protocol = /^\s*<!--\s*(?:DISPOSITION:\s*(?:IMPLEMENT|NEEDS_USER_DECISION\s*[—:-].+)|EXECUTION:\s*(?:COMPLETE|BLOCKED\s*[—:-].+))\s*-->\s*$/i;
+  for (let index = 0; index <= latest; index++) {
+    const turn = turns[index];
+    if (turn.role !== "assistant") continue;
+    const lines = turn.text.split("\n");
+    const outside = outsideCodeLines(lines);
+    // A trailer is the final standalone invitation (apart from protocol markers).
+    let trailer = lines.length - 1;
+    while (trailer >= 0 && (!lines[trailer].trim() || (outside[trailer] && protocol.test(lines[trailer])))) trailer--;
+    const requestedLiteral = (line: string) => turns.some(source => source.role === "user" && source.text.includes(line.trim()) && /\b(?:literal|quote|preserve|exact|print|output)\b/i.test(source.text));
+    turn.text = lines.map((line, i) => i === trailer && outside[i] && !requestedLiteral(line) && /Next choice:\s*None\b[^\n]*(?:no response needed|task complete)/i.test(terminalText(line))
+        ? line.replace(/\s+Next choice:\s*None\b[^\n]*(?:no response needed|task complete)[^\n]*$/i, "") : line)
+      .filter((line, i) => !outside[i] || requestedLiteral(line) || (!protocol.test(line) && !(i === trailer && /^Next choice:\s*\S/i.test(line))))
+      .join("\n").trimEnd();
+  }
 }
 
 export function classifyRequestGroups(turns: ConversationTurn[]): Set<number> {
@@ -417,7 +535,7 @@ export function classifyRequestGroups(turns: ConversationTurn[]): Set<number> {
       turn.requestGroup === protectedGroup && turn.role === "assistant");
     if (userIndex >= 0) turns[userIndex].protectedRequest = true;
     if (latestAssistant) latestAssistant.protectedRequest = true;
-    if (userIndex >= 0 && isBareConfirmation(turns[userIndex].text)) {
+    if (userIndex >= 0 && isReferentialImplementation(turns[userIndex].text)) {
       for (let index = userIndex - 1; index >= 0; index--) {
         const candidate = turns[index];
         if (candidate.role !== "assistant") continue;
@@ -449,7 +567,7 @@ export function removeCompletedHistoricalRequests(
     }
   }
   const firstUser = turns.findIndex((turn) => turn.role === "user" && turn.origin !== "custom");
-  if (firstUser > 0 && !isBareConfirmation(turns[firstUser].text)) {
+  if (firstUser > 0 && !isReferentialImplementation(turns[firstUser].text)) {
     for (let index = firstUser - 1; index >= 0; index--) {
       const signals = extractSignals(turns[index].text);
       if (!signals.startsWithFiller && (signals.hasDiff || signals.hasCodeFence)) continue;

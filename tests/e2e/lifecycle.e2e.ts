@@ -11,6 +11,7 @@
  *      (crash simulation) redelivers or nudges the continuation on startup.
  */
 import { describe, expect, test } from "bun:test";
+import { randomBytes } from "node:crypto";
 import { copyFileSync, existsSync, readFileSync, readdirSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { RpcClient, eventsOfType, messageText, type RpcEvent } from "./harness/rpc-client.ts";
@@ -106,7 +107,10 @@ describe("dc-distill real-Pi lifecycle", () => {
 
         const result = end.result as { summary?: string; details?: CompactionDetails };
         expect(result.details?.compactor).toBe("dc-distill");
-        expect(result.details?.version).toBe(9);
+        expect(result.details?.version).toBe(13);
+        expect((result.details as Record<string, any>)?.checkpoint?.version).toBe(1);
+        expect((result.details as Record<string, any>)?.checkpointDigest).toMatch(/^[0-9a-f]{64}$/);
+        expect(result.summary).not.toMatch(/^_.*(?:→|tokens|reduction).*_\n/);
         expect(result.details?.autonomous).toBe(false);
         expect(result.summary).toContain("TASK-13");
 
@@ -168,12 +172,13 @@ describe("dc-distill real-Pi lifecycle", () => {
         }
 
         // Phase 2: the documented startup cooldown holds the check back — the
-        // threshold is crossed, pi has synced usage, but compaction waits out
+        // threshold is crossed with a current finite positive Pi usage sample,
+        // but compaction waits out
         // the cooldown window from session start.
         await new Promise((r) => setTimeout(r, 250));
         const diag = readFileSync(join(t.agentHome, "data", "dc-distill", "diag.log"), "utf8");
         expect(diag).toContain("auto-check blocked reason=cooldown source=agent_settled");
-        expect(diag).toContain("piSynced=true");
+        expect(diag).toContain("sample=finite-positive");
         expect(eventsOfType(client.events, "compaction_start")).toEqual([]);
 
         // Phase 3: ride out the cooldown; the next settled boundary fires.
@@ -416,6 +421,37 @@ describe("dc-distill real-Pi lifecycle", () => {
         expect(details?.resumed).toBe(true);
       } finally {
         await third.close();
+      }
+
+      // Phase 4: a durable user interruption or later compaction supersedes
+      // the old automatic intent, whether delivery had happened or not.
+      // These are sandbox ledger fixtures, not mutations of user sessions.
+      for (const delivered of [false, true]) {
+        for (const superseder of ["user", "manual", "foreign"] as const) {
+          const base = delivered
+            ? resumedLines.slice(0, continuationLine + 1)
+            : seededLines.slice(0, compactionLine + 1);
+          const parent = JSON.parse(base[base.length - 1]!) as Record<string, any>;
+          const id = randomBytes(4).toString("hex");
+          const timestamp = new Date().toISOString();
+          const next = superseder === "user"
+            ? { type: "message", id, parentId: parent.id, timestamp,
+              message: { role: "user", content: [{ type: "text", text: "Stop the old request; work on this new objective." }], timestamp: Date.now() } }
+            : { ...seededEntry, type: "compaction", id, parentId: parent.id, timestamp,
+              details: { ...seededEntry.details, autonomous: false,
+                ...(superseder === "foreign" ? { compactor: "fixture-foreign" } : {}) } };
+          const ledger = join(t.dir, `superseded-${delivered ? "delivered" : "committed"}-${superseder}.jsonl`);
+          writeFileSync(ledger, `${[...base, JSON.stringify(next)].join("\n")}\n`);
+          const restarted = new RpcClient({ args: scriptedArgs(t, [], { session: ledger }), cwd: t.dir,
+            env: piEnv(t, { DISTILL_FAKE_BASE: "4000", DISTILL_FAKE_STEP: "500" }),
+            logFile: join(t.dir, `superseded-${delivered}-${superseder}.log`) });
+          try {
+            expect((await restarted.request({ type: "get_state" })).success).toBe(true);
+            await new Promise((resolve) => setTimeout(resolve, 750));
+            expect(continuationMessages(restarted.events)).toHaveLength(0);
+            expect(eventsOfType(restarted.events, "agent_start")).toHaveLength(0);
+          } finally { await restarted.close(); }
+        }
       }
 
       passed = true;

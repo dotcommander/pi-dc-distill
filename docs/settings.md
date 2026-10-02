@@ -90,7 +90,8 @@ auto-compacts at 120,000. With a 128,000-token model and the same reserve, the
 safe dc-distill boundary is 58,000 (`128000 - 50000 - 20000`).
 
 Emergency compaction is the reported Pi context-window limit. It bypasses
-cooldown and Pi-sync guards. Very small windows use fixed internal floors to
+warmup, cooldown, Pi-sync, and growth guards; valid enabled settings, ownership,
+and concurrency guards still apply. Very small windows use fixed internal floors to
 keep auto, warn, and emergency ordered. If an older Pi cannot report a context
 window, dc-distill falls back to 100,000 / 140,000 / 160,000 tokens.
 
@@ -140,8 +141,15 @@ directory, outside the project checkout.
 Enabled recall keeps ten newest summaries per project; enabled raw dumps keep 20 pairs.
 Tool-output artifacts have no automatic retention limit in the current implementation.
 
-Recall read-modify-write and log/dump operations use locks and atomic framework
-writes. Version-6 recall records include project, session ID, before tokens,
+Recall read-modify-write, migration and live log/dump operations share destination
+locks. Atomic publication preserves the destination on failure. Lock metadata is
+published complete with a nonce and file identity; ambiguous or dead-owner locks
+remain untouched until proven-quiescent cleanup. Crashes can leave incomplete
+flat dump pairs; unmatched files do not evict complete retained pairs.
+
+New recall records include optional host entry ID, summary digest and attempt ID
+for replay identity. Historical records remain readable and unchanged. Records
+include project, session ID, before tokens,
 rebuilt-message after tokens, optional full-context after tokens, token source,
 and the exact returned summary.
 
@@ -195,7 +203,7 @@ compact-dumps/<millisecond-time>-<pid>-<attempt>-after.txt
 ```
 
 The before file contains the compiler's canonical input bytes verbatim. The
-after file contains the exact metric-prefixed wire summary returned to Pi.
+after file contains the exact metric-free wire summary returned to Pi.
 Temporary files are renamed under a lock so partial pairs are not exposed and
 same-millisecond attempts cannot collide.
 

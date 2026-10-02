@@ -7,7 +7,7 @@ export const RECALL_NOTE =
 
 export const COMPILE_SEPARATOR = "\n\n---\n\n";
 
-export const MAX_STRUCTURED_SUMMARY_CODE_POINTS = 65_300;
+export const MAX_STRUCTURED_SUMMARY_CODE_POINTS = 65_536;
 
 export const TARGET_RESUME_SUMMARY_CODE_POINTS = 8_192;
 
@@ -59,8 +59,12 @@ export class OrderedSet {
     if (idx >= 0) this.order.splice(idx, 1);
   }
 
-  slice(): string[] {
-    return [...this.order];
+  get size(): number { return this.order.length; }
+
+  at(index: number): string | undefined { return this.order[index]; }
+
+  slice(start = 0): string[] {
+    return this.order.slice(start);
   }
 }
 

@@ -5,6 +5,8 @@
  */
 import { copyFileSync, readFileSync } from "node:fs";
 import { join } from "node:path";
+import { checkpointDigest as canonicalCheckpointDigest, validateCheckpoint } from "../../lib/compiler/checkpoint.ts";
+import { sha256Hex } from "../../lib/sha256.ts";
 import { RpcClient, eventsOfType } from "./harness/rpc-client.ts";
 import { latestSessionFile, makeTestDir, piEnv, scriptedArgs } from "./harness/env.ts";
 
@@ -74,6 +76,20 @@ async function main(): Promise<void> {
           && (entry.details as { compactor?: unknown } | undefined)?.compactor === "dc-distill",
       );
       if (compactEntries.length !== 1) fail(`expected one extension-owned ledger entry, found ${compactEntries.length}`);
+      const committed = compactEntries[0]!;
+      const committedDetails = committed.details as Record<string, unknown>;
+      if (committedDetails.version !== 13) fail("committed details are not v13");
+      const checkpoint = validateCheckpoint(committedDetails.checkpoint);
+      if (checkpoint.version !== 1) fail("committed checkpoint is not schema v1");
+      if (canonicalCheckpointDigest(checkpoint) !== committedDetails.checkpointDigest) {
+        fail("committed checkpoint digest does not match canonical state");
+      }
+      if (typeof committed.summary !== "string" || sha256Hex(committed.summary) !== committedDetails.summaryDigest) {
+        fail("committed summary digest does not match the exact wire summary");
+      }
+      if (/\best\s*→.*\btokens\s*\([^\n]*% reduction\)|^Shrunk:/m.test(committed.summary)) {
+        fail("committed wire summary contains a model-facing metric line");
+      }
 
       const requests = readJsonLines(artifacts.traceFile);
       const summaryRequests = requests.filter((entry) => entry.kind === "summary");
@@ -90,7 +106,7 @@ async function main(): Promise<void> {
       console.log("  rpc.log");
       console.log("  provider-trace.jsonl");
       console.log(`Provider requests: ${requests.length}; summarizer requests: ${summaryRequests.length}`);
-      console.log("Compaction: one dc-distill ledger entry; manual continuation-free lifecycle.");
+      console.log("Compaction: one v13 ledger entry; validated v1 checkpoint and exact digests; metric-free manual lifecycle.");
     } finally {
       await client.close();
     }

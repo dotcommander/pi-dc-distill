@@ -49,6 +49,7 @@ export interface ContextInterceptResult {
 
 export interface ToolResultPatch {
   content?: unknown;
+  structuredContent?: unknown;
   details?: unknown;
   isError?: boolean;
 }

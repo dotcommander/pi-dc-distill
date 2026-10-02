@@ -4,12 +4,17 @@ import { mkdtemp, readFile, writeFile } from "node:fs/promises";
 import { existsSync, mkdtempSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { createStubCtx, simulate } from "./tests/harness/fake-pi.ts";
+import { createStubCtx, simulate as rawSimulate } from "./tests/harness/fake-pi.ts";
+import { withPreparationBranch } from "./tests/harness/preparation-fixture.ts";
+const simulate = { ...rawSimulate, hook: (stub: Parameters<typeof rawSimulate.hook>[0], name: string, event: any) =>
+  rawSimulate.hook(stub, name, name === "session_before_compact" ? withPreparationBranch(event, stub.sessionBranch) : event) };
+
 import { buildSessionContext, estimateTokens } from "./lib/sdk.ts";
 import { createDistillExtension } from "./index.ts";
 import { DISTILL_HANDOFF_ENTRY_TYPE } from "./lib/handoff.ts";
 import { DISTILL_CONTINUATION_MESSAGE_TYPE } from "./lib/continuation.ts";
 import { DistillStore } from "./lib/store.ts";
+import { checkpointDigest as canonicalCheckpointDigest, type ResumeCheckpointV1 } from "./lib/compiler/checkpoint.ts";
 
 const testRoot = mkdtempSync(join(tmpdir(), "dc-distill-index-tests-"));
 const extension = createDistillExtension({
@@ -81,8 +86,7 @@ describe("dc-distill entrypoint", () => {
     );
 
     expect(source).not.toMatch(/Notify\.user\(\s*(?:`|"|')/);
-    expect(source).toContain("compaction: runtime.compactionSettings");
-    expect(source).toContain("if (!runtime.compactionSettings.enabled) {");
+    expect(source).toContain("runtime.assess(ctx)");
   });
 
   test("does not register compact-status as a slash command", () => {
@@ -195,12 +199,13 @@ describe("dc-distill host compaction override", () => {
           tokensBefore: 120_000,
           details: {
             compactor: "dc-distill",
-            version: 9,
+            version: 13,
             tokensAfterSource: "pi-rebuilt-message-estimate",
           },
         },
       });
       expect(Array.from((result as any).compaction.summary).length).toBeLessThanOrEqual(65_536);
+      await simulate.hook(stub, "session_compact_failed", { reason, aborted: true, fromExtension: true, attemptId: (result as any).compaction.details.attemptId });
     }
   });
 
@@ -229,14 +234,17 @@ describe("dc-distill host compaction override", () => {
     );
 
     expect(result).toMatchObject({
-      compaction: { details: { compactor: "dc-distill", version: 9 } },
+      compaction: { details: { compactor: "dc-distill", version: 13 } },
     });
   });
 
-  test("tokensAfter matches Pi's rebuilt message-context calculation", async () => {
+  test("metric uses Pi's preparation estimate and matches rebuilt context with API telemetry", async () => {
     const stub = createStubCtx();
     extension(stub.pi);
     await simulate.hook(stub, "session_start", {});
+    await simulate.hook(stub, "message_end", {
+      message: { role: "assistant", content: [], usage: { totalTokens: 95_000 } },
+    });
     const timestamp = "2026-07-13T00:00:00.000Z";
     const branchEntries = [
       { type: "message", id: "discarded", parentId: null, timestamp, message: { role: "user", content: "discard me", timestamp: 1 } },
@@ -245,7 +253,8 @@ describe("dc-distill host compaction override", () => {
     const event = compactEvent("manual");
     (event as any).branchEntries = branchEntries;
     event.preparation.firstKeptEntryId = "retained";
-    event.preparation.messagesToSummarize = [{ role: "user", content: "discard me" }];
+    event.preparation.tokensBefore = 100_000;
+    event.preparation.messagesToSummarize = [branchEntries[0].message];
 
     const [prepared] = await simulate.hook(stub, "session_before_compact", event);
     const compaction = (prepared as any).compaction;
@@ -259,6 +268,15 @@ describe("dc-distill host compaction override", () => {
     const rebuilt = buildSessionContext([...branchEntries, entry], entry.id);
     const expected = rebuilt.messages.reduce((sum, message) => sum + estimateTokens(message), 0);
     expect(compaction.details.tokensAfter).toBe(expected);
+    const reductionPct = Math.round(((100_000 - expected) / 100_000) * 100);
+    expect(compaction.summary).not.toContain(" est → ");
+    expect(compaction.details.reductionPct).toBe(reductionPct);
+    expect(compaction.tokensBefore).toBe(100_000);
+    expect(compaction.details.apiTokensBefore).toBe(95_000);
+    expect(compaction.details.reductionPct).toBe(reductionPct);
+    expect(compaction.details.summaryDigest).toBe(
+      createHash("sha256").update(compaction.summary).digest("hex"),
+    );
   });
 
   test("cancels when deterministic compaction fails", async () => {
@@ -343,7 +361,7 @@ describe("dc-distill host compaction override", () => {
       "session_before_compact",
       compactEvent("manual"),
     );
-    compaction = (restaged as any).compaction;
+    expect(restaged).toEqual({ cancel: true });
 
     await simulate.hook(stub, "session_compact", {
       fromExtension: true,
@@ -374,12 +392,12 @@ describe("dc-distill host compaction override", () => {
     expect(notificationText(stub)).toHaveLength(notifications);
   });
 
-  test("rejects a historical v8 append for a newly prepared v9 transaction", async () => {
+  for (const historicalVersion of [5, 6, 7, 8, 9, 10, 11]) test(`rejects a historical v${historicalVersion} append for a newly prepared v13 transaction`, async () => {
     const { stub, root } = failureReportingFixture(false);
     await simulate.hook(stub, "session_start", {});
     const [prepared] = await simulate.hook(stub, "session_before_compact", compactEvent("manual"));
     const compaction = (prepared as any).compaction;
-    expect(compaction.details.version).toBe(9);
+    expect(compaction.details.version).toBe(13);
 
     await simulate.hook(stub, "session_compact", {
       fromExtension: true,
@@ -389,19 +407,22 @@ describe("dc-distill host compaction override", () => {
         parentId: null,
         timestamp: new Date().toISOString(),
         ...compaction,
-        details: { ...compaction.details, version: 8 },
+        details: { ...compaction.details, version: historicalVersion },
       },
     });
     expect(notificationText(stub).join("\n")).not.toContain("Shrunk:");
     expect(existsSync(join(root, "data", "compact-log.jsonl"))).toBe(false);
     expect(existsSync(join(root, "project", "recall.json"))).toBe(false);
 
-    // Releasing the mismatched attempt must leave future manual compaction usable.
+    // A stale mismatched event preserves ownership. Only matching commit releases it.
+    expect((await simulate.hook(stub, "session_before_compact", compactEvent("manual")))[0]).toEqual({ cancel: true });
+    await simulate.hook(stub, "session_compact", { fromExtension: true,
+      compactionEntry: { type: "compaction", id: "matching-current", ...compaction } });
     const [replacement] = await simulate.hook(stub, "session_before_compact", compactEvent("manual"));
-    expect(replacement).toMatchObject({ compaction: { details: { version: 9 } } });
+    expect(replacement).toMatchObject({ compaction: { details: { version: 13 } } });
     await simulate.hook(stub, "session_compact", {
       fromExtension: true,
-      compactionEntry: { type: "compaction", id: "matching-v9", ...(replacement as any).compaction },
+      compactionEntry: { type: "compaction", id: "matching-v11", ...(replacement as any).compaction },
     });
     expect(existsSync(join(root, "data", "compact-log.jsonl"))).toBe(true);
   });
@@ -492,7 +513,7 @@ describe("dc-distill subagent safety", () => {
     expect(compactCalls(stub).length).toBe(1);
   });
 
-  test("session_compact_failed clears an autonomous attempt for a later retry", async () => {
+  test("captured terminal callback clears an autonomous attempt for a later retry", async () => {
     const stub = createStubCtx();
     extension(stub.pi);
     await simulate.hook(stub, "session_start", {});
@@ -514,10 +535,13 @@ describe("dc-distill subagent safety", () => {
       fromExtension: true,
     });
     await simulate.hook(stub, "agent_settled", {});
+    expect(compactCalls(stub).length).toBe(1);
+    (compactCalls(stub)[0] as any).args[0].onError(new Error("original terminal failure"));
+    await simulate.hook(stub, "agent_settled", {});
     expect(compactCalls(stub).length).toBe(2);
   });
 
-  test("session_compact_failed releases the autonomous latch when failure logging rejects", async () => {
+  test("captured callback releases the autonomous latch when failure logging rejects", async () => {
     const { stub, failures, root } = failureReportingFixture(true);
     await simulate.hook(stub, "session_start", {});
     await simulate.hook(stub, "agent_settled", {});
@@ -530,6 +554,7 @@ describe("dc-distill subagent safety", () => {
       willRetry: false, fromExtension: true,
     });
     expect(failures).toEqual([["Compaction failed (threshold): original host failure"]]);
+    (compactCalls(stub)[0] as any).args[0].onError(new Error("original terminal failure"));
     await simulate.hook(stub, "agent_settled", {});
     expect(compactCalls(stub)).toHaveLength(2);
     expect(existsSync(join(root, "data", "compact-log.jsonl"))).toBe(false);
@@ -595,11 +620,19 @@ describe("dc-distill subagent safety", () => {
         },
       },
     );
-    expect(replacement).toMatchObject({ compaction: { details: { version: 9 } } });
+    expect(replacement).toMatchObject({ compaction: { details: { version: 13 } } });
   });
 });
 
 describe("dc-distill durable continuation recovery", () => {
+  function recoveryStub() {
+    const stub = createStubCtx();
+    const id = `recovery-${crypto.randomUUID()}`;
+    stub.ctx.sessionManager.getSessionId = () => id;
+    stub.cmdCtx.sessionManager.getSessionId = () => id;
+    return stub;
+  }
+
   function tick(): Promise<void> {
     return new Promise<void>((resolve) => setImmediate(resolve));
   }
@@ -642,8 +675,85 @@ describe("dc-distill durable continuation recovery", () => {
     ];
   }
 
+  test("busy-to-idle settlement recovers before another autonomous check", async () => {
+    const stub = recoveryStub();
+    let idle = false;
+    stub.ctx.isIdle = () => idle;
+    stub.ctx.sessionManager.getBranch = () => autonomousBranch();
+    extension(stub.pi);
+    await simulate.hook(stub, "session_start", {});
+    await tick();
+    expect(continuationMessages(stub)).toHaveLength(0);
+    idle = true;
+    stub.ctx.getContextUsage = () => ({ tokens: 200000, contextWindow: 200000, percent: 100 });
+    await simulate.hook(stub, "agent_settled", {});
+    await tick();
+    expect(continuationMessages(stub)).toHaveLength(1);
+    expect(stub.calls.filter(call => call.api === "ctx.compact")).toHaveLength(0);
+  });
+
+  test("uncertain send is fenced across reload and return to an unjournalled branch", async () => {
+    const stub = recoveryStub();
+    let sends = 0;
+    stub.pi.sendMessage = (() => { sends++; throw new Error("unknown outcome"); }) as any;
+    stub.ctx.sessionManager.getBranch = () => autonomousBranch();
+    extension(stub.pi);
+    await simulate.hook(stub, "session_start", {});
+    await tick();
+    expect(sends).toBe(1);
+    stub.ctx.sessionManager.getBranch = () => [];
+    await simulate.hook(stub, "session_tree", {});
+    stub.ctx.sessionManager.getBranch = () => autonomousBranch();
+    await simulate.hook(stub, "session_tree", {});
+    await simulate.hook(stub, "session_start", {});
+    await tick();
+    expect(sends).toBe(1);
+    // A fresh extension instance must retain the same process fence too.
+    const fresh = recoveryStub();
+    fresh.ctx.sessionManager.getSessionId = stub.ctx.sessionManager.getSessionId;
+    fresh.ctx.sessionManager.getBranch = () => autonomousBranch();
+    extension(fresh.pi);
+    await simulate.hook(fresh, "session_start", {});
+    await tick();
+    expect(continuationMessages(fresh)).toHaveLength(0);
+  });
+
+  test("delayed journal observation cannot authorize a resume of our same-process send", async () => {
+    const stub = recoveryStub();
+    stub.ctx.sessionManager.getBranch = () => autonomousBranch();
+    extension(stub.pi);
+    await simulate.hook(stub, "session_start", {});
+    await tick();
+    stub.ctx.sessionManager.getBranch = () => autonomousBranch({ type: "custom_message",
+      customType: DISTILL_CONTINUATION_MESSAGE_TYPE, details: { attemptId: "attempt-1" } });
+    await simulate.hook(stub, "session_tree", {});
+    await simulate.hook(stub, "agent_settled", {});
+    await tick();
+    expect(continuationMessages(stub)).toHaveLength(1);
+  });
+
+  test("owner replacement makes an old callback obsolete", async () => {
+    const stub = recoveryStub();
+    stub.ctx.sessionManager.getBranch = () => autonomousBranch();
+    extension(stub.pi);
+    await simulate.hook(stub, "session_start", {});
+    stub.ctx.sessionManager.getSessionId = () => "replacement-owner";
+    await tick();
+    expect(continuationMessages(stub)).toHaveLength(0);
+  });
+
+  test("shutdown cancels callbacks without erasing possible submission fences", async () => {
+    const stub = recoveryStub();
+    stub.ctx.sessionManager.getBranch = () => autonomousBranch();
+    extension(stub.pi);
+    await simulate.hook(stub, "session_start", {});
+    await simulate.hook(stub, "session_shutdown", {});
+    await tick();
+    expect(continuationMessages(stub)).toHaveLength(0);
+  });
+
   test("delivers a committed autonomous continuation after restart", async () => {
-    const stub = createStubCtx();
+    const stub = recoveryStub();
     extension(stub.pi);
     await simulate.hook(stub, "session_start", {});
     stub.ctx.sessionManager.getBranch = () => autonomousBranch();
@@ -664,11 +774,11 @@ describe("dc-distill durable continuation recovery", () => {
     expect(continuationMessages(stub)).toHaveLength(1);
   });
 
-  test("recovers a v9 autonomous attempt exactly once across repeated tree events", async () => {
-    const stub = createStubCtx();
+  for (const version of [9, 10]) test(`recovers a v${version} autonomous attempt exactly once across repeated tree events`, async () => {
+    const stub = recoveryStub();
     extension(stub.pi);
     const branch = autonomousBranch();
-    branch[1].details.version = 9;
+    branch[1].details.version = version;
     stub.ctx.sessionManager.getBranch = () => branch;
     await simulate.hook(stub, "session_start", {});
     await tick();
@@ -681,7 +791,7 @@ describe("dc-distill durable continuation recovery", () => {
   });
 
   test("nudges exactly once for a delivered but unanswered continuation", async () => {
-    const stub = createStubCtx();
+    const stub = recoveryStub();
     extension(stub.pi);
     await simulate.hook(stub, "session_start", {});
     stub.ctx.sessionManager.getBranch = () => autonomousBranch(
@@ -690,7 +800,6 @@ describe("dc-distill durable continuation recovery", () => {
         customType: DISTILL_CONTINUATION_MESSAGE_TYPE,
         details: { reason: "autonomous_compaction", attemptId: "attempt-1" },
       },
-      { type: "message", message: { role: "user", content: "interrupted" } },
     );
 
     await simulate.hook(stub, "session_start", { reason: "resume" });
@@ -708,8 +817,21 @@ describe("dc-distill durable continuation recovery", () => {
     expect(continuationMessages(stub)).toHaveLength(1);
   });
 
+  test("a genuine user interruption supersedes a delivered unanswered continuation", async () => {
+    const stub = recoveryStub();
+    extension(stub.pi);
+    stub.ctx.sessionManager.getBranch = () => autonomousBranch(
+      { type: "custom_message", customType: DISTILL_CONTINUATION_MESSAGE_TYPE,
+        details: { reason: "autonomous_compaction", attemptId: "attempt-1" } },
+      { type: "message", message: { role: "user", content: "new objective" } },
+    );
+    await simulate.hook(stub, "session_start", { reason: "resume" });
+    await tick();
+    expect(continuationMessages(stub)).toHaveLength(0);
+  });
+
   test("stands down when the continuation was answered", async () => {
-    const stub = createStubCtx();
+    const stub = recoveryStub();
     extension(stub.pi);
     await simulate.hook(stub, "session_start", {});
     stub.ctx.sessionManager.getBranch = () => autonomousBranch(
@@ -729,7 +851,7 @@ describe("dc-distill durable continuation recovery", () => {
   });
 
   test("ignores manual and pre-v8 compactions", async () => {
-    const stub = createStubCtx();
+    const stub = recoveryStub();
     extension(stub.pi);
     await simulate.hook(stub, "session_start", {});
     stub.ctx.sessionManager.getBranch = (): any[] => [
@@ -751,7 +873,7 @@ describe("dc-distill durable continuation recovery", () => {
   });
 
   test("non-owner sessions never reconcile a continuation", async () => {
-    const stub = createStubCtx();
+    const stub = recoveryStub();
     extension(stub.pi);
     await simulate.hook(stub, "session_start", {});
     stub.ctx.sessionManager.getBranch = () => autonomousBranch();
@@ -765,7 +887,7 @@ describe("dc-distill durable continuation recovery", () => {
   });
 
   test("a committed autonomous attempt delivers once and survives duplicate events", async () => {
-    const stub = createStubCtx();
+    const stub = recoveryStub();
     extension(stub.pi);
     await simulate.hook(stub, "session_start", {});
 
@@ -787,6 +909,8 @@ describe("dc-distill durable continuation recovery", () => {
     );
     const compaction = (prepared as any).compaction;
     expect(compaction.details.autonomous).toBe(true);
+    // The host append precedes session_compact; recovery reads that active branch.
+    stub.ctx.sessionManager.getBranch = (): any[] => [{ type: "compaction", ...compaction }];
 
     await simulate.hook(stub, "session_compact", {
       fromExtension: true,
@@ -829,12 +953,7 @@ describe("dc-distill durable continuation recovery", () => {
     stub.ctx.sessionManager.getBranch = (): any[] => [
       {
         type: "compaction",
-        details: {
-          compactor: "dc-distill",
-          version: 9,
-          autonomous: true,
-          attemptId: compaction.details.attemptId,
-        },
+        ...compaction,
       },
     ];
     await simulate.hook(stub, "session_tree", {});
@@ -844,6 +963,124 @@ describe("dc-distill durable continuation recovery", () => {
 });
 
 describe("dc-distill handoff capture", () => {
+  async function checkpointAdapter() {
+    const stub = createStubCtx();
+    extension(stub.pi);
+    await simulate.hook(stub, "session_start", {});
+    const branch: any[] = [{ type: "message", id: "user-pin-source", parentId: null,
+      timestamp: new Date().toISOString(), message: { role: "user",
+        content: [{ type: "text", text: "Keep release authorization explicit." }], timestamp: Date.now() } }];
+    stub.ctx.sessionManager.getBranch = () => branch;
+    const append = stub.pi.appendEntry.bind(stub.pi);
+    stub.pi.appendEntry = (customType, data) => {
+      append(customType, data);
+      branch.push({ type: "custom", id: `host-update-${branch.length}`, customType, data });
+      // Pi's appendEntry returns void; only getBranch exposes the saved identity.
+    };
+    return { stub, branch };
+  }
+
+  const checkpointPin = { op: "pin", id: "P1", purpose: "constraint",
+    source: { kind: "excerpt", excerpt: "release authorization" } };
+  const initialCheckpoint = { version: 1, expectedBase: { checkpointDigest: null, updateEntryId: null },
+    operations: [checkpointPin] };
+
+  function renderHandoff(stub: ReturnType<typeof createStubCtx>, result: any) {
+    const tones: string[] = [];
+    const theme = { fg: (tone: string, text: string) => { tones.push(tone); return text; },
+      bold: (text: string) => text };
+    const render = stub.registeredTools.get("save_distill_handoff")!.renderResult!;
+    const node = render(result, { expanded: false, isPartial: false }, theme as any, {} as any);
+    return { text: node.render(200).join("\n"), tones };
+  }
+
+  test("checkpoint adapter acknowledges the observed host identity and accepts its next base", async () => {
+    const { stub, branch } = await checkpointAdapter();
+    const result: any = await simulate.tool(stub, "save_distill_handoff", {
+      handoff: "Retain release authorization.", checkpoint: initialCheckpoint,
+    });
+    expect(result.isError).not.toBe(true);
+    const saved = branch.at(-1);
+    expect(saved.id).toBe("host-update-1");
+    expect(saved.data.entryId).not.toBe(saved.id);
+    const canonical = { ...saved.data.checkpoint, updateEntryId: saved.id } as ResumeCheckpointV1;
+    expect(result.details.expectedBase).toEqual({
+      checkpointDigest: canonicalCheckpointDigest(canonical), updateEntryId: "host-update-1",
+    });
+    expect(result.details.checkpointDigest).toBe(result.details.expectedBase.checkpointDigest);
+    expect(result.details.operations[0].source).toMatchObject({
+      sessionId: "stub-session-id", entryId: "user-pin-source", sourceKind: "user", start: 5, end: 26,
+      contentDigest: createHash("sha256").update("Keep release authorization explicit.").digest("hex"),
+    });
+    const next: any = await simulate.tool(stub, "save_distill_handoff", {
+      handoff: "The explicit pin was resolved.", checkpoint: { version: 1,
+        expectedBase: result.details.expectedBase,
+        operations: [{ op: "resolve", target: { kind: "pin", id: "P1" }, reason: "User resolved the constraint." }] },
+    });
+    expect(next.isError).not.toBe(true);
+    expect(next.details.expectedBase.updateEntryId).toBe("host-update-2");
+    expect(branch.at(-1).data.checkpoint.pins[0].status).toBe("resolved");
+    expect(stub.calls.filter(call => call.api === "pi.appendEntry")).toHaveLength(2);
+    const rendered = renderHandoff(stub, next);
+    expect(rendered.text).toContain("✓");
+    expect(rendered.text).toContain("saved for compaction");
+    expect(rendered.tones).toContain("success");
+  });
+
+  test("stale checkpoint base rejects atomically and renders failure", async () => {
+    const { stub, branch } = await checkpointAdapter();
+    await simulate.tool(stub, "save_distill_handoff", { handoff: "Save the pin.", checkpoint: initialCheckpoint });
+    const before = structuredClone(branch);
+    const result: any = await simulate.tool(stub, "save_distill_handoff", {
+      handoff: "Stale retry.", checkpoint: initialCheckpoint,
+    });
+    expect(result.isError).toBe(true);
+    expect(result.content[0].text).toContain("Stale checkpoint base");
+    expect(branch).toEqual(before);
+    expect(stub.calls.filter(call => call.api === "pi.appendEntry")).toHaveLength(1);
+    const rendered = renderHandoff(stub, result);
+    expect(rendered.text).toContain("✗");
+    expect(rendered.text).toContain("Stale checkpoint base");
+    expect(rendered.text).not.toContain("saved for compaction");
+    expect(rendered.tones).toContain("error");
+  });
+
+  test("oversized checkpoint envelope rejects without append and renders its error", async () => {
+    const { stub, branch } = await checkpointAdapter();
+    const result: any = await simulate.tool(stub, "save_distill_handoff", {
+      handoff: "x".repeat(16_384), checkpoint: initialCheckpoint,
+    });
+    expect(result.isError).toBe(true);
+    expect(branch).toHaveLength(1);
+    expect(stub.calls.some(call => call.api === "pi.appendEntry")).toBe(false);
+    const rendered = renderHandoff(stub, result);
+    expect(rendered.text).toContain("✗");
+    expect(rendered.text).toContain("16,384-code-point");
+    expect(rendered.text).not.toContain("saved for compaction");
+  });
+
+  test("post-append base read failure acknowledges the saved update and renders a warning", async () => {
+    const { stub, branch } = await checkpointAdapter();
+    let reads = 0;
+    stub.ctx.sessionManager.getBranch = () => {
+      if (++reads === 2) throw new Error("branch acknowledgement unavailable");
+      return branch;
+    };
+    const result: any = await simulate.tool(stub, "save_distill_handoff", {
+      handoff: "Save the pin.", checkpoint: initialCheckpoint,
+    });
+    expect(result.isError).toBe(true);
+    expect(result.content[0].text).toBe("Checkpoint update saved; identity acknowledgement failed: branch acknowledgement unavailable");
+    expect(branch.at(-1).data.checkpoint.pins[0].text).toBe("release authorization");
+    expect(stub.calls.filter(call => call.api === "pi.appendEntry")).toHaveLength(1);
+    const rendered = renderHandoff(stub, result);
+    expect(rendered.text).toContain("⚠");
+    expect(rendered.text).toContain("Checkpoint update saved; identity acknowledgement failed");
+    expect(rendered.text).not.toContain("saved for compaction");
+    expect(rendered.tones).toContain("warning");
+    expect(rendered.tones).not.toContain("success");
+  });
+
   test("registers save_distill_handoff for hidden continuation capture", async () => {
     const stub = createStubCtx();
     extension(stub.pi);
@@ -1037,7 +1274,7 @@ describe("effective host settings", () => {
     // Manual interception remains deterministic despite invalid autonomous geometry.
     const [manual] = await simulate.hook(stub, "session_before_compact", compactEvent("manual"));
     expect(manual).toHaveProperty("compaction.details.compactor", "dc-distill");
-    await simulate.hook(stub, "session_compact_failed", { reason: "manual", aborted: true, fromExtension: true });
+    await simulate.hook(stub, "session_compact_failed", { reason: "manual", aborted: true, fromExtension: true, attemptId: (manual as any).compaction.details.attemptId });
     const recall = stub.registeredTools.get("recall_compaction")!;
     const result = await recall.execute("settings-recall", { scope: "project" }, new AbortController().signal, undefined, stub.ctx as any);
     expect(JSON.stringify(result)).toContain("Recall is disabled");

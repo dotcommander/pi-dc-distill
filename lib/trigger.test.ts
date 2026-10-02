@@ -1,5 +1,6 @@
 import { describe, expect, test } from "bun:test";
 import {
+  assessCompaction,
   evaluateCompaction,
   resolveTriggerThresholds,
   shouldCompact,
@@ -157,4 +158,31 @@ describe("validateTriggerGeometry", () => {
     expect(violations.map((violation) => violation.field)).toContain("cooldownMs");
     expect(violations.map((violation) => violation.field)).toContain("contextWindow");
   });
+});
+
+describe("pure compaction assessment", () => {
+  test("returns post-compaction updates without mutating frozen input", () => {
+    const state = Object.freeze(atTokens(170_000, { awaitingPostCompactionSample: true }));
+    const assessment = assessCompaction(state, true, { contextWindow: 200_000, compaction: pi }, 1_000_000);
+    expect(assessment.blockedBy).toBe("post-compaction-sample");
+    expect(assessment.updates).toEqual({ awaitingPostCompactionSample: false, repeatBaselineTokens: 170_000 });
+    expect(state.awaitingPostCompactionSample).toBe(true);
+    expect(state.repeatBaselineTokens).toBeNull();
+  });
+  test("uses supplied time and rejects nonfinite estimates", () => {
+    const state = atTokens(130_000, { lastCompactionTime: 1_000_000 });
+    expect(assessCompaction(state, true, {}, 1_000_001).blockedBy).toBe("cooldown");
+    expect(assessCompaction(state, true, {}, 1_120_000).decision?.tier).toBe(Tier.Mechanical);
+    for (const tokens of [NaN, Infinity, -Infinity]) {
+      expect(assessCompaction(atTokens(tokens), true, {}, 1_000_000).blockedBy).toBe("invalid-estimate");
+    }
+  });
+});
+
+test("windows below three tokens disable even emergency autonomous admission", () => {
+  for (const contextWindow of [0, 1, 2, 2.5]) {
+    const state = { tokenEstimate: 200_000, lastCompactionTime: 0, repeatBaselineTokens: null,
+      awaitingPostCompactionSample: false } as any;
+    expect(evaluateCompaction(state, true, { contextWindow }).blockedBy).toBe("invalid-geometry");
+  }
 });

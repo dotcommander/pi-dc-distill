@@ -2,7 +2,7 @@
 // Run: bun test lib/recall.test.ts
 
 import { describe, test, expect, beforeEach } from "bun:test";
-import { searchRecallEntries, type RecallEntry } from "./recall.ts";
+import { RECALL_SEPARATOR, searchRecallEntries, type RecallEntry } from "./recall.ts";
 
 // --- Fixtures ---
 
@@ -25,6 +25,12 @@ const makeEntry = (
   before,
   after,
   summary: makeSummary(sections, markers),
+});
+
+test("recall searches durable retained source context by name and technical terms", () => {
+  const entry = makeEntry("2026-10-02", 100, 20, {}, { "retained-context": "version: 1\n[Assistant] [Prior outcome] NativeRepository preserves qualified migration evidence." });
+  expect(searchRecallEntries([entry], "retained-context")[0]).toContain("NativeRepository");
+  expect(searchRecallEntries([entry], "NativeRepository migration")[0]).toContain("qualified migration evidence");
 });
 
 const V4_PARTS = {
@@ -163,6 +169,48 @@ describe("recall", () => {
     expect(results[0]).toContain("## Session");
   });
 
+  test("multi-word keyword query matches across separated words", () => {
+    entries.unshift(makeEntry("2026-01-01T00:00:00Z", 100, 20, V4_PARTS.sections, V4_PARTS.markers));
+    // "recall alignment" words are separated by "taxonomy" in "Prioritize recall taxonomy alignment"
+    const results = searchRecallEntries(entries, "recall alignment");
+    expect(results).toHaveLength(1);
+    expect(results[0]).toContain("## User Focus");
+    expect(results[0]).toContain("recall taxonomy alignment");
+  });
+
+  test("BM25 ranks entry matching all query terms above entry matching single term", () => {
+    const entrySingle = makeEntry("2026-01-02T00:00:00Z", 100, 20, {
+      Conversation: "User asked about auth only.",
+    });
+    const entryBoth = makeEntry("2026-01-01T00:00:00Z", 100, 20, {
+      Conversation: "User asked about auth and JWT tokens in depth.",
+    });
+    // Chronologically, entrySingle is newer (2026-01-02), but entryBoth matches both "auth" and "JWT"
+    entries.unshift(entryBoth);
+    entries.unshift(entrySingle);
+
+    const results = searchRecallEntries(entries, "auth JWT");
+    expect(results).toHaveLength(2);
+    expect(results[0]).toContain("auth and JWT tokens");
+    expect(results[1]).toContain("auth only");
+  });
+
+  test("BM25 ranks concise relevant section over verbose passing mention", () => {
+    const verboseEntry = makeEntry("2026-01-02T00:00:00Z", 100, 20, {
+      Conversation: "Here is a very long log output with lots of text and noise where authentication is mentioned just once casually.",
+    });
+    const conciseEntry = makeEntry("2026-01-01T00:00:00Z", 100, 20, {
+      Conversation: "Authentication core protocol.",
+    });
+    entries.unshift(conciseEntry);
+    entries.unshift(verboseEntry);
+
+    const results = searchRecallEntries(entries, "authentication");
+    expect(results).toHaveLength(2);
+    expect(results[0]).toContain("Authentication core protocol");
+    expect(results[1]).toContain("long log output");
+  });
+
   // ── searchRecallEntries — edge cases ───────────────────────────────────
 
   test("returns empty for empty query", () => {
@@ -215,4 +263,114 @@ describe("recall", () => {
     entries.unshift({ ts: "2026-01-01T00:00:00Z", before: 100, after: 20, summary });
     expect(searchRecallEntries(entries, "verification")).toHaveLength(0);
   });
+});
+
+
+describe("Phase 5 recall output", () => {
+  test("both section and keyword results carry project and session provenance", () => {
+    const entry = { ...makeEntry("now", 100, 20, { Conversation: "unique retrieval evidence" }), project: "/project/a", sessionId: "session-a" };
+    for (const query of ["conversation", "retrieval evidence"]) {
+      const result = searchRecallEntries([entry], query)[0];
+      expect(result).toContain("project: /project/a");
+      expect(result).toContain("session: session-a");
+    }
+    expect(searchRecallEntries([makeEntry("old", 100, 20, { Conversation: "legacy evidence" })], "conversation")[0]).toContain("legacy-unscoped");
+  });
+
+  test("new operating-state parts are searchable by name and keyword", () => {
+    for (const name of ["resume-state", "current-intent", "resume-risks", "file-evidence", "summary-omissions"]) {
+      const entry = makeEntry("now", 100, 20, {}, { [name]: "sentinel operating evidence" });
+      expect(searchRecallEntries([entry], name)[0]).toContain(`<${name}>`);
+      expect(searchRecallEntries([entry], "sentinel")[0]).toContain(`</${name}>`);
+    }
+  });
+
+  test("invalid limits reject and positive integral limits clamp to twenty", () => {
+    const entries = Array.from({ length: 25 }, (_, i) => makeEntry(String(i), 100, 20, { Conversation: "short" }));
+    for (const limit of [NaN, Infinity, -Infinity, 0, -1, 1.5]) {
+      expect(() => searchRecallEntries(entries, "conversation", limit)).toThrow("finite positive integer");
+    }
+    expect(searchRecallEntries(entries, "conversation")).toHaveLength(3);
+    expect(searchRecallEntries(entries, "conversation", 100)).toHaveLength(20);
+  });
+
+  test("wire budget includes separators and drops complete lower-priority results", () => {
+    const entries = ["first", "second", "third"].map((ts) => makeEntry(ts, 100, 20, { Conversation: "😀".repeat(3500) }));
+    const results = searchRecallEntries(entries, "conversation");
+    const output = results.join(RECALL_SEPARATOR);
+    expect(Array.from(output).length).toBeLessThanOrEqual(8192);
+    expect(results).toHaveLength(2);
+    expect(output).toContain("Recall omitted 1 result(s)");
+    expect(output).not.toContain("[third");
+    expect(output).not.toContain("�");
+  });
+
+  test("oversized marker excerpts retain whole lines and balanced framing", () => {
+    const hugePath = "/" + "identity".repeat(2000);
+    const entry = makeEntry("now", 100, 20, {}, { "file-evidence": `kept evidence\n${hugePath}\n${"😀".repeat(7900)}\nlast evidence` });
+    const output = searchRecallEntries([entry], "file-evidence").join(RECALL_SEPARATOR);
+    expect(Array.from(output).length).toBeLessThanOrEqual(8192);
+    expect(output).toContain("<file-evidence>");
+    expect(output).toContain("</file-evidence>");
+    expect(output).toContain("kept evidence");
+    expect(output).toContain("last evidence");
+    expect(output).toContain("Recall omitted");
+    expect(output).not.toContain("/identity");
+  });
+});
+
+
+test("oversized recall retains provenance and marker frame together", () => {
+  const project = "/" + "p".repeat(8000);
+  const entry = { ...makeEntry("now", 100, 20, {}, { "file-evidence": `${"oversized".repeat(2000)}\ntiny evidence` }), project, sessionId: "session-a" };
+  const output = searchRecallEntries([entry], "file-evidence").join(RECALL_SEPARATOR);
+  expect(Array.from(output).length).toBeLessThanOrEqual(8192);
+  expect(output).toContain(`project: ${project} | session: session-a`);
+  expect(output.match(/<file-evidence>/g)).toHaveLength(1);
+  expect(output.match(/<\/file-evidence>/g)).toHaveLength(1);
+  expect(output).toContain("Recall omitted 1 line(s)");
+  expect(output).toContain("tiny evidence");
+});
+
+test("recall omits an unrepresentable provenance frame as a complete result", () => {
+  const project = "/" + "p".repeat(9000);
+  const entry = { ...makeEntry("now", 100, 20, {}, { "file-evidence": "tiny evidence" }), project, sessionId: "session-a" };
+  const output = searchRecallEntries([entry], "file-evidence").join(RECALL_SEPARATOR);
+  expect(Array.from(output).length).toBeLessThanOrEqual(8192);
+  expect(output).toContain("Recall omitted 1 result(s)");
+  expect(output).not.toContain("tiny evidence");
+  expect(output).not.toContain("project:");
+  expect(output).not.toContain("<file-evidence>");
+  expect(output).not.toContain("</file-evidence>");
+});
+
+
+test("near-ceiling provenance cannot leave a closing marker without its opening", () => {
+  const entry = { ...makeEntry("now", 100, 20, {}, { "file-evidence": `x\n${"y".repeat(9000)}` }), project: "", sessionId: "session-a" };
+  // Reproduce the prior independent-line budget: the header fit, opening did
+  // not, then a tiny content line and the unconditional close survived.
+  const emptyHeader = searchRecallEntries([{ ...entry, summary: "<file-evidence>x</file-evidence>" }], "file-evidence")[0].split("\n")[0];
+  const targetHeaderLength = 8192 - Array.from("[Recall omitted 4 line(s) from this result.]\n</file-evidence>").length - 3;
+  entry.project = "p".repeat(targetHeaderLength - Array.from(emptyHeader).length);
+  const output = searchRecallEntries([entry], "file-evidence").join(RECALL_SEPARATOR);
+  expect(output).toContain("Recall omitted 1 result(s)");
+  expect(output).not.toContain("<file-evidence>");
+  expect(output).not.toContain("</file-evidence>");
+  expect(output).not.toContain("session-a");
+  expect(Array.from(output).length).toBeLessThanOrEqual(8192);
+});
+
+test("recall exposes v11 advisory and observed-readiness markers without inventing state", () => {
+  const entry = makeEntry("2026-10-02", 100, 20, {}, {
+    "change-impact": "transcript-derived rerun priority: bun test src/parser.test.ts",
+    "ready-tasks": "- verified-task",
+    "graph-ready-tasks": "- blocked-task: requirements unknown or contradicted",
+  });
+  for (const marker of ["change-impact", "ready-tasks", "graph-ready-tasks"]) {
+    const result = searchRecallEntries([entry], marker);
+    expect(result).toHaveLength(1);
+    expect(result[0]).toContain(`<${marker}>`);
+    expect(result[0]).toContain(`</${marker}>`);
+  }
+  expect(searchRecallEntries([entry], "ready-tasks")[0]).not.toContain("blocked-task");
 });

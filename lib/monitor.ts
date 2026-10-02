@@ -32,7 +32,7 @@ export class Monitor {
   private _recorded = false // diagnostic: has record() ever been called?
   private _hasPiSynced = false // has ctx.getContextUsage() ever returned a positive token count?
 
-  constructor() {
+  constructor(private readonly clock: () => number = Date.now) {
     this.state = this.freshState()
   }
 
@@ -41,7 +41,7 @@ export class Monitor {
 
   /** Create a zeroed CompactState with timestamps set to now. */
   private freshState(): CompactState {
-    const now = Date.now()
+    const now = this.clock()
     return {
       tokenEstimate: 0,
       toolTokens: 0,
@@ -74,7 +74,7 @@ export class Monitor {
     }
 
     if (msg.role === "user") {
-      this.state.lastUserMessageTime = Date.now()
+      this.state.lastUserMessageTime = this.clock()
       this.state.exchangeCount++
     }
   }
@@ -83,7 +83,7 @@ export class Monitor {
   recordApiUsage(usage: { totalTokens?: number; input?: number; output?: number; cacheRead?: number; cacheWrite?: number } | undefined): void {
     if (!usage) return
     const total = totalApiTokens(usage)
-    if (total > 0) {
+    if (Number.isFinite(total) && total > 0) {
       this.state.apiTokenCount = total
     }
   }
@@ -99,7 +99,7 @@ export class Monitor {
    * @returns Whether this sync succeeded (pi returned a positive number).
    */
   syncFromPi(tokens: number | null | undefined): boolean {
-    if (typeof tokens === "number" && tokens > 0) {
+    if (typeof tokens === "number" && Number.isFinite(tokens) && tokens > 0) {
       this.state.tokenEstimate = tokens
       this._hasPiSynced = true
       return true
@@ -111,7 +111,7 @@ export class Monitor {
   }
 
   recordCompaction(newTokenEstimate: number): void {
-    this.state.lastCompactionTime = Date.now()
+    this.state.lastCompactionTime = this.clock()
     this.state.exchangeCount = 0
     this.state.toolTokens = 0
     this.state.callCount = 0
@@ -138,7 +138,7 @@ export class Monitor {
   }
 
   get idleMs(): number {
-    return Date.now() - this.state.lastUserMessageTime
+    return this.clock() - this.state.lastUserMessageTime
   }
 }
 

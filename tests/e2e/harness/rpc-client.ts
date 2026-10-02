@@ -7,8 +7,8 @@
  * asynchronously. Every line can be mirrored into a log file for artifacts.
  */
 import { spawn, type ChildProcessWithoutNullStreams } from "node:child_process";
-import { mkdirSync, appendFileSync } from "node:fs";
-import { dirname } from "node:path";
+import { mkdirSync, appendFileSync, readFileSync } from "node:fs";
+import { dirname, resolve } from "node:path";
 
 export interface RpcEvent {
   type: string;
@@ -17,6 +17,8 @@ export interface RpcEvent {
 }
 
 export interface RpcClientOptions {
+  /** Explicit CLI executable; package-root selection takes precedence. */
+  executable?: string;
   args: string[];
   cwd: string;
   env?: Record<string, string | undefined>;
@@ -37,7 +39,9 @@ export class RpcClient {
   constructor(options: RpcClientOptions) {
     this.options = options;
     if (options.logFile) mkdirSync(dirname(options.logFile), { recursive: true });
-    this.proc = spawn("pi", ["--mode", "rpc", ...options.args], {
+    const host = selectedHost(options);
+    this.log(`[host] ${JSON.stringify(host)}`);
+    this.proc = spawn(host.executable, [...host.prefix, "--mode", "rpc", ...options.args], {
       cwd: options.cwd,
       env: { ...process.env, PI_SKIP_VERSION_CHECK: "1", PI_OFFLINE: "1", ...options.env },
       stdio: ["pipe", "pipe", "pipe"],
@@ -53,6 +57,11 @@ export class RpcClient {
       this.exited = true;
       this.exitCode = code;
       this.log(`[exit] ${code}`);
+    });
+    this.proc.on("error", (error) => {
+      this.exited = true;
+      this.stderr.push(`Host launch failed: ${error.message}`);
+      this.log(`[spawn-error] ${error.message}`);
     });
   }
 
@@ -159,6 +168,22 @@ export class RpcClient {
       this.proc.kill("SIGTERM");
     });
   }
+}
+
+/** Select an already installed host; never install or modify either runtime. */
+function selectedHost(options: RpcClientOptions): { executable: string; prefix: string[]; version?: string } {
+  const environment = { ...process.env, ...options.env };
+  const root = environment.DISTILL_PI_PACKAGE;
+  const expected = environment.DISTILL_PI_EXPECT_VERSION;
+  if (expected && !root) throw new Error("DISTILL_PI_EXPECT_VERSION requires DISTILL_PI_PACKAGE for exact host identity");
+  if (!root) return { executable: options.executable ?? environment.DISTILL_PI_EXECUTABLE ?? "pi", prefix: [] };
+  const packageRoot = resolve(root);
+  const manifest = JSON.parse(readFileSync(resolve(packageRoot, "package.json"), "utf8"));
+  if (manifest.name !== "@earendil-works/pi-coding-agent") throw new Error(`Unexpected Pi package at ${packageRoot}`);
+  if (expected && manifest.version !== expected) throw new Error(`Expected Pi ${expected}, found ${manifest.version} at ${packageRoot}`);
+  const entry = typeof manifest.bin === "string" ? manifest.bin : manifest.bin?.pi;
+  if (typeof entry !== "string") throw new Error(`Missing Pi CLI entry at ${packageRoot}`);
+  return { executable: environment.DISTILL_PI_NODE ?? "node", prefix: [resolve(packageRoot, entry)], version: manifest.version };
 }
 
 export function eventsOfType(events: RpcEvent[], type: string): RpcEvent[] {

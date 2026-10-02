@@ -39,7 +39,7 @@ test("v2 resumption state is deterministic and preserves graph evidence", () => 
   expect(first).toContain("depends-on: T1");
   expect(first).toContain("blocker: Await review.");
   expect(first).toContain("H1: Input is malformed.; evidence: Fixture parses with the reference parser.");
-  expect(first).toContain("ready-tasks:\n- T2: Implement parser.");
+  expect(first).toContain("<ready-tasks>\n- T2");
   expect(first).toContain("verification-needed:\n- bun test lib/parser.test.ts");
   expect(first).toContain("task state, not verification");
 });

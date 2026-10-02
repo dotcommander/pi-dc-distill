@@ -2,6 +2,8 @@ import { afterEach, describe, expect, test } from "bun:test";
 import { mkdtemp, readFile, readdir, rm, writeFile } from "node:fs/promises";
 import { createHash } from "node:crypto";
 import { join } from "node:path";
+import { ExtensionRunner } from "./sdk.ts";
+import { compileSessionJsonl } from "./local-compact.ts";
 import { tmpdir } from "node:os";
 import {
   compactText,
@@ -110,6 +112,56 @@ describe("output compactor helpers", () => {
   });
 });
 
+function compilePreview(output: string) {
+  return compileSessionJsonl([
+    { type: "session", cwd: "/tmp/project" },
+    { type: "message", message: { role: "user", content: "Verify parser" } },
+    { type: "message", message: { role: "assistant", content: [{ type: "toolCall", id: "verify", name: "bash", arguments: { command: "bun test parser.test.ts" } }] } },
+    { type: "message", message: { role: "toolResult", toolCallId: "verify", toolName: "bash", isError: false, content: [{ type: "text", text: output }] } },
+  ].map((entry) => JSON.stringify(entry)).join("\n")).summary;
+}
+
+describe("decisive preview evidence", () => {
+  test("retains final FAIL and outcome totals after 300 PASS lines through offline extraction", () => {
+    const source = ["bun test", ...Array.from({ length: 300 }, (_, i) => `PASS parser ${i}`), "FAIL parser rejects cycles", "300 passed, 1 failed, 0 skipped"].join("\n");
+    const policy = { headLines: 4, tailLines: 2, maxLines: 8, maxChars: 220 };
+    const result = previewOutput(source, policy);
+    expect(result.text).toContain("FAIL parser rejects cycles");
+    expect(result.text).toContain("300 passed, 1 failed, 0 skipped");
+    expect(result.previewChars).toBeLessThanOrEqual(policy.maxChars);
+    expect(result.previewLines).toBeLessThanOrEqual(policy.maxLines);
+    expect(compilePreview(result.text)).toContain("FAIL [bash cwd=/tmp/project]: bun test parser.test.ts");
+  });
+
+  test("reserves terminal causes despite saturated long diagnostic matches", () => {
+    const source = [...Array.from({ length: 300 }, (_, i) => `src/parser.ts:${i + 1}: warning ${"context ".repeat(80)}`), "Error: parser rejected circular input", "caused by reference to root node"].join("\n");
+    const policy = { headLines: 4, tailLines: 2, maxLines: 8, maxChars: 200 };
+    const result = previewOutput(source, policy, true);
+    expect(result.text).toContain("Error: parser rejected circular input");
+    expect(result.text).toContain("caused by reference to root node");
+    expect(result.previewChars).toBeLessThanOrEqual(policy.maxChars);
+    expect(result.previewLines).toBeLessThanOrEqual(policy.maxLines);
+    expect(result.text).toContain("omitted 300 lines");
+  });
+
+  test("reserves a diagnostic tail after saturated search matches", () => {
+    const source = [...Array.from({ length: 300 }, (_, i) => `src/file-${i}.ts:1:match`), "terminal diagnostic: missing parser fixture", "exit=2"].join("\n");
+    const result = previewOutput(source, { headLines: 4, tailLines: 2, maxLines: 8, maxChars: 200 });
+    expect(result.text).toContain("terminal diagnostic: missing parser fixture");
+    expect(result.text).toContain("exit=2");
+    expect(compilePreview(result.text)).toContain("FAIL [bash cwd=/tmp/project]: bun test parser.test.ts");
+  });
+});
+
+// Exercise the real development SDK merge contract without a session/provider.
+function runnerHarness(handler: (event: any, context: any) => unknown, context: any) {
+  return {
+    extensions: [{ path: "dc-distill", handlers: new Map([["tool_result", [handler]]]) }],
+    createContext: () => context,
+    emitError: (error: unknown) => { throw error; },
+  };
+}
+
 describe("output compactor", () => {
   test("is off by default without inspecting text or touching storage", async () => {
     const root = await tempRoot();
@@ -175,6 +227,47 @@ describe("output compactor", () => {
     expect(await compactor.onToolResult(event, callCtx)).toBeUndefined();
     expect(await readdir(root)).toEqual(files);
     expect(await readFile(receipt.artifactPath, "utf8")).toBe(fullText);
+  });
+
+  test("nested machine returns bypass content, gates, and storage even for an empty parent id", async () => {
+    let calls = 0;
+    const compactor = createOutputCompactor({
+      config: { enabled: true, maxChars: 1 },
+      isEnabled: () => { calls++; return true; },
+      writeText: async () => { calls++; },
+      appendIndex: async () => { calls++; },
+    });
+    for (const parentToolCallId of ["parent", ""]) {
+      const event = { parentToolCallId, get content(): never { throw new Error("nested content inspected"); } };
+      expect(await compactor.onToolResult(event, {})).toBeUndefined();
+    }
+    expect(calls).toBe(0);
+    const content = [{ type: "text", text: "machine-facing output" }];
+    const structuredContent = { literal: "unchanged", values: [1, 2] };
+    const event = { type: "tool_result", toolName: "custom", toolCallId: "parent/0", parentToolCallId: "parent", input: {}, content, structuredContent, isError: false };
+    const result = await ExtensionRunner.prototype.emitToolResult.call(runnerHarness(compactor.onToolResult, {}) as any, event as any);
+    expect(result).toBeUndefined();
+    expect(event.content).toBe(content);
+    expect(event.structuredContent).toBe(structuredContent);
+    expect(calls).toBe(0);
+  });
+
+  test("top-level preview preserves structured content through the SDK runner", async () => {
+    const saved: string[] = [];
+    const compactor = createOutputCompactor({
+      config: { enabled: true, maxChars: 80, maxLines: 4 },
+      artifactRoot: () => "/tmp/unused-artifacts",
+      writeText: async (_path, text) => { saved.push(text); },
+      appendIndex: async () => {},
+    });
+    const structuredContent = { records: [{ exact: "machine payload" }], count: 1 };
+    const text = "complete output\n".repeat(100);
+    const event = { type: "tool_result", toolName: "custom", toolCallId: "top", input: {}, content: [{ type: "text", text }], structuredContent, isError: false };
+    const result = await ExtensionRunner.prototype.emitToolResult.call(runnerHarness(compactor.onToolResult, { cwd: "/tmp/project" }) as any, event as any);
+    expect(result?.structuredContent).toBe(structuredContent);
+    expect(result?.content).not.toEqual(event.content);
+    expect(saved).toEqual([text]);
+    expect(event.content[0].text).toBe(text);
   });
 
   test("returns undefined for small text output", async () => {
@@ -272,7 +365,7 @@ describe("output compactor", () => {
       artifactRoot: () => root,
       config: {
         enabled: true,
-        maxLines: 5,
+        maxLines: 6,
         headLines: 1,
         tailLines: 1,
         errorHeadLines: 3,
@@ -316,4 +409,29 @@ test("line counting preserves interior blanks, terminal LF, and CR semantics", (
     const expected = text.length === 0 ? 0 : text.split("\n").length - (text.endsWith("\n") ? 1 : 0);
     expect(countLines(text)).toBe(expected);
   }
+});
+
+test("live tool-output index waits for the same destination lock as migration", async () => {
+  const { Fs } = await import("./fs-support.ts");
+  const root = await tempRoot();
+  let release!: () => void;
+  let entered!: () => void;
+  const ready = new Promise<void>(resolve => { entered = resolve; });
+  const holding = Fs.withLock(join(root,"index.jsonl.lock"),"migration",async () => {
+    entered(); await new Promise<void>(resolve => { release=resolve; });
+  });
+  await ready;
+  let written!: () => void;
+  const artifactPublished = new Promise<void>(resolve => { written = resolve; });
+  const compactor = createOutputCompactor({artifactRoot:()=>root,
+    writeText:async (path,text)=>{await Fs.write(path,text);written();},
+    config:{enabled:true,maxLines:2,headLines:1,tailLines:1}});
+  const result = compactor.onToolResult({toolName:"bash",toolCallId:"locked-index",content:[{type:"text",text:"one\ntwo\nthree\nfour"}]},ctx(root));
+  await artifactPublished;
+  expect(await readdir(root)).not.toContain("index.jsonl");
+  release(); await holding;
+  expect(await result).toBeDefined();
+  const rows=(await readFile(join(root,"index.jsonl"),"utf8")).trim().split("\n").map(line=>JSON.parse(line));
+  expect(rows).toHaveLength(1);
+  expect(rows[0].toolCallId).toBe("locked-index");
 });

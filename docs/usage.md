@@ -94,6 +94,22 @@ must be valid and unique where required; cycles are rejected. A blocked task
 requires a non-empty blocker; other statuses require an empty blocker string. Pending tasks whose dependencies are done become
 ready tasks. Rejected hypotheses use `id`, `claim`, and `evidence` fields.
 
+For observed readiness, use `distill-handoff-v3` with all v2 fields, a
+`preconditions` array and a `requires` array on every task. For example, add
+`{"id":"read-parser","kind":"file-read-succeeded","path":"src/parser.ts","cwd":"/project"}`
+and `{"id":"tests","kind":"verification-pass","runner":"bash","command":"bun test src/parser.test.ts","cwd":"/project"}`,
+then use `"requires":["read-parser","tests"]` on a pending task. Up to 32
+predicates are allowed. References must exist, IDs must be unique, cwd must be
+absolute and commands match exact supplied bytes and compatible raw runner names.
+An empty `requires` list is valid.
+
+These are observed conditions, not instructions to inspect files or run commands.
+Fresh unique successful observations satisfy them; fresh matching failures
+contradict them; missing, stale or uncertain evidence remains unknown. Only
+pending graph-ready tasks whose requirements are all satisfied enter
+`<ready-tasks>`; other graph-ready tasks appear separately. A historical file
+creation does not satisfy a successful-read predicate. V1/v2 behavior is preserved.
+
 Structured envelopes are limited to 16,384 Unicode code points, lists to 32
 items, and individual strings to 2,048 code points. Invalid, unknown-version,
 or oversized envelopes remain bounded opaque text. Handoffs describe task state;
@@ -124,12 +140,13 @@ entries labelled `legacy-unscoped`. Those entries do not appear in default
 project search.
 
 Named sections include `Session`, `User Focus`, and `Conversation`. Searchable
-markers are `read-files`, `modified-files`, `recent-tool-calls`,
-`recent-tool-results`, `verification`, `working-tree`, `source-anchors`,
-`active-tasks`, `resume-tasks`, and `resume-index`. The current search does not
-index `resume-state`, `current-intent`, `resume-risks`, `file-evidence`, or
-`summary-omissions`, even when present in a stored summary. Other queries search keywords across
-supported parts. Recall searches retained summaries, not the complete transcript.
+markers include file/tool evidence, `retained-context`, `resume-state`,
+`current-intent`, `resume-risks`, `summary-omissions`, `verification`,
+`working-tree`, `source-anchors`, `active-tasks`, `resume-tasks`, `resume-index`,
+`change-impact`, `ready-tasks`, and `graph-ready-tasks`. Other queries rank
+keywords across supported parts with deterministic lexical BM25. Recall searches
+retained summaries, not the complete transcript; readiness markers report stored
+observations rather than current-state checks.
 
 Summaries with a provider session ID include `ctxgo show session` and
 `ctxgo locate session` recovery commands. `ctxgo` is a separate tool: these hints
@@ -227,7 +244,7 @@ commands mark earlier results as having unestablished freshness.
 The operating summary target is 8,192 Unicode code points. Complete optional
 records are removed first, and omissions are reported; the hard wire ceiling
 is 65,536. See [algorithm](algorithm.md) for scoring and eviction, and
-[architecture](architecture.md#compaction-contract) for version-9 metrics and digests.
+[architecture](architecture.md#compaction-contract) for version-13 details, checkpoint integrity, and token estimates.
 
 ### Persistence and generated artifacts
 
@@ -246,3 +263,21 @@ symlinks, and explicitly protected runs are preserved outside this ten-run limit
 Explicit `--out` paths have no automatic retention; targeting an existing managed
 run protects it before writing, and `--force` still controls overwrites. Benchmark
 output stays explicit. Existing `.work` contents and ignore rules are preserved.
+
+## Explicit checkpoint updates
+
+`save_distill_handoff` keeps the strict v1–v3 handoff grammars and accepts an optional
+`checkpoint` argument with `version: 1`, `expectedBase: { checkpointDigest,
+updateEntryId }`, and up to 32 operations. Initial base fields are `null`. Use
+`pin` for exact user-source workset, constraint, or request text; `resolve` for a
+named task/pin and reason; `supersede` for a same-kind replacement and reason.
+Sources select an exact entry/block/span, a unique excerpt in the latest eligible
+user message, or a validated pin. The tool returns canonical source references
+and the physical saved update entry ID for the next base. Stale, ambiguous, cyclic,
+or conflicting updates are rejected atomically. Resolution cannot create evidence
+or authorization, and declared completion retains unmet evidence requirements.
+
+The saved input envelope is limited to 16,384 Unicode code points. Up to 32 pins
+retain at most 2,048 code points each. Protected state never silently shortens: if
+it cannot fit the checkpoint, rendered summary, or prospective context, compaction
+cancels with `protected_overflow`.

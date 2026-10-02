@@ -27,7 +27,7 @@ describe("migrateDistillData", () => {
     await write(join(legacyDir, "settings.json"), "{\"cacheTtlMs\":10000}\n");
     await write(join(legacyDir, "compact-dumps", "one-after.txt"), "summary");
 
-    const result = migrateDistillData({ legacyDir, currentDir, now: () => new Date("2026-01-01T00:00:00Z") });
+    const result = await migrateDistillData({ legacyDir, currentDir, now: () => new Date("2026-01-01T00:00:00Z") });
 
     expect(result.status).toBe("migrated");
     expect(result.copied).toEqual(["compact-dumps/one-after.txt"]);
@@ -51,7 +51,7 @@ describe("migrateDistillData", () => {
     await write(join(legacyDir, "compact-log.jsonl"), "{\"a\":1}\n{\"b\":2}\n");
     await write(join(currentDir, "compact-log.jsonl"), "{\"b\":2}\n{\"c\":3}\n");
 
-    const result = migrateDistillData({ legacyDir, currentDir });
+    const result = await migrateDistillData({ legacyDir, currentDir });
 
     expect(result.status).toBe("migrated");
     expect(result.merged.sort()).toEqual(["compact-log.jsonl", "recall.json"]);
@@ -69,7 +69,7 @@ describe("migrateDistillData", () => {
     await write(join(legacyDir, "config.json"), "legacy");
     await write(join(currentDir, "config.json"), "current");
 
-    const result = migrateDistillData({ legacyDir, currentDir });
+    const result = await migrateDistillData({ legacyDir, currentDir });
 
     expect(result.status).toBe("migrated");
     expect(result.preserved).toEqual([".legacy-migration-conflicts/config.json"]);
@@ -77,7 +77,7 @@ describe("migrateDistillData", () => {
     expect(readFileSync(join(currentDir, ".legacy-migration-conflicts", "config.json"), "utf8")).toBe("legacy");
   });
 
-  test("skips after the migration flag exists", () => {
+  test("skips after the migration flag exists", async () => {
     const root = tempRoot();
     const legacyDir = join(root, legacyName());
     const currentDir = join(root, "dc-distill");
@@ -86,20 +86,20 @@ describe("migrateDistillData", () => {
     writeFileSync(join(legacyDir, "placeholder"), "legacy", { flag: "w" });
     writeFileSync(join(currentDir, ".migrated-from-legacy-distill"), "{}\n");
 
-    const result = migrateDistillData({ legacyDir, currentDir });
+    const result = await migrateDistillData({ legacyDir, currentDir });
 
     expect(result.status).toBe("skipped");
   });
 
-  test("routes migration flag-file write through atomic Fs.writeSync", async () => {
+  test("routes migration flag-file write through atomic Fs.write", async () => {
     const root = tempRoot();
     const legacyDir = join(root, legacyName());
     const currentDir = join(root, "dc-distill");
     await write(join(legacyDir, "settings.json"), "{\"key\":1}\n");
 
-    const spy = spyOn(Fs, "writeSync" as any);
+    const spy = spyOn(Fs, "write");
     try {
-      migrateDistillData({ legacyDir, currentDir, now: () => new Date("2026-01-01T00:00:00Z") });
+      await migrateDistillData({ legacyDir, currentDir, now: () => new Date("2026-01-01T00:00:00Z") });
       expect(spy).toHaveBeenCalledWith(
         join(currentDir, ".migrated-from-legacy-distill"),
         expect.anything(),
@@ -116,7 +116,7 @@ describe("migrateDistillData", () => {
     await write(join(legacyDir, "recall.json"), "malformed");
     await write(join(currentDir, "recall.json"), "[]");
 
-    const result = migrateDistillData({ legacyDir, currentDir });
+    const result = await migrateDistillData({ legacyDir, currentDir });
 
     expect(result.status).toBe("failed");
     expect(existsSync(join(currentDir, ".migrated-from-legacy-distill"))).toBe(false);
@@ -128,15 +128,15 @@ describe("migrateDistillData", () => {
     const currentDir = join(root, "dc-distill");
     await write(join(legacyDir, "settings.json"), "{\"key\":1}\n");
 
-    const spy = spyOn(Fs, "writeSync" as any).mockImplementationOnce(() => {
+    const spy = spyOn(Fs, "write").mockImplementationOnce(() => {
       throw new Error("forced marker failure");
     });
-    const first = migrateDistillData({ legacyDir, currentDir });
+    const first = await migrateDistillData({ legacyDir, currentDir });
     spy.mockRestore();
     expect(first.status).toBe("failed");
     expect(existsSync(join(currentDir, ".migrated-from-legacy-distill"))).toBe(false);
 
-    const retry = migrateDistillData({ legacyDir, currentDir });
+    const retry = await migrateDistillData({ legacyDir, currentDir });
     expect(retry.status).toBe("migrated");
     expect(existsSync(join(currentDir, ".migrated-from-legacy-distill"))).toBe(true);
     expect(existsSync(join(currentDir, ".legacy-migration-conflicts", "settings.json"))).toBe(false);
@@ -152,7 +152,7 @@ test("location source has an independent marker and preserves conflicts and abso
   await write(join(currentDir, "raw.txt"), "new");
   await write(join(currentDir, ".migrated-from-legacy-distill"), "already branded");
   const options = { locationDir, legacyDir: join(root, "absent"), currentDir };
-  const result = migrateDistillData(options);
+  const result = await migrateDistillData(options);
   expect(result.status).toBe("migrated");
   expect(existsSync(join(currentDir, ".migrated-from-legacy-location-dc-distill"))).toBe(true);
   expect(readFileSync(join(currentDir, "tool-output", "index.jsonl"), "utf8")).toContain('/historical/absolute/file');
@@ -167,7 +167,7 @@ test("custom profiles migrate only their own legacy namespaces", async () => {
   try {
     process.env.PI_CODING_AGENT_DIR = join(root, "profile");
     await write(join(root, "profile", "data", "dc-shrink", "own.txt"), "custom");
-    const result = migrateDistillData();
+    const result = await migrateDistillData();
     expect(result.status).toBe("migrated");
     expect(result.copied).toEqual(["own.txt"]);
     expect(readFileSync(join(root, "profile", "data", "dc-distill", "own.txt"), "utf8")).toBe("custom");
@@ -176,4 +176,28 @@ test("custom profiles migrate only their own legacy namespaces", async () => {
     if (previous === undefined) delete process.env.PI_CODING_AGENT_DIR;
     else process.env.PI_CODING_AGENT_DIR = previous;
   }
+});
+
+test("conflicting dump JSONL is preserved intact rather than line merged", async () => {
+  const root = tempRoot();
+  const legacyDir = join(root,"legacy"), currentDir = join(root,"current");
+  await write(join(legacyDir,"compact-dumps","one-before.jsonl"),'{"historical":true}\n');
+  await write(join(currentDir,"compact-dumps","one-before.jsonl"),'{"current":true}\n');
+  const result = await migrateDistillData({legacyDir,currentDir});
+  expect(result.merged).toEqual([]);
+  expect(readFileSync(join(currentDir,"compact-dumps","one-before.jsonl"),"utf8")).toBe('{"current":true}\n');
+  expect(readFileSync(join(currentDir,".legacy-migration-conflicts","compact-dumps","one-before.jsonl"),"utf8")).toBe('{"historical":true}\n');
+});
+
+test("migration and live recall writers share the destination lock", async () => {
+  const {DistillStore} = await import("./store.ts");
+  const root = tempRoot();
+  const legacyDir = join(root,"legacy"), currentDir = join(root,"current");
+  const projectRoot = join(currentDir,"projects","same");
+  const old = {ts:"2026-01-01T00:00:00Z",before:100,after:10,summary:"migrated",project:"/project"};
+  await write(join(legacyDir,"projects","same","recall.json"),JSON.stringify([old]));
+  const store = new DistillStore({dataDir:currentDir,projectRoot,projectIdentity:"/project"});
+  await Promise.all([migrateDistillData({legacyDir,currentDir}),
+    store.persistRecall({...old,ts:"2026-01-02T00:00:00Z",summary:"live"})]);
+  expect((await store.loadRecall()).map(row=>row.summary).sort()).toEqual(["live","migrated"]);
 });

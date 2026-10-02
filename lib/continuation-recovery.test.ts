@@ -1,10 +1,13 @@
 import { describe, expect, test } from "bun:test";
+import { emptyCheckpoint, checkpointDigest } from "./compiler/checkpoint.ts";
+import { sha256Hex } from "./sha256.ts";
 import { recoverContinuation, type ContinuationRecovery, type RecoveryEntryLike } from "./continuation-recovery.ts";
 
 function autonomousCompaction(overrides: Record<string, unknown> = {}): RecoveryEntryLike {
+  const checkpoint = emptyCheckpoint();
   return {
-    type: "compaction",
-    details: { compactor: "dc-distill", version: 8, autonomous: true, attemptId: "a-1", ...overrides },
+    type: "compaction", summary: "wire",
+    details: { compactor: "dc-distill", version: 8, autonomous: true, attemptId: "a-1", checkpoint, checkpointDigest: checkpointDigest(checkpoint), summaryDigest: sha256Hex("wire"), ...overrides },
   };
 }
 
@@ -52,10 +55,10 @@ describe("recoverContinuation", () => {
     });
   });
 
-  test("delivered but unanswered wants exactly one resume nudge", () => {
+  test("a later genuine user supersedes an unanswered continuation", () => {
     expect(
       recoverContinuation([autonomousCompaction(), continuation(), message("user")]),
-    ).toEqual({ phase: "delivered", action: "resume", attemptId: "a-1" });
+    ).toEqual({ phase: "answered", action: "none", attemptId: "a-1" });
   });
 
   test("delivered with the resumed marker stands down", () => {
@@ -108,9 +111,10 @@ describe("recoverContinuation", () => {
     ).toEqual({ phase: "delivered", action: "resume", attemptId: "a-1" });
   });
 
-  for (const version of [8, 9]) {
+  for (const version of [8, 9, 10, 11, 12, 13]) {
     test(`v${version} delivery and resume journal each suppress repeated recovery`, () => {
       const committed = [autonomousCompaction({ version })];
+      const originalCompaction = JSON.stringify(committed);
       expect(recoverContinuation(committed)).toEqual({ phase: "committed", action: "deliver", attemptId: "a-1" });
       const delivered = [...committed, continuation()];
       expect(recoverContinuation(delivered)).toEqual({ phase: "delivered", action: "resume", attemptId: "a-1" });
@@ -118,10 +122,12 @@ describe("recoverContinuation", () => {
       expect(recoverContinuation(resumed)).toEqual({ phase: "delivered", action: "none", attemptId: "a-1" });
       expect(recoverContinuation(resumed)).toEqual({ phase: "delivered", action: "none", attemptId: "a-1" });
       expect(recoverContinuation([...delivered, message("assistant")])).toEqual({ phase: "answered", action: "none", attemptId: "a-1" });
+      // Recovery must leave historical and current persisted entries untouched.
+      expect(JSON.stringify(committed)).toBe(originalCompaction);
     });
   }
 
-  for (const version of [8, 9]) {
+  for (const version of [8, 9, 10, 11, 12, 13]) {
     for (const customType of ["dc-distill-continuation", "dc-shrink-continuation"]) {
       describe(`v${version} ${customType} attempt matching`, () => {
         const compaction = () => autonomousCompaction({ version });
@@ -199,4 +205,22 @@ describe("recoverContinuation", () => {
       ]),
     ).toEqual({ phase: "delivered", action: "resume", attemptId: "a-1" });
   });
+});
+
+for (const version of [5, 6, 7, 14]) test(`v${version} cannot authorize autonomous continuation recovery`, () => {
+  expect(recoverContinuation([autonomousCompaction({ version })])).toEqual({ phase: "none", action: "none" });
+});
+
+test("v13 intent is superseded before or after delivery by genuine user/manual/foreign compaction", () => {
+  for (const later of [message("user"), { type: "compaction", details: { compactor: "dc-distill", version: 13, autonomous: false } },
+    { type: "compaction", details: { compactor: "builtin" } }]) {
+    for (const delivered of [[], [continuation()]]) {
+      expect(recoverContinuation([autonomousCompaction({ version: 13 }), ...delivered, later]).action).toBe("none");
+    }
+  }
+  expect(recoverContinuation([autonomousCompaction({ version: 13 })]).action).toBe("deliver");
+});
+
+test("corrupt v13 does not recover an earlier automatic intent", () => {
+  expect(recoverContinuation([autonomousCompaction(),autonomousCompaction({version:13,checkpointDigest:"f".repeat(64)})]).action).toBe("none");
 });

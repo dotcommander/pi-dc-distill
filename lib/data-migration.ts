@@ -1,14 +1,6 @@
+import { compareCodeUnits } from "./wire-format.ts";
 import { LEGACY_DATA_NAMESPACE, LEGACY_MIGRATION_FLAG } from "./legacy.ts";
-import {
-  copyFileSync,
-  existsSync,
-  mkdirSync,
-  readdirSync,
-  readFileSync,
-  statSync,
-  writeFileSync,
-  renameSync,
-} from "node:fs";
+import { access, mkdir, readdir, readFile, stat } from "node:fs/promises";
 import { basename, dirname, join, resolve } from "node:path";
 import { homedir } from "node:os";
 import { Path, agentDir } from "./paths.ts";
@@ -56,13 +48,17 @@ function errorMessage(err: unknown): string {
   return err instanceof Error ? err.message : String(err);
 }
 
-function readJsonArray(path: string): unknown[] {
-  const parsed = JSON.parse(readFileSync(path, "utf8"));
+async function exists(path: string): Promise<boolean> {
+  try { await access(path); return true; } catch (error) { if ((error as NodeJS.ErrnoException).code === "ENOENT") return false; throw error; }
+}
+
+async function readJsonArray(path: string): Promise<unknown[]> {
+  const parsed = JSON.parse(await readFile(path, "utf8"));
   return Array.isArray(parsed) ? parsed : [];
 }
 
-function mergeRecallFile(src: string, dst: string): void {
-  const entries = [...readJsonArray(src), ...readJsonArray(dst)];
+async function mergeRecallFile(src: string, dst: string): Promise<void> {
+  const entries = [...await readJsonArray(dst), ...await readJsonArray(src)];
   const seen = new Set<string>();
   const merged: unknown[] = [];
   for (const entry of entries) {
@@ -80,52 +76,49 @@ function mergeRecallFile(src: string, dst: string): void {
     const right = typeof (b as Record<string, unknown>).ts === "string"
       ? String((b as Record<string, unknown>).ts)
       : "";
-    return left.localeCompare(right);
+    return (Date.parse(left) - Date.parse(right) || compareCodeUnits(left, right))
+      || compareCodeUnits(JSON.stringify(a), JSON.stringify(b));
   });
-  // Atomic write: temp+rename so a concurrent boot-time migration (another
-  // session) never reads a torn file. The merge is idempotent (dedupe of
-  // src∪dst), so concurrent runs compute the same result — last write wins safely.
-  const recallTmp = `${dst}.${process.pid}.tmp`;
-  writeFileSync(recallTmp, JSON.stringify(merged.slice(-10), null, 2) + "\n");
-  renameSync(recallTmp, dst);
+  await Fs.write(dst, JSON.stringify(merged.slice(-10), null, 2) + "\n");
 }
 
 function recallEntryKey(record: Record<string, unknown>): string {
-  return `${record.ts ?? ""}\u0000${record.before ?? ""}\u0000${record.after ?? ""}\u0000${record.summary ?? ""}`;
+  return `${record.project ?? ""}\u0000${record.sessionId ?? ""}\u0000${record.compactionEntryId ?? ""}\u0000${record.ts ?? ""}\u0000${record.before ?? ""}\u0000${record.after ?? ""}\u0000${record.summary ?? ""}`;
 }
 
-function mergeJsonlFile(src: string, dst: string): void {
+async function mergeJsonlFile(src: string, dst: string): Promise<void> {
   const lines = [
-    ...readFileSync(src, "utf8").split(/\n/),
-    ...readFileSync(dst, "utf8").split(/\n/),
+    ...(await readFile(src, "utf8")).split(/\n/),
+    ...(await readFile(dst, "utf8")).split(/\n/),
   ].filter((line) => line.trim().length > 0);
   const unique = [...new Set(lines)];
-  const jsonlTmp = `${dst}.${process.pid}.tmp`;
-  writeFileSync(jsonlTmp, unique.join("\n") + (unique.length > 0 ? "\n" : ""));
-  renameSync(jsonlTmp, dst);
+  await Fs.write(dst, unique.join("\n") + (unique.length > 0 ? "\n" : ""));
 }
 
-function copyConflict(src: string, dstRoot: string, relativePath: string): string {
+async function copyConflict(src: string, dstRoot: string, relativePath: string): Promise<string> {
   const conflictPath = join(dstRoot, CONFLICT_DIR, relativePath);
-  mkdirSync(dirname(conflictPath), { recursive: true });
-  copyFileSync(src, conflictPath);
+  await mkdir(dirname(conflictPath), { recursive: true });
+  if (await exists(conflictPath) && !(await readFile(src)).equals(await readFile(conflictPath))) {
+    throw new Error(`Conflicting preserved artifact: ${conflictPath}`);
+  }
+  await Fs.write(conflictPath, await readFile(src));
   return join(CONFLICT_DIR, relativePath);
 }
 
-function migrateEntry(
+async function migrateEntry(
   src: string,
   dst: string,
   dstRoot: string,
   relativePath: string,
   result: DistillDataMigrationResult,
   conflictPrefix = "",
-): void {
-  const stat = statSync(src);
-  if (stat.isDirectory()) {
-    mkdirSync(dst, { recursive: true });
-    for (const entry of readdirSync(src)) {
-      if (entry.endsWith(".lock") || entry.endsWith(".tmp") || entry === ".lock") continue;
-      migrateEntry(
+): Promise<void> {
+  const sourceStat = await stat(src);
+  if (sourceStat.isDirectory()) {
+    await mkdir(dst, { recursive: true });
+    for (const entry of await readdir(src)) {
+      if (entry.endsWith(".lock") || (entry.endsWith(".tmp") || entry.includes(".tmp-")) || entry === ".lock") continue;
+      await migrateEntry(
         join(src, entry),
         join(dst, entry),
         dstRoot,
@@ -136,43 +129,38 @@ function migrateEntry(
     }
     return;
   }
-  if (!stat.isFile()) return;
+  if (!sourceStat.isFile()) return;
 
   try {
-    if (!existsSync(dst)) {
-      mkdirSync(dirname(dst), { recursive: true });
-      copyFileSync(src, dst);
-      result.copied.push(relativePath);
-      return;
-    }
+    await mkdir(dirname(dst), { recursive: true });
+    // Destination lock matches the live writer, including all flat dump artifacts.
+    const lockPath = relativePath.startsWith("compact-dumps/")
+      ? join(dstRoot, "compact-dumps", ".lock") : `${dst}.lock`;
+    await Fs.withLock(lockPath, `dc-distill-migration:${process.pid}`, async () => {
+      if (!await exists(dst)) {
+        if (basename(relativePath) === "recall.json") await readJsonArray(src);
+        await Fs.write(dst, await readFile(src)); result.copied.push(relativePath); return;
+      }
+      if ((await readFile(src)).equals(await readFile(dst))) return;
+      if (basename(relativePath) === "recall.json") {
+        await mergeRecallFile(src, dst); result.merged.push(relativePath); return;
+      }
+      if (relativePath === "compact-log.jsonl" || /(^|\/)tool-output\/index\.jsonl$/.test(relativePath)) {
+        await mergeJsonlFile(src, dst); result.merged.push(relativePath); return;
+      }
+      result.preserved.push(await copyConflict(src, dstRoot, join(conflictPrefix, relativePath)));
+    });
+  } catch (err) { result.errors.push(`${relativePath}: ${errorMessage(err)}`); }
 
-    if (readFileSync(src).equals(readFileSync(dst))) return;
-
-    if (basename(relativePath) === "recall.json") {
-      mergeRecallFile(src, dst);
-      result.merged.push(relativePath);
-      return;
-    }
-
-    if (relativePath.endsWith(".jsonl")) {
-      mergeJsonlFile(src, dst);
-      result.merged.push(relativePath);
-      return;
-    }
-
-    result.preserved.push(copyConflict(src, dstRoot, join(conflictPrefix, relativePath)));
-  } catch (err) {
-    result.errors.push(`${relativePath}: ${errorMessage(err)}`);
-  }
 }
 
-function migrateDirectory(
+async function migrateDirectory(
   legacyDir: string,
   currentDir: string,
   marker: string,
   now: () => Date,
   conflictPrefix = "",
-): DistillDataMigrationResult {
+): Promise<DistillDataMigrationResult> {
   const result: DistillDataMigrationResult = {
     status: "skipped",
     copied: [],
@@ -181,18 +169,18 @@ function migrateDirectory(
     errors: [],
   };
 
-  if (!existsSync(legacyDir)) return result;
+  if (!await exists(legacyDir)) return result;
 
-  mkdirSync(currentDir, { recursive: true });
+  await mkdir(currentDir, { recursive: true });
   const flagPath = join(currentDir, marker);
-  if (existsSync(flagPath)) return result;
+  if (await exists(flagPath)) return result;
 
-  for (const entry of readdirSync(legacyDir)) {
+  for (const entry of await readdir(legacyDir)) {
     // dc-distill no longer owns a settings file. Preserve legacy settings in
     // place rather than copying dead configuration into current storage.
-    if (entry === "settings.json" || entry.startsWith(".migrated-") || entry.endsWith(".lock") || entry.endsWith(".tmp") || entry === ".lock") continue;
+    if (entry === "settings.json" || entry.startsWith(".migrated-") || entry.endsWith(".lock") || (entry.endsWith(".tmp") || entry.includes(".tmp-")) || entry === ".lock") continue;
     try {
-      migrateEntry(
+      await migrateEntry(
         join(legacyDir, entry), join(currentDir, entry), currentDir, entry, result, conflictPrefix,
       );
     } catch (error) {
@@ -203,7 +191,7 @@ function migrateDirectory(
   result.status = result.errors.length === 0 ? "migrated" : "failed";
   if (result.status === "failed") return result;
   try {
-    Fs.writeSync(
+    await Fs.write(
       flagPath,
       JSON.stringify({ ts: now().toISOString(), result }, null, 2) + "\n",
     );
@@ -215,9 +203,9 @@ function migrateDirectory(
 }
 
 /** Copy prior namespaces without rewriting historical payloads or deleting sources. */
-export function migrateDistillData(
+export async function migrateDistillData(
   options: DistillDataMigrationOptions = {},
-): DistillDataMigrationResult {
+): Promise<DistillDataMigrationResult> {
   const currentDir = options.currentDir ?? defaultCurrentDir();
   const now = options.now ?? (() => new Date());
   const sources = [
@@ -232,13 +220,14 @@ export function migrateDistillData(
   if (locationDir && resolve(locationDir) !== resolve(currentDir)) sources.unshift({
     dir: locationDir, marker: ".migrated-from-legacy-location-dc-distill", prefix: CURRENT_NAMESPACE,
   });
-  const results = sources.map(({ dir, marker, prefix }) => {
+  const results: DistillDataMigrationResult[] = [];
+  for (const { dir, marker, prefix } of sources) {
     try {
-      return migrateDirectory(dir, currentDir, marker, now, prefix);
+      results.push(await migrateDirectory(dir, currentDir, marker, now, prefix));
     } catch (error) {
-      return { status: "failed" as const, copied: [], merged: [], preserved: [], errors: [errorMessage(error)] };
+      results.push({ status: "failed", copied: [], merged: [], preserved: [], errors: [errorMessage(error)] });
     }
-  });
+  }
   return {
     status: results.some((result) => result.status === "failed") ? "failed"
       : results.some((result) => result.status === "migrated") ? "migrated" : "skipped",

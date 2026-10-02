@@ -11,7 +11,7 @@ describe("distill continuation delivery", () => {
   test("queues hidden custom continuation instead of visible user input", () => {
     const stub = createStubCtx();
 
-    expect(queueAutonomousContinuation(stub.pi, stub.ctx)).toBe(true);
+    expect(queueAutonomousContinuation(stub.pi, stub.ctx)).toBe("submitted_unknown");
 
     expect(stub.calls.some((call) => call.api === "pi.sendUserMessage")).toBe(
       false,
@@ -35,7 +35,7 @@ describe("distill continuation delivery", () => {
         attemptId: "attempt-1",
         resumed: true,
       }),
-    ).toBe(true);
+    ).toBe("submitted_unknown");
 
     const call = stub.calls.find((entry) => entry.api === "pi.sendMessage");
     expect(call).toBeDefined();
@@ -53,7 +53,7 @@ describe("distill continuation delivery", () => {
     const stub = createStubCtx();
     (stub.ctx as any).isIdle = () => false;
 
-    expect(queueAutonomousContinuation(stub.pi, stub.ctx)).toBe(false);
+    expect(queueAutonomousContinuation(stub.pi, stub.ctx)).toBe("deferred");
     expect(stub.calls.some((call) => call.api === "pi.sendMessage")).toBe(
       false,
     );
@@ -67,9 +67,16 @@ describe("distill continuation delivery", () => {
       );
     };
 
-    expect(queueAutonomousContinuation(stub.pi, stub.ctx)).toBe(false);
+    expect(queueAutonomousContinuation(stub.pi, stub.ctx)).toBe("unavailable");
     expect(stub.calls.some((call) => call.api === "pi.sendMessage")).toBe(
       false,
     );
   });
+});
+
+ test("fences before a throwing sender; submission outcome stays uncertain", () => {
+  const stub = createStubCtx();
+  let fenced = false;
+  stub.pi.sendMessage = (() => { expect(fenced).toBe(true); throw new Error("after possible submission"); }) as any;
+  expect(queueAutonomousContinuation(stub.pi, stub.ctx, { beforeSubmit: () => { fenced = true; } })).toBe("submitted_unknown");
 });

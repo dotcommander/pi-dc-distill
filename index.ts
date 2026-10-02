@@ -1,3 +1,4 @@
+import { formatInteger } from "./lib/wire-format.ts";
 import { join } from "node:path";
 import { Path } from "./lib/paths.ts";
 import { LEGACY_COMPACTION_CARD_TYPE } from "./lib/legacy.ts";
@@ -20,6 +21,7 @@ import { Events } from "./lib/events-support.ts";
 import { Type } from "typebox";
 import {
   buildCompactionSource,
+  sourceOccurrences,
   canonicalizeCompactionSource,
   CompactionCancelledError,
 } from "./lib/compaction-source.ts";
@@ -32,38 +34,31 @@ import {
   COMPACTION_CARD_TYPE,
   type CompactionCardDetails,
 } from "./lib/compaction-card.ts";
-import { queueAutonomousContinuation } from "./lib/continuation.ts";
+import { queueAutonomousContinuation, continuationFenced, fenceContinuation, observeContinuation, cancelContinuationCallback, scheduleContinuationCallback } from "./lib/continuation.ts";
 import { recoverContinuation, type RecoveryEntryLike } from "./lib/continuation-recovery.ts";
 import { injectFocusEcho } from "./lib/focus-echo.ts";
+import { prepareCheckpointUpdate, readCheckpointUpdateBase } from "./lib/checkpoint-update.ts";
 import { DISTILL_HANDOFF_ENTRY_TYPE, distillHandoffEntry } from "./lib/handoff.ts";
+import { validateCheckpoint, checkpointDigest } from "./lib/compiler/checkpoint.ts";
+import type { ResumeCheckpointV1 } from "./lib/compiler/checkpoint.ts";
+import { CompactionInputError } from "./lib/compiler/errors.ts";
 import { buildMetricLine } from "./lib/metric.ts";
-import { Monitor } from "./lib/monitor.ts";
+import { Phase1Controller, type AttemptTicket } from "./lib/phase1-controller.ts";
 import { searchRecallEntries } from "./lib/recall.ts";
 import {
-  COMPACTION_COOLDOWN_MS,
   DUMP_RETENTION,
-  DEFAULT_PI_COMPACTION_SETTINGS,
-  DEFAULT_DISTILL_FEATURE_SETTINGS,
-  resolveDistillFeatureSettings,
   type DistillFeatureSettings,
   dumpsEnabled,
-  resolvePiCompactionSettings,
   type PiCompactionSettings,
 } from "./lib/settings.ts";
 import { formatDistillStatus } from "./lib/status.ts";
-import { DistillStore, type StoredRecallEntry } from "./lib/store.ts";
+import { projectActiveBranchRecall } from "./lib/recall-projection.ts";
+import { DistillStore } from "./lib/store.ts";
 import { hasLocalCompactor, runStrategies } from "./lib/strategy.ts";
-import {
-  evaluateCompaction,
-  resolveTriggerThresholds,
-  type CompactBlockReason,
-  type ResolvedTriggerThresholds,
-} from "./lib/trigger.ts";
 import { Tier } from "./lib/types.ts";
 import { registerOutputCompactor } from "./lib/output-compactor.ts";
 
-const VERSION = 9;
-const WARN_COOLDOWN_MS = 120_000;
+const VERSION = 13;
 const WARN_STEER_PROMPT = [
   "You are near the context boundary — compaction is imminent.",
   "Finish the current atomic unit, then call save_distill_handoff with either legacy text",
@@ -80,10 +75,13 @@ interface ApiUsage {
 }
 
 interface PendingCompaction {
+  readonly ticket: AttemptTicket;
   readonly attemptId: string;
   readonly sessionId: string;
   readonly firstKeptEntryId: string;
   readonly summaryDigest: string;
+  readonly checkpoint: ResumeCheckpointV1;
+  readonly checkpointDigest: string;
   readonly wireSummary: string;
   readonly canonicalInput: string;
   readonly ts: string;
@@ -104,218 +102,151 @@ interface PendingCompaction {
   readonly metric: string;
 }
 
-class Latch {
-  private armed = false;
-  acquire(): boolean {
-    if (this.armed) return false;
-    this.armed = true;
-    return true;
-  }
-  release(): void { this.armed = false; }
-  get held(): boolean { return this.armed; }
-}
-
-interface DistillRuntime {
-  ownerSessionId: string | null;
-  pi: ExtensionAPI;
-  monitor: Monitor;
-  latch: Latch;
-  compactionSettings: PiCompactionSettings;
-  featureSettings: DistillFeatureSettings;
+interface DistillRuntime extends Phase1Controller {
   store: DistillStore | null;
   pending: PendingCompaction | null;
-  nextAttemptAutonomous: boolean;
-  warmupTurnsRemaining: number;
-  lastWarnTime: number;
   lastFocusEcho: string | null;
   lastFailure: string | null;
-  lastAutoBlockReason: string | null;
-  continuationAttemptId: string | null;
-  contextWindow?: number;
-  compactionCardDedupe: CompactionCardDedupeHandle | null;
-}
-
-function sessionId(ctx: ExtensionContext): string {
-  return ctx.sessionManager?.getSessionId?.() ?? "unknown-session";
+  recallRecovery: Promise<void> | null;
+  recallRequested: { ctx: ExtensionContext; revision: number; committedEntry?: CompactionEntry } | null;
 }
 
 function isOwner(runtime: DistillRuntime, ctx: ExtensionContext): boolean {
-  return runtime.ownerSessionId !== null && sessionId(ctx) === runtime.ownerSessionId;
+  return runtime.isOwner(ctx);
 }
 
-function clearAttempt(runtime: DistillRuntime): void {
-  runtime.pending = null;
-  runtime.nextAttemptAutonomous = false;
-  runtime.lastAutoBlockReason = null;
-  runtime.latch.release();
+function clearAttempt(runtime: DistillRuntime, ticket: AttemptTicket | null): void {
+  if (runtime.finishAttempt(ticket)) runtime.pending = null;
 }
 
 async function reportFailure(
   runtime: DistillRuntime,
   reasons: string[],
   notification?: { ctx: ExtensionContext; message: string },
+  store = runtime.store,
 ): Promise<void> {
+  const lease = notification ? runtime.lease(notification.ctx) : null;
   // Diagnostics must not replace the original failure or escape the fail-closed hook.
   try {
-    await runtime.store?.appendFailure(reasons);
+    await store?.appendFailure(reasons);
   } catch { /* Failure logging is best effort. */ }
-  if (notification?.ctx.hasUI) {
+  if (notification?.ctx.hasUI && runtime.isCurrent(lease, notification.ctx)) {
     try {
       Notify.user(notification.ctx, notification.message, "warning");
     } catch { /* A host notification failure must not enable default compaction. */ }
   }
 }
 
+/** Formatting diagnostics is itself fallible (getters, proxies, toString). */
+function errorText(error: unknown): string {
+  try { return error instanceof Error ? error.message : String(error); }
+  catch { return "unreportable error"; }
+}
 function cancellation(error: unknown): boolean {
-  return error instanceof CompactionCancelledError
-    || (error instanceof Error && ["AbortError", "LoaderAbortError"].includes(error.name));
+  try { return error instanceof CompactionCancelledError
+    || (error instanceof Error && ["AbortError", "LoaderAbortError"].includes(error.name)); } catch { return false; }
 }
 
-type AutoCheckSource = "agent_settled";
-
-function syncContextUsage(runtime: DistillRuntime, ctx: ExtensionContext): boolean {
-  try {
-    const usage = ctx.getContextUsage();
-    const piSynced = runtime.monitor.syncFromPi(usage?.tokens);
-    runtime.contextWindow = usage?.contextWindow
-      ?? ctx.model?.contextWindow
-      ?? runtime.contextWindow;
-    return piSynced || runtime.monitor.hasPiSynced;
-  } catch (error) {
-    runtime.monitor.diagnostic(
-      `auto-check context usage failed: ${error instanceof Error ? error.message : String(error)}`,
-    );
-    runtime.contextWindow = ctx.model?.contextWindow ?? runtime.contextWindow;
-    return runtime.monitor.hasPiSynced;
-  }
-}
-
-function logAutoBlock(
-  runtime: DistillRuntime,
-  source: AutoCheckSource,
-  reason: CompactBlockReason | "warmup" | "in-flight",
-  thresholds: ResolvedTriggerThresholds,
-  piSynced: boolean,
-): void {
-  const tokens = runtime.monitor.state.tokenEstimate;
-  if (tokens < thresholds.auto.effective) {
-    runtime.lastAutoBlockReason = null;
-    return;
-  }
-  if (runtime.lastAutoBlockReason === reason) return;
-  runtime.lastAutoBlockReason = reason;
-  const cooldownRemaining = Math.max(
-    0,
-    COMPACTION_COOLDOWN_MS - (Date.now() - runtime.monitor.state.lastCompactionTime),
-  );
-  runtime.monitor.diagnostic([
-    "auto-check blocked",
-    `reason=${reason}`,
-    `source=${source}`,
-    `tokens=${tokens}`,
-    `piSynced=${piSynced}`,
-    `contextWindow=${runtime.contextWindow ?? "unknown"}`,
-    `auto=${thresholds.auto.effective}`,
-    `warn=${thresholds.warn.effective}`,
-    `emergency=${thresholds.emergency.effective}`,
-    `cooldownMs=${cooldownRemaining}`,
-    `repeatBaseline=${runtime.monitor.state.repeatBaselineTokens ?? "none"}`,
-  ].join(" "));
-}
-
-function checkAutonomousCompaction(
-  runtime: DistillRuntime,
-  ctx: ExtensionContext,
-  source: AutoCheckSource,
-): void {
-  if (!isOwner(runtime, ctx)) return;
-  const piSynced = syncContextUsage(runtime, ctx);
-  const triggerOptions = {
-    contextWindow: runtime.contextWindow,
-    compaction: runtime.compactionSettings,
-  };
-  const thresholds = resolveTriggerThresholds(triggerOptions);
-
-  if (runtime.latch.held) {
-    logAutoBlock(runtime, source, "in-flight", thresholds, piSynced);
-    return;
-  }
-  if (!runtime.compactionSettings.enabled) {
-    runtime.lastAutoBlockReason = null;
-    return;
-  }
-  if (runtime.warmupTurnsRemaining > 0) {
-    logAutoBlock(runtime, source, "warmup", thresholds, piSynced);
-    if (source === "agent_settled") runtime.warmupTurnsRemaining--;
-    return;
-  }
-
-  const evaluation = evaluateCompaction(runtime.monitor.state, piSynced, triggerOptions);
-  if (!evaluation.decision) {
-    if (evaluation.blockedBy === "below-auto" || evaluation.blockedBy === "disabled") {
-      runtime.lastAutoBlockReason = null;
-    } else if (evaluation.blockedBy) {
-      logAutoBlock(runtime, source, evaluation.blockedBy, evaluation.thresholds, piSynced);
-    }
-    return;
-  }
-
-  runtime.lastAutoBlockReason = null;
-  const decision = evaluation.decision;
+function checkAutonomousCompaction(runtime: DistillRuntime, ctx: ExtensionContext): void {
+  const evaluation = runtime.assess(ctx);
+  const decision = evaluation?.decision;
+  if (!decision) return;
   if (decision.tier === Tier.Warn) {
-    if (Date.now() - runtime.lastWarnTime < WARN_COOLDOWN_MS) return;
-    runtime.lastWarnTime = Date.now();
     Notify.toLLM(runtime.pi, WARN_STEER_PROMPT, {
       customType: "dc-distill-warn",
       details: { reason: decision.reason },
-      triggerTurn: false,
       deliverAs: "steer",
+      triggerTurn: false,
     });
     return;
   }
-  if (!runtime.latch.acquire()) return;
-  runtime.nextAttemptAutonomous = true;
-  runtime.monitor.state.lastCompactionTime = Date.now();
-  ctx.compact({
-    onError: (error: Error) => {
-      // Pi emits session_compact_failed as the terminal lifecycle event; that
-      // hook owns durable failure state and releases the latch.
-      if (!cancellation(error) && ctx.hasUI) {
-        Notify.fail(ctx, `Distill failed: ${error.message}`);
-      }
-    },
-  });
+  const ticket = runtime.requestAttempt(ctx);
+  if (!ticket) return;
+  try {
+    ctx.compact({
+      onComplete: () => { clearAttempt(runtime, ticket); },
+      onError: (error: Error) => {
+        if (!runtime.ownsAttempt(ticket, ctx)) return;
+        // Callback captures submission ownership; an anonymous host event cannot.
+        try {
+          if (!cancellation(error) && ctx.hasUI) {
+            try { Notify.fail(ctx, `Distill failed: ${errorText(error)}`); } catch { /* Total diagnostics. */ }
+          }
+        } finally { clearAttempt(runtime, ticket); }
+      },
+    });
+  } catch (error) {
+    clearAttempt(runtime, ticket);
+    throw error;
+  }
 }
 
-/**
- * Reconciles durable autonomous continuation against the active branch.
- * Delivery and the unanswered nudge are journal-driven, so a restart,
- * reload, or tree switch can recover a committed attempt exactly once.
- */
-function reconcileContinuation(runtime: DistillRuntime, ctx: ExtensionContext): void {
-  let branch: RecoveryEntryLike[];
-  try {
-    branch = (ctx.sessionManager?.getBranch?.() ?? []) as RecoveryEntryLike[];
-  } catch {
-    // Stale or readonly session view; the next lifecycle event retries.
-    return;
-  }
-  const recovery = recoverContinuation(branch);
-  if (recovery.action === "none") {
-    runtime.continuationAttemptId = null;
-    return;
-  }
-  if (runtime.continuationAttemptId === recovery.attemptId) return;
-  const { attemptId, action } = recovery;
-  if (!attemptId) return;
-  setImmediate(() => {
-    if (runtime.continuationAttemptId === attemptId) return;
-    const delivered = queueAutonomousContinuation(runtime.pi, ctx, {
-      attemptId,
-      resumed: action === "resume",
+/** Reconcile the durable journal without treating send return as acknowledgement. */
+function reconcileContinuation(runtime: DistillRuntime, ctx: ExtensionContext, committedAttemptId?: string): boolean {
+  const lease = runtime.lease(ctx);
+  if (!lease) return false;
+  const revision = runtime.contextRevision;
+  const readRecovery = () => recoverContinuation((ctx.sessionManager?.getBranch?.() ?? []) as RecoveryEntryLike[]);
+  let recovery: ReturnType<typeof recoverContinuation>;
+  try { recovery = readRecovery(); } catch { return false; }
+  const attemptId = recovery.attemptId;
+  if (!attemptId) return false;
+  if (recovery.phase === "delivered" || recovery.phase === "answered") observeContinuation(lease.sessionId, attemptId);
+  if (recovery.action === "none" || (committedAttemptId && committedAttemptId !== attemptId)) return false;
+  if (continuationFenced(lease.sessionId, attemptId, recovery.action)) return false;
+  scheduleContinuationCallback(lease.sessionId, () => {
+    if (!runtime.isCurrent(lease, ctx) || revision !== runtime.contextRevision) return;
+    let current: ReturnType<typeof recoverContinuation>;
+    try { current = readRecovery(); } catch { return; }
+    if (current.action === "none" || current.attemptId !== attemptId
+      || continuationFenced(lease.sessionId, attemptId, current.action)) return;
+    const kind = current.action;
+    queueAutonomousContinuation(runtime.pi, ctx, {
+      attemptId, resumed: kind === "resume",
+      beforeSubmit: () => fenceContinuation(lease.sessionId, attemptId, kind),
     });
-    if (delivered) runtime.continuationAttemptId = attemptId;
   });
+  return true;
+}
+
+async function independentEffect(runtime: DistillRuntime, label: string, effect: () => unknown): Promise<void> {
+  const store = runtime.store;
+  try { await effect(); }
+  catch (error) {
+    const message = `${label} failed: ${errorText(error)}`;
+    try { runtime.monitor.diagnostic(message); } catch { /* Independent best effort diagnostics. */ }
+    await reportFailure(runtime, [message], undefined, store);
+  }
+}
+
+/** Coalesce branch recovery and validate its lease/revision inside the destination lock. */
+function reconcileRecall(runtime: DistillRuntime, ctx: ExtensionContext, committedEntry?: CompactionEntry): Promise<void> {
+  if (!runtime.featureSettings.recall.enabled || !isOwner(runtime, ctx) || !runtime.store) return Promise.resolve();
+  runtime.recallRequested = { ctx, revision: runtime.contextRevision, committedEntry };
+  if (runtime.recallRecovery) return runtime.recallRecovery;
+  runtime.recallRecovery = (async () => {
+    while (runtime.recallRequested) {
+      const request = runtime.recallRequested;
+      runtime.recallRequested = null;
+      const lease = runtime.lease(request.ctx);
+      const store = runtime.store;
+      const isCurrent = () => runtime.featureSettings.recall.enabled && runtime.isCurrent(lease, request.ctx)
+        && request.revision === runtime.contextRevision && store === runtime.store;
+      if (!lease || !store || !isCurrent()) continue;
+      await independentEffect(runtime, "Recall reconciliation", async () => {
+        const branch = request.ctx.sessionManager.getBranch();
+        const entries = request.committedEntry && !branch.some(entry => entry.id === request.committedEntry!.id)
+          ? [...branch, request.committedEntry] : branch;
+        const rows = projectActiveBranchRecall(entries, store.projectIdentity, lease.sessionId);
+        if (!rows.length) return;
+        const result = await store.reconcileRecall(rows, { isCurrent });
+        for (const conflict of result.conflicts) {
+          try { runtime.monitor.diagnostic(`Recall digest conflict: ${conflict}`); } catch { /* Best effort. */ }
+        }
+      });
+    }
+  })().finally(() => { runtime.recallRecovery = null; });
+  return runtime.recallRecovery;
 }
 
 function summaryTokenEstimate(summary: string): number {
@@ -354,66 +285,24 @@ function buildWireSummary(input: {
   branchEntries: SessionEntry[];
   firstKeptEntryId: string;
 }): { wireSummary: string; tokensAfter: number; summaryTokens: number; metric: string } {
-  let after = summaryTokenEstimate(input.summary);
-  for (let iteration = 0; iteration < 8; iteration++) {
-    const metric = buildMetricLine(input.apiTokensBefore, input.tokensBefore, after);
-    const wireSummary = `_${metric}_\n\n${input.summary}`;
-    const rebuilt = prospectiveTokens(
-      input.branchEntries,
-      input.firstKeptEntryId,
-      input.tokensBefore,
-      wireSummary,
-    );
-    if (rebuilt === after) {
-      return {
-        wireSummary,
-        tokensAfter: rebuilt,
-        summaryTokens: summaryTokenEstimate(wireSummary),
-        metric,
-      };
-    }
-    after = rebuilt;
-  }
-
-  const metric = input.apiTokensBefore > 0
-    ? `${input.apiTokensBefore.toLocaleString()} API / ${input.tokensBefore.toLocaleString()} est → rebuilt context`
-    : `${input.tokensBefore.toLocaleString()} → rebuilt context`;
-  const wireSummary = `_${metric}_\n\n${input.summary}`;
-  return {
-    wireSummary,
-    tokensAfter: prospectiveTokens(
-      input.branchEntries,
-      input.firstKeptEntryId,
-      input.tokensBefore,
-      wireSummary,
-    ),
-    summaryTokens: summaryTokenEstimate(wireSummary),
-    metric,
-  };
+  // One render and one prospective rebuilt-context estimate. Metrics live only
+  // in details and committed artifacts, never in model-facing source text.
+  const wireSummary = input.summary;
+  const tokensAfter = prospectiveTokens(input.branchEntries, input.firstKeptEntryId, input.tokensBefore, wireSummary);
+  return { wireSummary, tokensAfter, summaryTokens: summaryTokenEstimate(wireSummary),
+    metric: buildMetricLine(input.apiTokensBefore, input.tokensBefore, tokensAfter) };
 }
 
-function createRuntime(pi: ExtensionAPI): DistillRuntime {
-  return {
-    ownerSessionId: null,
-    pi,
-    monitor: new Monitor(),
-    latch: new Latch(),
-    compactionSettings: DEFAULT_PI_COMPACTION_SETTINGS,
-    featureSettings: DEFAULT_DISTILL_FEATURE_SETTINGS,
-    store: null,
-    pending: null,
-    nextAttemptAutonomous: false,
-    continuationAttemptId: null,
-    warmupTurnsRemaining: 1,
-    lastWarnTime: 0,
-    lastFocusEcho: null,
-    lastFailure: null,
-    lastAutoBlockReason: null,
-    compactionCardDedupe: null,
-  };
+function createRuntime(pi: ExtensionAPI, options: DistillExtensionOptions): DistillRuntime {
+  return Object.assign(new Phase1Controller(pi, options), {
+    store: null, pending: null, recallRecovery: null, recallRequested: null,
+    lastFocusEcho: null, lastFailure: null,
+  });
 }
 
 export interface DistillExtensionOptions {
+  /** Internal deterministic lifecycle clock; defaults to Date.now. */
+  clock?: () => number;
   storeFactory?: (ctx: ExtensionContext) => DistillStore;
   loadCompactionSettings?: (cwd: string) => PiCompactionSettings;
   loadFeatureSettings?: (cwd: string) => DistillFeatureSettings;
@@ -422,18 +311,7 @@ export interface DistillExtensionOptions {
 }
 
 function createExtension(pi: ExtensionAPI, options: DistillExtensionOptions = {}) {
-  const runtime = createRuntime(pi);
-  const refreshCompactionSettings = (ctx: ExtensionContext): boolean => {
-    try {
-      runtime.compactionSettings = options.loadCompactionSettings?.(ctx.cwd)
-        ?? resolvePiCompactionSettings(pi.getSettings(), ctx.model);
-      return true;
-    } catch (error) {
-      runtime.compactionSettings = { ...DEFAULT_PI_COMPACTION_SETTINGS, enabled: false };
-      runtime.monitor.diagnostic(`auto-check blocked reason=invalid-settings: ${error instanceof Error ? error.message : String(error)}`);
-      return false;
-    }
-  };
+  const runtime = createRuntime(pi, options);
 
   const extension = {
     name: "dc-distill",
@@ -459,8 +337,12 @@ function createExtension(pi: ExtensionAPI, options: DistillExtensionOptions = {}
       );
       Events.beforeCompact(activePi, async ({ event, ctx }) => {
         if (!isOwner(runtime, ctx)) return Events.cancelCompact();
+        const ticket = runtime.beginPreparation(ctx);
+        if (!ticket) return Events.cancelCompact();
+        const metrics = runtime.snapshotAttemptMetrics();
+        const store = runtime.store;
         if (event.signal.aborted) {
-          clearAttempt(runtime);
+          runtime.cancelPreparation(ticket);
           return Events.cancelCompact();
         }
 
@@ -470,7 +352,7 @@ function createExtension(pi: ExtensionAPI, options: DistillExtensionOptions = {}
           && (preparation.turnPrefixMessages?.length ?? 0) === 0
           && !preparation.previousSummary
         ) {
-          clearAttempt(runtime);
+          runtime.cancelPreparation(ticket);
           runtime.lastFailure = "No usable messages were available for deterministic compaction.";
           return Events.cancelCompact();
         }
@@ -478,10 +360,11 @@ function createExtension(pi: ExtensionAPI, options: DistillExtensionOptions = {}
         try {
           const source = buildCompactionSource({
             previousSummary: preparation.previousSummary,
+            firstKeptEntryId: preparation.firstKeptEntryId,
             messagesToSummarize: preparation.messagesToSummarize as never[],
             turnPrefixMessages: preparation.turnPrefixMessages as never[],
             branchEntries: event.branchEntries,
-            sessionId: sessionId(ctx),
+            sessionId: ticket.lease.sessionId,
             cwd: ctx.cwd,
             timestamp: ctx.sessionManager?.getHeader?.()?.timestamp,
           });
@@ -492,18 +375,19 @@ function createExtension(pi: ExtensionAPI, options: DistillExtensionOptions = {}
             canonicalInput: canonical.bytes,
             digestScope: canonical.digestScope,
           }, event.signal);
+          if (!runtime.snapshotMatches(ticket, ctx)) { runtime.cancelPreparation(ticket); return Events.cancelCompact(); }
           if (!result.ok) {
-            clearAttempt(runtime);
+            runtime.cancelPreparation(ticket);
             if (result.cancelled) return Events.cancelCompact();
             runtime.lastFailure = result.reasons.join(" | ");
             await reportFailure(runtime, result.reasons, {
               ctx, message: "Distill cancelled — deterministic compiler failed.",
-            });
+            }, store);
             return Events.cancelCompact();
           }
           if (event.signal.aborted) throw new CompactionCancelledError();
 
-          const apiTokensBefore = runtime.monitor.state.apiTokenCount;
+          const apiTokensBefore = metrics.apiTokensBefore;
           const wire = buildWireSummary({
             summary: result.summary,
             apiTokensBefore,
@@ -512,31 +396,43 @@ function createExtension(pi: ExtensionAPI, options: DistillExtensionOptions = {}
             firstKeptEntryId: preparation.firstKeptEntryId,
           });
           if (Array.from(wire.wireSummary).length > 65_536) {
-            throw new Error("wire summary exceeds 65,536 code points");
+            throw new CompactionInputError("protected wire summary exceeds 65,536 code points", "protected_overflow");
           }
           if (event.signal.aborted) throw new CompactionCancelledError();
 
+          let currentUsage: ReturnType<ExtensionContext["getContextUsage"]>;
+          try { currentUsage = ctx.getContextUsage?.(); } catch { currentUsage = undefined; }
+          const validWindow = (value: unknown): value is number => typeof value === "number" && Number.isFinite(value) && value > 0;
+          const capacityWindow = validWindow(currentUsage?.contextWindow) ? currentUsage.contextWindow
+            : validWindow(ctx.model?.contextWindow) ? ctx.model.contextWindow : undefined;
+          if (capacityWindow !== undefined && wire.tokensAfter >= capacityWindow) {
+            throw new CompactionInputError(`rebuilt context estimate ${wire.tokensAfter} reaches or exceeds context window ${capacityWindow}`, "protected_overflow");
+          }
+          const capacityStatus = capacityWindow === undefined ? "unknown" as const : "within-window" as const;
           const summaryDigest = sha256Hex(wire.wireSummary);
           const reductionPct = preparation.tokensBefore > 0
             ? Math.round(((preparation.tokensBefore - wire.tokensAfter) / preparation.tokensBefore) * 100)
             : 0;
-          const attemptId = randomUUID();
+          const attemptId = ticket.attemptId;
           runtime.pending = Object.freeze({
+            ticket,
             attemptId,
-            sessionId: sessionId(ctx),
+            sessionId: ticket.lease.sessionId,
             firstKeptEntryId: preparation.firstKeptEntryId,
             summaryDigest,
+            checkpoint: validateCheckpoint(result.checkpoint, result.checkpointDigest),
+            checkpointDigest: result.checkpointDigest,
             wireSummary: wire.wireSummary,
             canonicalInput: canonical.bytes,
             ts: new Date().toISOString(),
-            autonomous: runtime.nextAttemptAutonomous,
+            autonomous: ticket.autonomous,
             tokensBefore: preparation.tokensBefore,
             tokensAfter: wire.tokensAfter,
             summaryTokens: wire.summaryTokens,
             apiTokensBefore: apiTokensBefore || undefined,
-            exchangesBefore: runtime.monitor.state.exchangeCount,
-            callsBefore: runtime.monitor.state.callCount,
-            toolTokensBefore: runtime.monitor.state.toolTokens,
+            exchangesBefore: metrics.exchangesBefore,
+            callsBefore: metrics.callsBefore,
+            toolTokensBefore: metrics.toolTokensBefore,
             tier: result.tier,
             readFiles: result.readFiles,
             modifiedFiles: result.modifiedFiles,
@@ -555,10 +451,12 @@ function createExtension(pi: ExtensionAPI, options: DistillExtensionOptions = {}
               version: VERSION,
               tier: result.tier,
               attemptId,
-              autonomous: runtime.nextAttemptAutonomous,
+              autonomous: ticket.autonomous,
               tokensAfter: wire.tokensAfter,
               summaryTokens: wire.summaryTokens,
               tokensAfterSource: "pi-rebuilt-message-estimate",
+              capacityStatus,
+              ...(capacityWindow === undefined ? {} : { contextWindow: capacityWindow }),
               reductionPct,
               apiTokensBefore: apiTokensBefore || undefined,
               readFiles: result.readFiles,
@@ -566,16 +464,19 @@ function createExtension(pi: ExtensionAPI, options: DistillExtensionOptions = {}
               literalAnchors: result.literalAnchors,
               inputDigest: result.inputDigest,
               summaryDigest,
+              checkpoint: result.checkpoint,
+              checkpointDigest: result.checkpointDigest,
               digestScope: result.digestScope,
             },
           });
         } catch (error) {
-          clearAttempt(runtime);
+          if (!runtime.snapshotMatches(ticket, ctx)) { runtime.cancelPreparation(ticket); return Events.cancelCompact(); }
+          runtime.cancelPreparation(ticket);
           if (cancellation(error)) return Events.cancelCompact();
-          runtime.lastFailure = error instanceof Error ? error.message : String(error);
+          runtime.lastFailure = errorText(error);
           await reportFailure(runtime, [runtime.lastFailure], {
             ctx, message: `Distill cancelled: ${runtime.lastFailure}`,
-          });
+          }, store);
           return Events.cancelCompact();
         }
       });
@@ -601,7 +502,7 @@ function createExtension(pi: ExtensionAPI, options: DistillExtensionOptions = {}
           try {
             return await hookHandler(event, hookCtx);
           } catch (error) {
-            Diag.warn("dc-distill", `hook ${hookName} failed`, error);
+            try { Diag.warn("dc-distill", `hook ${hookName} failed`, error); } catch { /* Diagnostic reporting is total. */ }
             return undefined;
           }
         });
@@ -639,64 +540,63 @@ function createExtension(pi: ExtensionAPI, options: DistillExtensionOptions = {}
 
     hooks: {
       session_start: async (_event, ctx) => {
-        const currentId = sessionId(ctx);
-        if (runtime.ownerSessionId !== null && runtime.ownerSessionId !== currentId) return;
-        runtime.compactionCardDedupe?.dispose();
-        runtime.compactionCardDedupe = null;
-        runtime.ownerSessionId = currentId;
-        clearAttempt(runtime);
-        runtime.monitor.reset();
-        refreshCompactionSettings(ctx);
-        runtime.featureSettings = { ...DEFAULT_DISTILL_FEATURE_SETTINGS };
-        try {
-          runtime.featureSettings = options.loadFeatureSettings?.(ctx.cwd)
-            ?? resolveDistillFeatureSettings(pi.getSettings());
-        } catch (error) {
-          runtime.monitor.diagnostic(`feature settings unavailable; optional features disabled: ${String(error)}`);
-        }
+        const lease = runtime.start(ctx);
+        if (!lease) return;
+        runtime.pending = null;
         runtime.lastFailure = null;
-        runtime.store = options.storeFactory?.(ctx)
-          ?? new DistillStore({ projectIdentity: ctx.cwd });
+        runtime.lastFocusEcho = null;
+        if (runtime.ownerSessionId) cancelContinuationCallback(runtime.ownerSessionId);
+        runtime.store = null;
         try {
-          const migration = await runtime.store.initialize({
+          const store = options.storeFactory?.(ctx)
+            ?? new DistillStore({ projectIdentity: ctx.cwd });
+          runtime.store = store;
+          const migration = await store.initialize({
             migrateLegacy: runtime.featureSettings.recall.enabled && runtime.featureSettings.toolOutput.enabled,
           });
-          if (migration.status === "failed") {
-            runtime.lastFailure = `Legacy migration will retry: ${migration.errors.join(" | ")}`;
-          }
+          if (!runtime.isCurrent(lease, ctx)) return;
+          if (migration.status === "failed") runtime.lastFailure = `Legacy migration will retry: ${migration.errors.join(" | ")}`;
         } catch (error) {
-          runtime.lastFailure = `Legacy migration will retry: ${error instanceof Error ? error.message : String(error)}`;
+          if (!runtime.isCurrent(lease, ctx)) return;
+          runtime.lastFailure = `Legacy migration will retry: ${errorText(error)}`;
         }
-        runtime.warmupTurnsRemaining = 1;
-        runtime.lastWarnTime = 0;
-        runtime.lastFocusEcho = null;
-        runtime.lastAutoBlockReason = null;
-        runtime.contextWindow = ctx.model?.contextWindow;
+        if (!runtime.isCurrent(lease, ctx)) return;
         if (ctx.mode === "tui") {
           try {
-            runtime.compactionCardDedupe = await (
-              options.installCompactionDedupe?.() ?? installPiCompactionCardDedupe()
-            );
+            const handle = await (options.installCompactionDedupe?.() ?? installPiCompactionCardDedupe());
+            runtime.attachUI(handle, lease, ctx);
           } catch (error) {
-            Diag.warn("dc-distill", "Pi compaction-card compatibility skipped", error);
+            if (!runtime.isCurrent(lease, ctx)) return;
+            try { Diag.warn("dc-distill", "Pi compaction-card compatibility skipped", error); } catch { /* Best effort. */ }
           }
         }
-        runtime.continuationAttemptId = null;
-        reconcileContinuation(runtime, ctx);
+        if (!runtime.isCurrent(lease, ctx)) return;
+        try {
+          await reconcileRecall(runtime, ctx);
+        } finally {
+          // Pi binds RPC listeners after awaited session_start hooks return.
+          // Arm the deferred sender last: no asynchronous startup work may
+          // yield after this point and let it outrun listener installation.
+          if (runtime.isCurrent(lease, ctx)) reconcileContinuation(runtime, ctx);
+        }
       },
 
       session_shutdown: async (_event, ctx) => {
         if (!isOwner(runtime, ctx)) return;
-        runtime.compactionCardDedupe?.dispose();
-        runtime.compactionCardDedupe = null;
-        clearAttempt(runtime);
-        runtime.ownerSessionId = null;
+        if (runtime.ownerSessionId) cancelContinuationCallback(runtime.ownerSessionId);
+        runtime.recallRequested = null;
+        runtime.shutdown(ctx);
+        runtime.pending = null;
         runtime.store = null;
-        runtime.continuationAttemptId = null;
+
       },
 
       message_end: async (event, ctx) => {
         if (!isOwner(runtime, ctx) || !event.message) return;
+        if (event.message.role === "user") {
+          if (runtime.ownerSessionId) cancelContinuationCallback(runtime.ownerSessionId);
+          runtime.contextChanged(ctx);
+        }
         runtime.monitor.record(event.message);
         if (event.message.role === "assistant" && "usage" in event.message) {
           runtime.monitor.recordApiUsage((event.message as { usage?: ApiUsage }).usage);
@@ -705,48 +605,69 @@ function createExtension(pi: ExtensionAPI, options: DistillExtensionOptions = {}
 
       model_select: async (_event, ctx) => {
         if (!isOwner(runtime, ctx)) return;
-        runtime.contextWindow = ctx.model?.contextWindow;
-        refreshCompactionSettings(ctx);
+        runtime.contextChanged(ctx);
+        runtime.refreshSettings(ctx);
       },
 
+      // Settled observation followed by ctx.compact is a separate host operation;
+      // migrating to agent_before_settle is deliberately deferred.
       agent_settled: async (_event, ctx) => {
-        if (!isOwner(runtime, ctx) || !refreshCompactionSettings(ctx)) return;
-        checkAutonomousCompaction(runtime, ctx, "agent_settled");
+        if (!reconcileContinuation(runtime, ctx)) checkAutonomousCompaction(runtime, ctx);
       },
 
       session_tree: async (_event, ctx) => {
         if (!isOwner(runtime, ctx)) return;
+        runtime.contextChanged(ctx);
         reconcileContinuation(runtime, ctx);
+        await reconcileRecall(runtime, ctx);
       },
 
       session_compact: async (event, ctx) => {
         if (!isOwner(runtime, ctx)) return;
+        if (!event.fromExtension && runtime.ownerSessionId) cancelContinuationCallback(runtime.ownerSessionId);
         const pending = runtime.pending;
         if (!pending) return;
-        if (!event.fromExtension) {
-          clearAttempt(runtime);
-          return;
-        }
+        const ticket = pending.ticket;
+        if (!runtime.ownsAttempt(ticket, ctx) || runtime.commitInFlight) return;
+        const store = runtime.store;
+        const lease = ticket.lease;
+        const metrics = runtime.snapshotAttemptMetrics();
+        if (!event.fromExtension) return;
         const entry = event.compactionEntry;
         const details = (entry.details ?? {}) as Record<string, unknown>;
-        const matches = details.compactor === "dc-distill"
+        let checkpointMatches = false;
+        try {
+          checkpointMatches = checkpointDigest(pending.checkpoint) === pending.checkpointDigest
+            && details.checkpointDigest === pending.checkpointDigest
+            && checkpointDigest(validateCheckpoint(details.checkpoint, pending.checkpointDigest)) === pending.checkpointDigest;
+        } catch { /* Invalid expected v13 state never downgrades to legacy prose. */ }
+        let branchMatches = false;
+        try {
+          const leafId = ctx.sessionManager.getBranch().at(-1)?.id ?? null;
+          branchMatches = leafId === ticket.branchAnchor || leafId === entry.id;
+          if (ticket.branchAnchor !== null && entry.parentId !== ticket.branchAnchor) branchMatches = false;
+        } catch { /* Unknown ownership cannot authorize a commit. */ }
+        const matches = branchMatches && checkpointMatches && details.compactor === "dc-distill"
           && details.version === VERSION
           && details.attemptId === pending.attemptId
           && entry.firstKeptEntryId === pending.firstKeptEntryId
           && sha256Hex(entry.summary) === pending.summaryDigest
           && details.summaryDigest === pending.summaryDigest;
-        if (!matches) {
-          clearAttempt(runtime);
-          return;
-        }
+        // An unowned or stale event cannot clear the current reservation.
+        if (!matches) return;
 
+        if (!runtime.beginCommit(ticket, ctx)) return;
         try {
-          const usage = ctx.getContextUsage?.();
-          const fullContextAfter = typeof usage?.tokens === "number" && usage.tokens > 0
+          let usage: ReturnType<ExtensionContext["getContextUsage"]>;
+          try { usage = ctx.getContextUsage?.(); } catch { usage = undefined; }
+          const fullContextAfter = typeof usage?.tokens === "number" && Number.isFinite(usage.tokens) && usage.tokens > 0
             ? usage.tokens
             : undefined;
-          runtime.monitor.recordCompaction(fullContextAfter ?? pending.tokensAfter);
-          await runtime.store?.appendLog({
+          runtime.recordCommittedCompaction(fullContextAfter ?? pending.tokensAfter);
+          runtime.lastFailure = null;
+          runtime.lastFocusEcho = null;
+          if (pending.autonomous) reconcileContinuation(runtime, ctx, pending.attemptId);
+          await independentEffect(runtime, "Compaction log", () => store?.appendLog({
             ts: pending.ts,
             sessionId: pending.sessionId,
             tier: pending.tier,
@@ -754,21 +675,24 @@ function createExtension(pi: ExtensionAPI, options: DistillExtensionOptions = {}
             after: pending.tokensAfter,
             rebuiltMessageAfter: pending.tokensAfter,
             fullContextAfter,
+            tokenObservation: fullContextAfter === undefined ? "unavailable" : "observed",
+            ...(fullContextAfter === undefined ? {} : { observedTokenDelta: fullContextAfter - pending.tokensAfter }),
             fullContextAfterSource: fullContextAfter === undefined
               ? undefined
               : "pi-post-rebuild-context-usage",
             tokenSource: "pi-rebuilt-message-estimate",
             removed: pending.tokensBefore - pending.tokensAfter,
             toolTokens: pending.toolTokensBefore,
-            idleS: Math.round(runtime.monitor.idleMs / 1000),
+            idleS: metrics.idleS,
             exchanges: pending.exchangesBefore,
             sessionCalls: pending.callsBefore,
             apiTokensBefore: pending.apiTokensBefore,
             summaryHead: pending.wireSummary.slice(0, 200),
             summaryLen: pending.wireSummary.length,
             strategy: "algorithmic",
-          });
-          await runtime.store?.writeDump(
+          }));
+          if (!runtime.ownsAttempt(ticket, ctx)) return;
+          await independentEffect(runtime, "Compaction dump", () => store?.writeDump(
             pending.ts,
             pending.canonicalInput,
             pending.wireSummary,
@@ -777,67 +701,39 @@ function createExtension(pi: ExtensionAPI, options: DistillExtensionOptions = {}
               maxDumps: DUMP_RETENTION,
               attemptId: pending.attemptId,
             },
-          );
-          if (runtime.featureSettings.recall.enabled) {
-            const recall: StoredRecallEntry = {
-              ts: pending.ts,
-              before: pending.tokensBefore,
-              after: pending.tokensAfter,
-              fullContextAfter,
-              fullContextAfterSource: fullContextAfter === undefined
-                ? undefined
-                : "pi-post-rebuild-context-usage",
-              tokenSource: "pi-rebuilt-message-estimate",
-              sessionId: pending.sessionId,
-              summary: pending.wireSummary,
-          };
-          await runtime.store?.persistRecall(recall);
-          }
+          ));
+          if (!runtime.ownsAttempt(ticket, ctx)) return;
+          await reconcileRecall(runtime, ctx, entry);
+          if (!runtime.isCurrent(lease, ctx)) return;
           runtime.lastFailure = null;
           runtime.lastFocusEcho = null;
           if (ctx.hasUI) {
-            const afterLabel = fullContextAfter ?? pending.tokensAfter;
-            Notify.user(ctx, `Shrunk: ${pending.metric} (${afterLabel.toLocaleString()} post-commit)`, "info");
+            const observation = fullContextAfter === undefined ? "post-commit observation unavailable"
+              : `${formatInteger(fullContextAfter)} observed post-commit; delta ${formatInteger(fullContextAfter - pending.tokensAfter)}`;
+            await independentEffect(runtime, "Compaction notification", () => Notify.user(ctx, `Shrunk: ${pending.metric} (${observation})`, "info"));
           }
-          if (pending.autonomous) {
-            const attemptId = pending.attemptId;
-            setImmediate(() => {
-              if (runtime.continuationAttemptId === attemptId) return;
-              if (queueAutonomousContinuation(runtime.pi, ctx, { attemptId })) {
-                runtime.continuationAttemptId = attemptId;
-              }
-            });
-          }
+          if (pending.autonomous) reconcileContinuation(runtime, ctx, pending.attemptId);
         } finally {
-          clearAttempt(runtime);
+          clearAttempt(runtime, ticket);
         }
       },
 
       session_compact_failed: async (event, ctx) => {
         if (!isOwner(runtime, ctx)) return;
-        if (!runtime.pending && !runtime.latch.held) return;
-        const outcome = event.aborted ? "aborted" : "failed";
-        const detail = event.errorMessage ?? "no error message";
-        const failure = `Compaction ${outcome} (${event.reason}): ${detail}`;
+        const ticket = runtime.activeAttempt;
+        if (!ticket || runtime.commitInFlight) return;
+        // Native host failure events may be anonymous. Preserve ambiguous
+        // ownership until the captured callback, identified terminal event, or
+        // session reset. Guessing from reason/fromExtension could clear B for A.
+        const identified = (event as { attemptId?: unknown }).attemptId === ticket.attemptId;
         try {
-          if (!event.aborted) {
-            runtime.lastFailure = failure;
-          }
-          try {
-            runtime.monitor.diagnostic([
-              `compaction ${outcome}`,
-              `reason=${event.reason}`,
-              `fromExtension=${event.fromExtension}`,
-              `willRetry=${event.willRetry}`,
-              `detail=${detail}`,
-            ].join(" "));
-          } catch { /* Terminal diagnostics are best effort. */ }
-          if (!event.aborted) {
-            await reportFailure(runtime, [failure]);
-          }
-        } finally {
-          clearAttempt(runtime);
-        }
+          const outcome = event.aborted ? "aborted" : "failed";
+          const failure = `Compaction ${outcome} (${errorText(event.reason)}): ${errorText(event.errorMessage ?? "no error message")}`;
+          if (identified && !event.aborted) runtime.lastFailure = failure;
+          try { runtime.monitor.diagnostic(failure); } catch { /* Total diagnostics. */ }
+          if (!event.aborted) await reportFailure(runtime, [failure]);
+        } catch { /* A diagnostic must never release an ambiguously owned attempt. */ }
+        finally { if (identified) clearAttempt(runtime, ticket); }
       },
     },
 
@@ -845,20 +741,50 @@ function createExtension(pi: ExtensionAPI, options: DistillExtensionOptions = {}
       save_distill_handoff: {
         name: "save_distill_handoff",
         description: "Save near-compaction state as legacy text or one strict distill-handoff-v1/v2 JSON envelope; v2 preserves task dependencies, decisions, rejected hypotheses, and verification needed.",
-        parameters: Type.Object({ handoff: Type.String() }),
-        // Custom rendering: the house rail preserves the handoff completion summary.
+        parameters: Type.Object({ handoff: Type.String(), checkpoint: Type.Optional(Type.Unknown()) }),
+        // Render the returned outcome, including a saved update whose acknowledgement failed.
         renderStyle: "custom",
-        renderResult: (_result, _options, theme) => Block.node({
-          kind: "rail",
-          title: "distill handoff",
-          summary: "saved for compaction",
-          glyph: "done",
-          state: "success",
-        }, theme),
+        renderResult: (result, _options, theme) => {
+          const failed = (result as { isError?: boolean }).isError === true;
+          const text = result.content.filter((block) => block.type === "text")
+            .map((block) => block.text).join(" ");
+          const savedWithoutAcknowledgement = failed
+            && text.startsWith("Checkpoint update saved; identity acknowledgement failed:");
+          return Block.node({
+            kind: "rail",
+            title: "distill handoff",
+            summary: failed ? text || "handoff failed" : "saved for compaction",
+            glyph: savedWithoutAcknowledgement ? "warning" : failed ? "failed" : "done",
+            state: savedWithoutAcknowledgement ? "warning" : failed ? "error" : "success",
+          }, theme);
+        },
         run: async (args, exec) => {
           if (!isOwner(runtime, exec.ctx)) return Tool.error("save_distill_handoff is unavailable outside the owner session.");
           const handoff = String(args.handoff ?? "").trim();
           if (!handoff) return Tool.error("save_distill_handoff requires a non-empty handoff.");
+          if (args.checkpoint !== undefined) {
+            let savedUpdate = false;
+            try {
+              if (Array.from(JSON.stringify({ handoff, checkpoint: args.checkpoint })).length > 16_384) {
+                return Tool.error("Checkpoint update and handoff exceed the 16,384-code-point saved update envelope.");
+              }
+              const branch = exec.ctx.sessionManager.getBranch();
+              const base = readCheckpointUpdateBase(branch);
+              const update = prepareCheckpointUpdate(args.checkpoint, { ...base,
+                occurrences: sourceOccurrences(branch, runtime.sessionId(exec.ctx)!),
+                nextUpdateEntryId: randomUUID(), handoff });
+              Entries.append(runtime.pi, DISTILL_HANDOFF_ENTRY_TYPE, { ...distillHandoffEntry(handoff), ...update });
+              savedUpdate = true;
+              const savedBranch = exec.ctx.sessionManager.getBranch();
+              const canonicalBase = readCheckpointUpdateBase(savedBranch);
+              const saved = savedBranch.at(-1);
+              const entryId = saved?.type === "custom" && saved.customType === DISTILL_HANDOFF_ENTRY_TYPE ? saved.id : undefined;
+              return Tool.text(entryId ? "Distill checkpoint update saved." : "Distill checkpoint update saved; host entry identity is unavailable.", {
+                details: { customType: DISTILL_HANDOFF_ENTRY_TYPE, checkpointDigest: canonicalBase.checkpointDigest,
+                  expectedBase: { checkpointDigest: canonicalBase.checkpointDigest, updateEntryId: entryId ?? null },
+                  operations: update.operations, ...(entryId ? {} : { baseIdentityUnknown: true }) } });
+            } catch (error) { return Tool.error(`${savedUpdate ? "Checkpoint update saved; identity acknowledgement failed" : "Checkpoint update rejected"}: ${errorText(error)}`); }
+          }
           Entries.append(runtime.pi, DISTILL_HANDOFF_ENTRY_TYPE, distillHandoffEntry(handoff));
           return Tool.text("Distill handoff saved.", { details: { customType: DISTILL_HANDOFF_ENTRY_TYPE } });
         },

@@ -13,9 +13,9 @@ the [logs](#logs). A missing log file can simply mean no attempt has been record
 | --- | --- | --- |
 | Manual `/compact` appears to do nothing | Pi found no eligible discarded context, another attempt owns the latch, or deterministic compilation cancelled. | Inspect Pi's visible message and the latest failure record, if present. Pi can decline a cut before invoking the compiler. |
 | `/compact status` compacted the session | Pi treats `status` as focus text. | There is no separate status command; inspect `compact-log.jsonl` and `diag.log` instead. |
-| Autonomous compaction does not fire at auto | Pi disabled auto-compaction, warmup, cooldown, missing Pi sync, repeat-growth guard, or an in-flight attempt. | Inspect the latest `auto-check blocked` line in `diag.log`; it records the exact guard and effective geometry. |
+| Autonomous compaction does not fire at auto | Pi disabled auto-compaction, invalid settings, warmup, cooldown, unavailable/invalid current Pi usage, repeat-growth guard, or an in-flight attempt. | Inspect the latest `auto-check blocked` line in `diag.log`; it records the exact guard and effective geometry. |
 | A cooperative warning appears | The context reached Pi's `contextWindow - reserveTokens` line. | Finish the atomic unit; compaction becomes unconditional at the context limit. |
-| Compaction fires at emergency despite cooldown | Emergency bypasses cooldown and sync by design. | Investigate why earlier Mechanical compaction did not reduce context. |
+| Compaction fires at emergency despite cooldown | A finite emergency estimate bypasses warmup, cooldown, sync, and growth guards by design. | Investigate why earlier Mechanical compaction did not reduce context. |
 | Summary lacks retained-tail content | Retained content is deliberately excluded from the discarded-input summary and remains in rebuilt context. | Inspect rebuilt context rather than expecting duplication in the summary. |
 | Summary lacks abandoned-fork content | Only the active branch is authoritative. | Return to the relevant branch before compacting if that content is needed. |
 | Summary misses subjective context | The deterministic extraction rules did not retain it. | Provide a focus hint when compacting, save an explicit handoff beforehand, or recall a retained summary. Lost content is not recreated by recall. |
@@ -55,7 +55,7 @@ Each collision-safe pair includes millisecond time, PID, and attempt suffix:
 ```
 
 The before file is the exact canonical discarded-input byte stream whose hash
-is `inputDigest`. The after file is the exact returned metric-prefixed summary
+is `inputDigest`. The after file is the exact returned metric-free summary
 whose hash is `summaryDigest`. Partial temporary pairs are not exposed.
 
 ## Recall
@@ -73,8 +73,8 @@ or marker; arbitrary text performs keyword search across those parts.
 ## Compatibility and Verification
 
 The SDK dependencies remain Pi 0.99.2; the reviewed installed host is Pi 1.0.0.
-Peer ranges admit exact 1.0.0 and compatible 0.99.2 patch releases. Use Node.js 22.19.0 or
-newer. Run `bun install --frozen-lockfile` in a checkout to install its pinned
+Peer ranges are `"*"` per Pi's packaging contract for host-provided packages.
+Use Node.js 22.19.0 or newer. Run `bun install --frozen-lockfile` in a checkout to install its pinned
 dependency graph; avoid a shared `node_modules` symlink when checking SDK changes.
 Pi 0.99.2 and 1.0.0 use the native card without a prototype patch. Capture `pi --version`,
 the symptom, and relevant redacted diagnostics when reporting a compatibility

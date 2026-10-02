@@ -1,3 +1,4 @@
+import { compareCodeUnits } from "./wire-format.ts";
 import type { CompactionRecallEntry } from "./recall-entry.ts";
 import {
   appendFile,
@@ -8,7 +9,7 @@ import {
   rm,
   stat,
 } from "node:fs/promises";
-import { dirname, join } from "node:path";
+import { dirname, join, resolve } from "node:path";
 import { Path, projectSlug } from "./paths.ts";
 import { Fs } from "./fs-support.ts";
 import { migrateDistillData, type DistillDataMigrationResult } from "./data-migration.ts";
@@ -51,6 +52,12 @@ function isRecallEntry(value: unknown): value is StoredRecallEntry {
     && typeof entry.before === "number"
     && typeof entry.after === "number"
     && typeof entry.summary === "string";
+}
+
+function compareRecall(a: StoredRecallEntry, b: StoredRecallEntry): number {
+  const difference = Date.parse(a.ts) - Date.parse(b.ts);
+  return (Number.isFinite(difference) ? difference : compareCodeUnits(a.ts, b.ts))
+    || compareCodeUnits(JSON.stringify([a.project, a.sessionId, a.compactionEntryId, a.summaryDigest, a.summary]), JSON.stringify([b.project, b.sessionId, b.compactionEntryId, b.summaryDigest, b.summary]));
 }
 
 function normalizeAttempt(value: string): string {
@@ -100,9 +107,9 @@ export class DistillStore {
     this.customDataDir = options.dataDir !== undefined;
     this.dataDir = options.dataDir ?? Path.data("dc-distill").path;
     this.projectRoot = options.projectRoot
-      ?? join(options.projectsRoot ?? join(this.dataDir, "projects"), projectSlug(options.projectIdentity ?? process.cwd()));
+      ?? join(options.projectsRoot ?? join(this.dataDir, "projects"), projectSlug(resolve(options.projectIdentity ?? process.cwd())));
     this.projectsRoot = options.projectsRoot ?? join(this.dataDir, "projects");
-    this.projectIdentity = options.projectIdentity ?? process.cwd();
+    this.projectIdentity = resolve(options.projectIdentity ?? process.cwd());
     this.legacyDir = options.legacyDir;
     this.now = options.now ?? (() => new Date());
     this.pid = options.pid ?? process.pid;
@@ -143,16 +150,56 @@ export class DistillStore {
 
   async persistRecall(entry: StoredRecallEntry): Promise<void> {
     await mkdir(this.projectRoot, { recursive: true });
-    const path = join(this.projectRoot, "recall.json");
     const owned: StoredRecallEntry = {
       ...entry,
       project: entry.project ?? this.projectIdentity,
     };
-    await withStoreLock(`${path}.lock`, async () => {
-      const entries = [...await readRecall(path), owned]
-        .sort((a, b) => a.ts.localeCompare(b.ts))
-        .slice(-MAX_RECALL);
-      await Fs.write(path, `${JSON.stringify(entries, null, 2)}\n`);
+    await this.reconcileRecall([owned]);
+  }
+
+  /** Replay original host records under the same lock as ordinary recall writes. */
+  async reconcileRecall(incoming: StoredRecallEntry[], options: { isCurrent?: () => boolean } = {}): Promise<{ conflicts: string[]; published: boolean }> {
+    if (options.isCurrent && !options.isCurrent()) return { conflicts: [], published: false };
+    await mkdir(this.projectRoot, { recursive: true });
+    const path = join(this.projectRoot, "recall.json");
+    return withStoreLock(`${path}.lock`, async () => {
+      if (options.isCurrent && !options.isCurrent()) return { conflicts: [], published: false };
+      const entries = await readRecall(path);
+      const conflicts: string[] = [];
+      const bridged = new Set<number>();
+      const identity = (e: StoredRecallEntry) => e.compactionEntryId && e.project && e.sessionId
+        ? JSON.stringify([resolve(e.project), e.sessionId, e.compactionEntryId]) : undefined;
+      for (const candidate of incoming) {
+        const owned = { ...candidate, project: resolve(candidate.project ?? this.projectIdentity) };
+        const key = identity(owned);
+        const existing = key ? entries.find(e => identity(e) === key) : undefined;
+        if (existing) {
+          if (existing.summaryDigest !== owned.summaryDigest || existing.summary !== owned.summary
+            || existing.before !== owned.before || existing.after !== owned.after) conflicts.push(key!);
+          continue;
+        }
+        const legacy = key ? entries.findIndex((e, i) => !bridged.has(i) && !e.compactionEntryId
+          && e.project !== undefined && resolve(e.project) === owned.project && e.sessionId === owned.sessionId
+          && e.summary === owned.summary && e.before === owned.before && e.after === owned.after) : -1;
+        if (legacy >= 0) {
+          bridged.add(legacy);
+          // Bridge one-to-one while preserving historical payload and timestamp.
+          entries[legacy] = { ...entries[legacy]!, compactionEntryId: owned.compactionEntryId,
+            summaryDigest: owned.summaryDigest, attemptId: owned.attemptId };
+        } else entries.push(owned);
+      }
+      const ordered = entries.sort(compareRecall).slice(-MAX_RECALL);
+      if (options.isCurrent && !options.isCurrent()) return { conflicts, published: false };
+      const stale = new Error("Recall reconciliation became obsolete");
+      try {
+        await Fs.write(path, `${JSON.stringify(ordered, null, 2)}\n`, 3, () => {
+          if (options.isCurrent && !options.isCurrent()) throw stale;
+        });
+      } catch (error) {
+        if (error === stale) return { conflicts, published: false };
+        throw error;
+      }
+      return { conflicts, published: true };
     });
   }
 
@@ -160,7 +207,7 @@ export class DistillStore {
     if (scope === "project") {
       return (await readRecall(join(this.projectRoot, "recall.json")))
         .filter((entry) => entry.project !== undefined)
-        .sort((a, b) => b.ts.localeCompare(a.ts));
+        .sort((a, b) => compareRecall(b, a));
     }
 
     const entries: StoredRecallEntry[] = [];
@@ -175,7 +222,7 @@ export class DistillStore {
 
     const legacy = await readRecall(join(this.dataDir, "recall.json"));
     entries.push(...legacy.map((entry) => ({ ...entry, owner: "legacy-unscoped" as const })));
-    return entries.sort((a, b) => b.ts.localeCompare(a.ts));
+    return entries.sort((a, b) => compareRecall(b, a));
   }
 
   async writeDump(
@@ -218,7 +265,8 @@ export class DistillStore {
     if (maxDumps === undefined || maxDumps < 0) return;
     const names = await readdir(dir);
     const suffix = /-(before\.jsonl|after\.txt)$/;
-    const slugs = [...new Set(names.filter((name) => suffix.test(name)).map((name) => name.replace(suffix, "")))].sort();
+    const slugs = names.filter(name => name.endsWith("-before.jsonl") && names.includes(name.replace(/-before\.jsonl$/, "-after.txt")))
+      .map(name => name.replace(suffix, "")).sort();
     for (const slug of slugs.slice(0, Math.max(0, slugs.length - maxDumps))) {
       await rm(join(dir, `${slug}-before.jsonl`), { force: true });
       await rm(join(dir, `${slug}-after.txt`), { force: true });

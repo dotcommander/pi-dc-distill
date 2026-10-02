@@ -10,7 +10,12 @@ export interface CompactionRecallEntry {
   /** Project owner for version-6 recall. Missing only on legacy entries. */
   project?: string;
   sessionId?: string;
+  compactionEntryId?: string;
+  summaryDigest?: string;
+  attemptId?: string;
   fullContextAfter?: number;
+  tokenObservation?: "observed" | "unavailable";
+  observedTokenDelta?: number;
   fullContextAfterSource?: "pi-post-rebuild-context-usage";
   tokenSource?: string;
   owner?: "legacy-unscoped";

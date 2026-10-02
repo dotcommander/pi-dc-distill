@@ -1,5 +1,6 @@
-import { extractTagContent } from "./extract-tags.ts";
-import { compileSessionFile, compileSessionJsonl } from "./local-compact.ts";
+import type { ResumeCheckpointV1 } from "./compiler/checkpoint.ts";
+import { compileSessionJsonl } from "./local-compact.ts";
+import { compileSessionFile } from "./compile-session-file.ts";
 import { CompactionCancelledError } from "./compaction-source.ts";
 
 const MIN_USEFUL_LENGTH = 50;
@@ -18,6 +19,8 @@ export type StrategyResult =
       ok: true;
       tier: 1;
       summary: string;
+      checkpoint: ResumeCheckpointV1;
+      checkpointDigest: string;
       readFiles: string[];
       modifiedFiles: string[];
       literalAnchors: string[];
@@ -28,6 +31,8 @@ export type StrategyResult =
   | { ok: false; cancelled: boolean; reasons: string[] };
 
 interface CompileResult {
+  checkpoint: ResumeCheckpointV1;
+  checkpointDigest: string;
   summary: string;
   readFiles: string[];
   modifiedFiles: string[];
@@ -59,26 +64,16 @@ const algorithmic = async (
 
   return {
     summary,
-    readFiles: fileListOrSummaryTag(result.readFiles, summary, "read-files"),
-    modifiedFiles: fileListOrSummaryTag(
-      result.modifiedFiles,
-      summary,
-      "modified-files",
-    ),
+    checkpoint: result.checkpoint,
+    checkpointDigest: result.checkpointDigest,
+    readFiles: result.readFiles,
+    modifiedFiles: result.modifiedFiles,
     literalAnchors: result.literalAnchors,
     inputDigest: result.inputDigest,
     summaryDigest: result.summaryDigest,
     digestScope: prep.digestScope ?? result.digestScope,
   };
 };
-
-function fileListOrSummaryTag(
-  files: string[],
-  summary: string,
-  tagName: string,
-): string[] {
-  return files.length > 0 ? files : extractTagContent(summary, tagName);
-}
 
 export const hasLocalCompactor = (): boolean => true;
 
@@ -95,6 +90,8 @@ export const runStrategies = async (
       ok: true,
       tier: 1,
       summary: result.summary,
+      checkpoint: result.checkpoint,
+      checkpointDigest: result.checkpointDigest,
       readFiles: result.readFiles,
       modifiedFiles: result.modifiedFiles,
       literalAnchors: result.literalAnchors,

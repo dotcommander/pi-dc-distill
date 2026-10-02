@@ -1,3 +1,4 @@
+import { formatInteger } from "./wire-format.ts";
 /**
  * Compaction metric line — human-readable before→after token summary.
  *
@@ -7,8 +8,8 @@
 /**
  * Build a human-readable metric line showing token reduction.
  *
- * Prioritizes API-reported count when available; shows both API and
- * estimated counts when they diverge significantly (>50% difference).
+ * Uses Pi's preparation estimate for both the before-count and reduction.
+ * Adds API usage separately when the counts diverge by more than 50%.
  */
 export function buildMetricLine(
   apiTokenCount: number,
@@ -20,12 +21,10 @@ export function buildMetricLine(
       ? Math.round(((tokensBefore - tokensAfter) / tokensBefore) * 100)
       : 0;
 
-  if (shouldShowBothCounts(apiTokenCount, tokensBefore)) {
-    return `${apiTokenCount.toLocaleString()} API / ${tokensBefore.toLocaleString()} est → ${tokensAfter.toLocaleString()} tokens (${reductionPct}% reduction)`;
-  }
-
-  const effectiveBefore = apiTokenCount || tokensBefore;
-  return `${effectiveBefore.toLocaleString()} → ${tokensAfter.toLocaleString()} tokens (${reductionPct}% reduction)`;
+  const metric = `${formatInteger(tokensBefore)} est → ${formatInteger(tokensAfter)} tokens (${reductionPct}% reduction)`;
+  return shouldShowBothCounts(apiTokenCount, tokensBefore)
+    ? `${metric} (API before: ${formatInteger(apiTokenCount)})`
+    : metric;
 }
 
 function shouldShowBothCounts(
