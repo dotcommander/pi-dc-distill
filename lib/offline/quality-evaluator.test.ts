@@ -2,12 +2,13 @@ import { expect, test } from "bun:test";
 import { QUALITY_CORPUS, QUALITY_DECOYS, QUALITY_BOUNDARY_INPUTS } from "./quality-corpus.ts";
 import { buildCompactionSource, canonicalizeCompactionSource } from "../compaction-source.ts";
 import { markerProblems, sectionPositionProblems, qualitySeal } from "./quality-evaluator.ts";
-test("fixed corpus has twelve immutable sources and an independent pressure oracle", () => {
-  expect(QUALITY_CORPUS).toHaveLength(12);
-  expect(new Set(QUALITY_CORPUS.map(fixture => fixture.id)).size).toBe(12);
+test("fixed corpus has thirteen immutable sources and independent pressure/noise oracles", () => {
+  expect(QUALITY_CORPUS).toHaveLength(13);
+  expect(new Set(QUALITY_CORPUS.map(fixture => fixture.id)).size).toBe(13);
   expect(Object.isFrozen(QUALITY_CORPUS[0].oracle)).toBe(true);
   expect(QUALITY_CORPUS.filter(fixture => fixture.oracle.pressure).length).toBeGreaterThan(0);
-  expect(qualitySeal()).toMatchObject({ comparisons: 48, repeats: 3, minimumPressureImprovementPercentagePoints: 5 });
+  expect(QUALITY_CORPUS.find(fixture => fixture.id === "plain-prose-noise")?.oracle.displayNoise).toEqual([{ phrase: "context material", maximumConversationOccurrences: 1 }]);
+  expect(qualitySeal()).toMatchObject({ comparisons: 52, repeats: 3, minimumPressureImprovementPercentagePoints: 5 });
   for (const fixture of QUALITY_CORPUS) {
     const input = canonicalizeCompactionSource(fixture.source).bytes;
     for (const decoy of Object.values(QUALITY_DECOYS).flat()) expect(input).not.toContain(decoy.content);

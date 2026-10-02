@@ -148,6 +148,13 @@ export function buildResumeIndex(turns: ConversationTurn[], readFiles: string[],
     }
   }
   const recentUserIntents = boundedValues(allRecentUserIntents, 3, "recent user intents");
+  const intentOccurrences = recentUserIntents.flatMap(text => {
+    const candidates = turns.filter(turn => turn.role === "user" && turn.origin !== "custom" &&
+      turn.sourceSequence !== undefined && !/[;\n]|\b(?:and|then|also)\b/i.test(turn.text) &&
+      !isReferentialRequest(trimResumeLine(turn.text)) && trimResumeLine(turn.text) === text);
+    // Identical clipped strings from multiple turns are not occurrence identity.
+    return candidates.length === 1 ? [{ text, sourceSequence: candidates[0].sourceSequence! }] : [];
+  });
   const allContinuationHints: string[] = [];
   const latestAssistant = turns.findLastIndex((turn) =>
     turn.role === "assistant" && !extractSignals(turn.text).pureAck);
@@ -169,7 +176,7 @@ export function buildResumeIndex(turns: ConversationTurn[], readFiles: string[],
   }
   const continuationHints = boundedValues(allContinuationHints, 5, "continuation hints");
 
-  return { activeFiles, recentUserIntents, continuationHints, recallQueries };
+  return { activeFiles, recentUserIntents, continuationHints, recallQueries, intentOccurrences };
 }
 
 /** Copy source obligations before any evidence display caps or eviction. */

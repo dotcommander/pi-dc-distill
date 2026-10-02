@@ -140,6 +140,44 @@ four next actions, including active-file inspection, unresolved verification,
 recall, and working-tree inspection when appropriate. A latest terminal
 completion suppresses stale resume work.
 
+### Optional prose display cleanup
+
+Eligible conversation prose receives a separate display projection before its
+preview is clipped. The original semantic turn preview remains the input to
+turn scoring, selection, the resume index, and evidence handling. This changes
+optional rendered text, not checkpoint declarations, pins, evidence identities,
+mutation state, or task authority. Details stay version 13 with checkpoint schema
+v1; the exact resulting wire summary is hashed and used for host estimates.
+
+The scanner considers adjacent exact phrase runs, trying the shortest period
+first, up to 16 whitespace-delimited tokens. A run needs at least three
+occurrences spanning 128 Unicode code points. Tokens, intervening separators,
+casing, and punctuation must match exactly. Rendering keeps one occurrence and
+adds `[repeated N times]`. It does not combine paraphrases or separated repeats,
+infer subjective importance, or call an LLM.
+
+Display scanning has an independent budget: 65,536 code points per record,
+262,144 code points and 32,768 tokens per compilation. A record that exceeds the
+scan budget uses its ordinary preview without partial repetition replacement;
+compilation-budget exhaustion leaves subsequent records on that fallback too.
+These limits do not consume the semantic lexical/evidence budget. Recognized
+pins, declarations, commands, code, diffs, tables, structured text, and evidence
+are conservatively bypassed. Uncertain syntax keeps the ordinary preview.
+Eligible background may still be shortened when it shares a turn with ordinary
+prose instructions; this is not a guarantee of preserving every implied obligation.
+
+Display clipping respects the existing preview caps, preferring a natural
+whitespace boundary and an ellipsis, with a complete-code-point fallback for
+unbroken text. It cannot guarantee complete sentences or preserve everything
+beyond the cap. Other budget eviction still removes complete optional records.
+
+A recent-user-intent display row can disappear only when the same uniquely
+identified source occurrence has an exactly equal complete visible conversation
+preview. Transient occurrence metadata supports that decision without changing
+stored checkpoint schema or semantic intent strings. Evicting the conversation
+row restores the intent fallback. Ambiguous, combined, referential, and protected
+intent remains separate; matching clipped text alone does not prove identity.
+
 ## Evidence semantics
 
 Read/modified file markers require successful, unambiguously paired tool results.

@@ -8,6 +8,8 @@ export interface QualityOracle {
   forbiddenFacts: string[];
   safety: Array<{ section: string; includes?: string[]; excludes?: string[] }>;
   pressure: boolean;
+  /** Display-only noise expectations; facts and state remain independently checked. */
+  displayNoise?: Array<{ phrase: string; maximumConversationOccurrences: number }>;
 }
 export interface QualityFixture { id: string; source: CompactionSource; focus: string; oracle: QualityOracle }
 const user = (content: string) => ({ role: "user", content });
@@ -34,6 +36,7 @@ const pressureEvidence = () => Array.from({ length: 24 }, (_, i) => [
   assistant(`### Historical inventory ${i}\nDecision: preserve historical-${i}.ts. ${"old implementation details ".repeat(38)}`),
 ]).flat();
 const all: QualityFixture[] = [
+  { id: "plain-prose-noise", focus: "DEMO-ANCHOR", source: source("plain-prose-noise", [user(`DEMO-ANCHOR must survive compaction. ${"context material ".repeat(2000)}Unique suffix 42; do not retire unfinished work.`)]), oracle: { ...oracle(["DEMO-ANCHOR must survive compaction.", "context material [repeated 2000 times]", "Unique suffix 42; do not retire unfinished work."]), displayNoise: [{ phrase: "context material", maximumConversationOccurrences: 1 }] } },
   { id: "ordinary", focus: "parser schema", source: source("ordinary", [user("Implement deterministic parser schema"), assistant("Decision: parser schema rejects unknown fields because the input boundary is strict."), ...check("ordinary-check")]), oracle: oracle(["Implement deterministic parser schema"], ["rejects unknown fields"], [{ section: "verification", includes: ["PASS [bash cwd=/quality/project]: bun test lib/parser.test.ts"], excludes: ["freshness: not established"] }]) },
   { id: "repetitive-pressure", focus: "parser current invariant", source: source("repetitive-pressure", [...pressureEvidence(), user("Fix parser current invariant"), call("current-read", "read", { path: "lib/parser.ts" }), result("current-read", "read", "parser invariant: CURRENT_RELEVANT_FACT", false)]), oracle: oracle(["Fix parser current invariant"], ["parser.ts", "CURRENT_RELEVANT_FACT"], [], true) },
   { id: "older-relevant", focus: "parser lexical contract", source: source("older-relevant", [user("Preserve parser lexical contract"), call("old-relevant", "read", { path: "lib/parser.ts" }), result("old-relevant", "read", "OLDER_RELEVANT_FACT parser lexical contract", false), ...pressureEvidence(), user("Fix parser lexical contract")]), oracle: oracle(["Fix parser lexical contract"], ["parser.ts", "OLDER_RELEVANT_FACT"], [], true) },

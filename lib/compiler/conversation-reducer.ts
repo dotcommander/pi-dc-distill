@@ -249,6 +249,7 @@ function synthesizeRun(run: ScoredTurn[], precededByUser: ConversationTurn | und
       ...run[0].turn,
       role: "assistant",
       text: `[${run.length} turns after correction${context} — first: ${JSON.stringify(first)}; last: ${JSON.stringify(last)}]`,
+      displayText: undefined,
     };
   }
   const tail = sliceU16(firstNonEmptyLine(run.at(-1)?.turn.text ?? ""), 160);
@@ -256,6 +257,7 @@ function synthesizeRun(run: ScoredTurn[], precededByUser: ConversationTurn | und
     ...run[0].turn,
     role: "assistant",
     text: `[${run.length} procedural turns — tools: ${tools}; files: ${files}] last: ${JSON.stringify(tail)}`,
+    displayText: undefined,
   };
 }
 
@@ -294,6 +296,7 @@ function collapseEditLoops(scored: ScoredTurn[]): void {
           ...scored[start].turn,
           role: "assistant",
           text: `[loop: ${tool} ${target} × ${attempts} attempts, ${failures} errors observed; outcome unverified — last: ${JSON.stringify(last)}]`,
+          displayText: undefined,
         },
         drop: false,
         keep: true,
@@ -373,7 +376,7 @@ function collapseDenseRepetition(scored: ScoredTurn[]): void {
     if (regionFirst >= 0 && regionCount > 0) {
       scored[regionFirst] = {
         ...scored[regionFirst],
-        turn: { ...scored[regionFirst].turn, role: "assistant", text: `[${regionCount} repeated procedural turns]` },
+        turn: { ...scored[regionFirst].turn, role: "assistant", text: `[${regionCount} repeated procedural turns]`, displayText: undefined },
         drop: false,
         keep: true,
       };

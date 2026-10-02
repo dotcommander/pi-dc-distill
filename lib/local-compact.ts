@@ -10,6 +10,7 @@ import { collectSourceAnchorsFromUserText, collectLiteralAnchors, collectTaskAge
 import { extractSignals, isReferentialImplementation, conversationEvictionCandidates, trimTurn, compactAssistantTurns, hasTerminalNoWorkCompletion, classifyRequestGroups, removeCompletedHistoricalRequests } from "./compiler/conversation-reducer.ts";
 import { buildResumeIndex, buildResumeTasks, buildResumePlan } from "./compiler/resume-index.ts";
 import { formatSummary, enforceOperatingBudget, readRetainedContext } from "./compiler/budget-formatter.ts";
+import { DisplayProjectionBudget } from "./compiler/display-projection.ts";
 import { choosePathRoot } from "./compiler/path-roots.ts";
 import { buildCheckpoint, validateCheckpoint, checkpointDigest } from "./compiler/checkpoint.ts";
 import { codePointLength } from "./unicode.ts";
@@ -41,7 +42,7 @@ function collectConversationTurn(
   return true;
 }
 
-function extractConversation(blocks: NormalizedBlock[], sessionCwd?: string, previous?: import("./compiler/types.ts").ObservationSnapshot): ConversationResult {
+function extractConversation(blocks: NormalizedBlock[], sessionCwd?: string, previous?: import("./compiler/types.ts").ObservationSnapshot, protectedText: string[] = []): ConversationResult {
   const lexical = new LexicalBudget();
   const turns: ConversationTurn[] = [];
   const readFiles = new OrderedSet();
@@ -201,12 +202,15 @@ function extractConversation(blocks: NormalizedBlock[], sessionCwd?: string, pre
   const protectedGroups = classifyRequestGroups(turns);
   removeCompletedHistoricalRequests(turns, toolAdj, protectedGroups);
 
+  const displayBudget = new DisplayProjectionBudget();
   for (let index = 0; index < turns.length; index++) {
     // These turn objects are created locally and have not escaped extraction.
     const turn = turns[index];
-    turn.text = turn.protectedRequest
-      ? trimTurn(turn.text, 0)
-      : trimTurn(turn.text, turns.length - index - 1);
+    const sourceText = turn.text;
+    const age = turn.protectedRequest ? 0 : turns.length - index - 1;
+    const displayText = displayBudget.project(sourceText, turn.origin === "custom" || protectedText.some(text => text && sourceText.includes(text)));
+    turn.text = trimTurn(sourceText, age);
+    if (displayText !== sourceText) turn.displayText = trimTurn(displayText, age);
   }
   let finalTurns = turns;
   let totalChars = finalTurns.reduce((sum, turn) => sum + turn.text.length, 0);
@@ -376,6 +380,7 @@ export function compileSessionJsonl(content: string, userFocus?: string, signal?
   const conv = extractConversation(
     compressToolResults(filterNoise(normalized.blocks)),
     normalized.meta.cwd, previous?.evidence,
+    previous ? [...previous.pins.filter(pin => pin.status === "active").map(pin => pin.text), ...previous.constraints, ...previous.tasks.map(task => task.action)] : [],
   );
   const declarations = (normalized.meta.declarations ?? []).flatMap((text, index) => { const handoff = parseAnyStructuredDistillHandoff(text); return handoff ? [{ handoff, source: normalized.meta.declarationSources?.[index] }] : []; });
   conv.checkpoint = buildCheckpoint(previous, declarations.map(item => item.handoff),

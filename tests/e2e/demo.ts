@@ -90,6 +90,10 @@ async function main(): Promise<void> {
       if (/\best\s*→.*\btokens\s*\([^\n]*% reduction\)|^Shrunk:/m.test(committed.summary)) {
         fail("committed wire summary contains a model-facing metric line");
       }
+      const conversation = committed.summary.match(/## Conversation\n([\s\S]*?)(?=\n<(?:[a-z][a-z-]*)[>\s]|$)/)?.[1] ?? "";
+      if (!conversation.includes("DEMO-ANCHOR must survive compaction.")) fail("conversation lost the exact demo request clause");
+      if (!conversation.includes("context material [repeated 2000 times]")) fail("plain background repetition was not projected before clipping");
+      if (conversation.includes("context material context material")) fail("conversation retained adjacent plain background noise");
 
       const requests = readJsonLines(artifacts.traceFile);
       const summaryRequests = requests.filter((entry) => entry.kind === "summary");
@@ -106,7 +110,7 @@ async function main(): Promise<void> {
       console.log("  rpc.log");
       console.log("  provider-trace.jsonl");
       console.log(`Provider requests: ${requests.length}; summarizer requests: ${summaryRequests.length}`);
-      console.log("Compaction: one v13 ledger entry; validated v1 checkpoint and exact digests; metric-free manual lifecycle.");
+      console.log("Compaction: one v13 ledger entry; validated v1 checkpoint and exact digests; metric-free manual lifecycle; counted background repetition and exact request clause.");
     } finally {
       await client.close();
     }

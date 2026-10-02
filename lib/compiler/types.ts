@@ -47,6 +47,8 @@ export interface NormalizedBlock {
 
 export interface ConversationTurn {
   sourceSequence?: number;
+  /** Ephemeral display projection; text remains the existing semantic preview. */
+  displayText?: string;
   role: "user" | "assistant";
   text: string;
   origin?: "human" | "custom";
@@ -94,6 +96,10 @@ export interface SessionMeta {
 
 export interface ResumeIndex {
   checkpoint?: ResumeCheckpointV1;
+  /** Unique ordinary source occurrences, never persisted in a checkpoint. */
+  intentOccurrences?: Array<{ text: string; sourceSequence: number }>;
+  /** Optional attributed intent previews kept when conversation display is evicted. */
+  displayIntents?: string[];
   activeFiles: string[];
   recentUserIntents: string[];
   continuationHints: string[];

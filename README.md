@@ -27,6 +27,14 @@ and known verification-evidence risks.
 
 Version 13 carries validated declarations, explicit user-source pins, evidence, and failure history in a durable checkpoint. Their retention is protected across compactions; terminal prose cannot clear unresolved work. Other context remains lossy. Checkpoint updates use exact sources and stale-base rejection; invalid expected state or protected overflow cancels compaction.
 
+Optional conversation previews shorten exact adjacent repetitions in eligible
+background prose before clipping, retaining one phrase and an explicit repetition
+count. This display cleanup preserves the original semantic preview used for
+selection and evidence handling, and leaves checkpoint state unchanged. It is
+mechanical and lossy; it makes no guarantee about subjective importance. See
+[display cleanup](docs/algorithm.md#optional-prose-display-cleanup) for bounds and
+conservative bypasses.
+
 Version 12 adds conservative unknown-tool fencing, structural parsing, locale-independent wire output, and rebuilt-context capacity acceptance. Version 11 preserves conservative shell/output evidence, adds transcript-derived
 rerun priorities and observed v3 handoff readiness, and improves summary ordering.
 Version 12 restores the baseline production selector after the coverage candidate

@@ -4,7 +4,7 @@ import { compileSessionJsonl } from "../local-compact.ts";
 import { QUALITY_CORPUS, QUALITY_DECOYS, QUALITY_BOUNDARY_INPUTS, type QualityFixture } from "./quality-corpus.ts";
 
 const hash = (text: string) => createHash("sha256").update(text).digest("hex");
-export const qualitySeal = () => ({ schema: 1, corpusHash: hash(JSON.stringify(QUALITY_CORPUS)), oracleHash: hash(JSON.stringify(QUALITY_CORPUS.map(({ id, oracle }) => ({ id, oracle })))), boundaryHash: hash(JSON.stringify(QUALITY_BOUNDARY_INPUTS)), decoyHash: hash(JSON.stringify(QUALITY_DECOYS)), comparisons: 48, repeats: 3, minimumPressureImprovementPercentagePoints: 5 });
+export const qualitySeal = () => ({ schema: 1, corpusHash: hash(JSON.stringify(QUALITY_CORPUS)), oracleHash: hash(JSON.stringify(QUALITY_CORPUS.map(({ id, oracle }) => ({ id, oracle })))), boundaryHash: hash(JSON.stringify(QUALITY_BOUNDARY_INPUTS)), decoyHash: hash(JSON.stringify(QUALITY_DECOYS)), comparisons: QUALITY_CORPUS.length * 4, repeats: 3, minimumPressureImprovementPercentagePoints: 5 });
 export function markerProblems(summary: string): string[] {
   const stack: string[] = [], problems: string[] = [];
   for (const match of summary.matchAll(/<(\/?)([a-z][a-z-]*)(?:\s[^<>]*?)?>/g)) {
@@ -54,6 +54,11 @@ function inspect(fixture: QualityFixture, summary: string) {
     const text = section(summary, assertion.section);
     for (const fact of assertion.includes ?? []) if (!text.includes(fact)) problems.push(`${assertion.section} safety fact missing: ${fact}`);
     for (const fact of assertion.excludes ?? []) if (text.includes(fact)) problems.push(`${assertion.section} unsafe fact: ${fact}`);
+  }
+  const conversation = summary.match(/## Conversation\n([\s\S]*?)(?=\n<(?:[a-z][a-z-]*)[>\s]|$)/)?.[1] ?? "";
+  for (const assertion of fixture.oracle.displayNoise ?? []) {
+    const occurrences = conversation.split(assertion.phrase).length - 1;
+    if (occurrences > assertion.maximumConversationOccurrences) problems.push(`conversation noise: ${assertion.phrase} occurs ${occurrences} times`);
   }
   return { problems, optionalHits: fixture.oracle.optionalFacts.filter(fact => summary.includes(fact)).length, optionalTotal: fixture.oracle.optionalFacts.length };
 }

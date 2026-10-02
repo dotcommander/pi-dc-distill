@@ -2,6 +2,7 @@ import { renderCheckpoint, checkpointReadyTasks } from "./checkpoint.ts";
 import { scanSections } from "./section-scanner.ts";
 import { formatInteger } from "../wire-format.ts";
 import { LexicalBudget } from "./lexical-budget.ts";
+import { visibleUserIntents } from "./display-projection.ts";
 import { resolvedFrontierIntent } from "./conversation-reducer.ts";
 import { evaluatePreconditions } from "./observed-readiness.ts";
 import { prefilterOptionalRecords, selectOptionalRecords, type OptionalSelectionRecord, type OptionalRecordKind } from "./optional-selector.ts";
@@ -254,14 +255,17 @@ function formatRecentToolResults(results: ToolResultEntry[], measure = false): R
   }
   return sink.value();
 }
-function formatResumeIndex(index: ResumeIndex, measure = false): RenderedSection {
+function formatResumeIndex(index: ResumeIndex, visibleTurns: ConversationResult["turns"], measure = false): RenderedSection {
   const sink = new SectionSink(measure);
   let opened = false;
-  for (const [label, values] of [["recent-user-intent", index.recentUserIntents], ["continuation", index.continuationHints], ["recall-queries", index.recallQueries]] as const) {
+  for (const [label, values] of [["recent-user-intent", visibleUserIntents(index, visibleTurns)], ["continuation", index.continuationHints], ["recall-queries", index.recallQueries]] as const) {
     if (!values.length) continue;
     if (!opened) { sink.line().raw("<resume-index>"); opened = true; }
     sink.line().raw(`${label}:`);
-    for (const value of values) sink.line().raw("- ").escaped(sanitize(value).trim().split(/\s+/).filter(Boolean).join(" "));
+    for (const value of values) {
+      const attributed = label === "recent-user-intent" && !index.recentUserIntents.includes(value);
+      sink.line().raw(attributed ? "- [Attributed user context] " : "- ").escaped(sanitize(value).trim().split(/\s+/).filter(Boolean).join(" "));
+    }
   }
   if (opened) sink.line().raw("</resume-index>");
   return sink.value();
@@ -468,7 +472,7 @@ export function readRetainedContext(summaries: string[]): ContextExcerpt[] {
 }
 
 function formatRetainedContext(conv: ConversationResult, measure = false): RenderedSection {
-  const current = [...contextTurnIndexes(conv)].map(([index, kind]) => ({ role: conv.turns[index].role, kind, text: conv.turns[index].text }));
+  const current = [...contextTurnIndexes(conv)].map(([index, kind]) => ({ role: conv.turns[index].role, kind, text: conv.turns[index].displayText ?? conv.turns[index].text }));
   const excerpts = distinctContext([...(conv.retainedContext ?? []), ...current]);
   const sink = new SectionSink(measure);
   if (excerpts.length) {
@@ -556,7 +560,7 @@ export function formatSummary(meta: SessionMeta, conv: ConversationResult, userF
         const context = turn.role !== "assistant" ? "" : index === frontier.completion ? "[Current outcome] " : index < frontier.latestUser ? "[Historical context] " : "";
         if (!first) sink.raw("\n");
         first = false;
-        sink.raw("[").escaped(label).raw(`] ${context}`).escaped(turn.text);
+        sink.raw("[").escaped(label).raw(`] ${context}`).escaped(turn.displayText ?? turn.text);
       }
     }
     return sink.value();
@@ -576,7 +580,10 @@ export function formatSummary(meta: SessionMeta, conv: ConversationResult, userF
     cached(conv.sourceAnchors, "source-anchors", () => markerBlock("source-anchors", conv.sourceAnchors, measure)),
     cached(conv.activeTasks, "active-tasks", () => markerBlock("active-tasks", conv.activeTasks, measure)),
     cached(conv.literalAnchors, "literal-anchors", () => markerBlock("literal-anchors", conv.literalAnchors, measure)),
-    cached(conv.resumeIndex, "resume-index", () => formatResumeIndex(conv.resumeIndex, measure)),
+    cached(conv.resumeIndex, `resume-index:${identity(conv.turns)}`, () => {
+      const contexts = contextTurnIndexes(conv);
+      return formatResumeIndex(conv.resumeIndex, conv.turns.filter((_, index) => !contexts.has(index)), measure);
+    }),
     meta.id ? cached(meta, "recovery", () => new SectionSink(measure)
       .raw("<full-session-recovery>\nFull transcript: `ctxgo show session --provider pi --provider-session ").escaped(shellQuote(meta.id!))
       .raw("`\nSource JSONL: `ctxgo locate session --provider pi --provider-session ").escaped(shellQuote(meta.id!))
@@ -611,6 +618,8 @@ export function enforceOperatingBudget(
   conv.resumePlan ??= buildResumePlan({ ...conv, terminalComplete: conv.terminalComplete });
   const omitted = new Map<string, number>();
   const note = (label: string) => omitted.set(label, (omitted.get(label) ?? 0) + 1);
+  const originalIntents = conv.resumeIndex.displayIntents ?? conv.resumeIndex.recentUserIntents;
+  const originalOccurrences = conv.resumeIndex.intentOccurrences;
   const refreshResume = () => {
     conv.resumeIndex = buildResumeIndex(
       conv.turns,
@@ -619,16 +628,24 @@ export function enforceOperatingBudget(
       conv.recentToolCalls,
       conv.lexical,
     );
+    // A hidden duplicate must become visible again if its conversation row goes.
+    conv.resumeIndex.displayIntents = originalIntents;
+    conv.resumeIndex.intentOccurrences = originalOccurrences;
     if (conv.checkpoint) {
       conv.resumeIndex.checkpoint = conv.checkpoint;
       conv.resumeIndex.activeFiles = [...new Set([...conv.checkpoint.files.modified, ...conv.checkpoint.files.read])].slice(-50);
       const pinnedRequests = conv.checkpoint.pins.filter(pin => pin.status === "active" && pin.purpose === "request").map(pin => pin.text);
-      if (pinnedRequests.length) conv.resumeIndex.recentUserIntents = pinnedRequests;
+      if (pinnedRequests.length) {
+        conv.resumeIndex.recentUserIntents = pinnedRequests;
+        conv.resumeIndex.intentOccurrences = undefined;
+        conv.resumeIndex.displayIntents = undefined;
+      }
       if (conv.checkpoint.tasks.length) conv.resumeIndex.continuationHints = conv.checkpoint.tasks.filter(task => task.status !== "done").map(task => task.action);
     }
     if (conv.terminalComplete && !conv.checkpoint?.tasks.length && !conv.checkpoint?.pins.some(pin => pin.status === "active")) {
       conv.resumeIndex.activeFiles = [];
       conv.resumeIndex.recentUserIntents = [];
+      conv.resumeIndex.displayIntents = [];
       conv.resumeIndex.continuationHints = [];
     }
     if (!recallEnabled) conv.resumeIndex.recallQueries = [];

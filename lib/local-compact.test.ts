@@ -246,7 +246,8 @@ describe("compileSessionJsonl", () => {
     expect(summary).toContain("[User] spec the live task activity panel");
     expect(summary).not.toContain("dc-rtk-context");
     const resumeIndex = summary.match(/<resume-index>\n([\s\S]*?)\n<\/resume-index>/)?.[1] ?? "";
-    expect(resumeIndex).toContain("recent-user-intent:\n- spec the live task activity panel");
+    expect(resumeIndex).not.toContain("recent-user-intent:\n- spec the live task activity panel");
+    expect(summary.split("spec the live task activity panel")).toHaveLength(2);
     expect(resumeIndex).not.toMatch(/recent-user-intents?:[\s\S]*Before reading a file/);
   });
 
@@ -1173,11 +1174,11 @@ test("skips bare confirmations in resume user intents", () => {
     ].join("\n"),
   );
 
-  expect(result.summary).toContain("fix the JSON parser");
+  expect(result.summary).toContain("[User] fix the JSON parser so it handles trailing commas");
   const resumeIndex = result.summary.match(/<resume-index>\n([\s\S]*?)\n<\/resume-index>/);
   expect(resumeIndex).not.toBeNull();
   const userIntentLines = resumeIndex![1].split("\n").filter((line) => line.startsWith("- "));
-  expect(userIntentLines).toContain("- fix the JSON parser so it handles trailing commas");
+  expect(userIntentLines).not.toContain("- fix the JSON parser so it handles trailing commas");
   expect(userIntentLines).not.toContain("- ok");
   expect(userIntentLines).not.toContain("- continue");
   expect(userIntentLines).not.toContain("- 1. recommended. 2. stand down.");
@@ -1267,7 +1268,7 @@ describe("compileSessionJsonl literal anchors", () => {
 
   test("retains the latest three requests and does not discard older unresolved context", () => {
     const ordinary = Array.from({ length: 24 }, (_, index) =>
-      userMsg(`record ${index} ${"word ".repeat(140)} END-${index}`));
+      userMsg(`record ${index} ${Array.from({ length: 140 }, (_, word) => `word${word}`).join(" ")} END-${index}`));
     const oldDiff = assistantMsg(`diff --git a/a b/a\n@@ -1 +1 @@\n-${"old ".repeat(220)}\n+${"new ".repeat(220)}\nDIFF-END`);
     const newest = userMsg(`newest ${"detail ".repeat(60)} NEWEST-END`);
     const result = compileSessionJsonl([sessionLine, oldDiff, ...ordinary, newest].join("\n"));
