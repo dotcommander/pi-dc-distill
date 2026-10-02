@@ -142,3 +142,38 @@ describe("migrateDistillData", () => {
     expect(existsSync(join(currentDir, ".legacy-migration-conflicts", "settings.json"))).toBe(false);
   });
 });
+
+test("location source has an independent marker and preserves conflicts and absolute references", async () => {
+  const root = tempRoot();
+  const locationDir = join(root, "old", "dc-distill");
+  const currentDir = join(root, "agent", "data", "dc-distill");
+  await write(join(locationDir, "tool-output", "index.jsonl"), '{"artifactPath":"/historical/absolute/file"}\n');
+  await write(join(locationDir, "raw.txt"), "old");
+  await write(join(currentDir, "raw.txt"), "new");
+  await write(join(currentDir, ".migrated-from-legacy-distill"), "already branded");
+  const options = { locationDir, legacyDir: join(root, "absent"), currentDir };
+  const result = migrateDistillData(options);
+  expect(result.status).toBe("migrated");
+  expect(existsSync(join(currentDir, ".migrated-from-legacy-location-dc-distill"))).toBe(true);
+  expect(readFileSync(join(currentDir, "tool-output", "index.jsonl"), "utf8")).toContain('/historical/absolute/file');
+  expect(readFileSync(join(currentDir, "raw.txt"), "utf8")).toBe("new");
+  expect(readFileSync(join(locationDir, "raw.txt"), "utf8")).toBe("old");
+  expect(result.preserved).toEqual([".legacy-migration-conflicts/dc-distill/raw.txt"]);
+});
+
+test("custom profiles migrate only their own legacy namespaces", async () => {
+  const previous = process.env.PI_CODING_AGENT_DIR;
+  const root = tempRoot();
+  try {
+    process.env.PI_CODING_AGENT_DIR = join(root, "profile");
+    await write(join(root, "profile", "data", "dc-shrink", "own.txt"), "custom");
+    const result = migrateDistillData();
+    expect(result.status).toBe("migrated");
+    expect(result.copied).toEqual(["own.txt"]);
+    expect(readFileSync(join(root, "profile", "data", "dc-distill", "own.txt"), "utf8")).toBe("custom");
+    expect(existsSync(join(root, "profile", "data", "dc-distill", ".migrated-from-legacy-location-dc-distill"))).toBe(false);
+  } finally {
+    if (previous === undefined) delete process.env.PI_CODING_AGENT_DIR;
+    else process.env.PI_CODING_AGENT_DIR = previous;
+  }
+});

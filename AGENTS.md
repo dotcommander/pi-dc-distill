@@ -143,7 +143,7 @@ and 100K/140K/160K are legacy fallbacks only when Pi cannot report a context
 window. Cooldown, post-compaction growth, Pi-sync, and warmup guards still
 apply. Emergency bypasses cooldown and sync. The 120,000-token target is fixed
 policy, not extension configuration; smaller contexts are capped by Pi's safe
-geometry. `auto-check blocked` records in `~/.pi/data/dc-distill/diag.log` carry Pi's inputs and the resolved boundaries.
+geometry. `auto-check blocked` records in `~/.pi/agent/data/dc-distill/diag.log` carry Pi's inputs and the resolved boundaries.
 
 ## Optional Feature Gates
 

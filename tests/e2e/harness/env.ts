@@ -1,3 +1,5 @@
+import { createCacheRun, finalizeCacheRun, type CacheRun } from "../../../lib/cache-runs.ts";
+import { Path } from "../../../lib/paths.ts";
 /**
  * Shared isolation and CLI plumbing for the E2E suite.
  *
@@ -6,7 +8,7 @@
  * offline flags, and exactly two extensions loaded: dc-distill and the
  * scripted provider. Nothing here touches user data or the network.
  */
-import { existsSync, mkdirSync, readdirSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readdirSync, writeFileSync } from "node:fs";
 import { join, resolve } from "node:path";
 
 const HARNESS_DIR = resolve(new URL(".", import.meta.url).pathname);
@@ -14,16 +16,18 @@ const HARNESS_DIR = resolve(new URL(".", import.meta.url).pathname);
 export const REPO_ROOT = resolve(HARNESS_DIR, "..", "..", "..");
 export const EXTENSION = join(REPO_ROOT, "index.ts");
 export const FAKE_PROVIDER = join(HARNESS_DIR, "fake-provider.ts");
-/** Gitignored artifact root (`.work/`), recreated per scenario. */
-export const VERIFICATION_DIR = join(REPO_ROOT, ".work", "e2e-artifacts");
+/** Capture parent profile before creating the child's isolated environment. */
+const PARENT_CACHE_ROOT = Path.cache("dc-distill").path;
+export const VERIFICATION_DIR = join(PARENT_CACHE_ROOT, "e2e");
 
 export interface TestDir {
   /** Scratch project directory; also the pi process cwd. */
   dir: string;
+  run: CacheRun;
+  finalize(success: boolean): Promise<void>;
   /** Isolated PI_CODING_AGENT_DIR holding settings.json. */
   agentHome: string;
-  /** Sandboxed HOME: the runtime's ~/.pi resolves here, isolating dc-distill's
-   *  homedir-based store paths from the real user profile. */
+  /** Sandboxed HOME isolates default-profile and legacy-path resolution. */
   home: string;
   /** Isolated session storage, passed both as env and --session-dir. */
   sessionDir: string;
@@ -34,8 +38,9 @@ export interface TestDir {
 }
 
 export function makeTestDir(name: string, settings: Record<string, unknown> = {}): TestDir {
-  const dir = join(VERIFICATION_DIR, name);
-  rmSync(dir, { recursive: true, force: true });
+  const run = createCacheRun(name === "demo" ? "demo" : "e2e", PARENT_CACHE_ROOT);
+  const dir = run.directory;
+  console.log(`Artifacts (${name}): ${dir}`);
   const agentHome = join(dir, "agent-home");
   const home = join(dir, "home");
   const sessionDir = join(dir, "sessions");
@@ -56,6 +61,8 @@ export function makeTestDir(name: string, settings: Record<string, unknown> = {}
 
   return {
     dir,
+    run,
+    finalize: (success) => finalizeCacheRun(run, success),
     agentHome,
     home,
     sessionDir,

@@ -10,10 +10,10 @@ function isolated(code: string, setup?: (home: string) => void, debug = "") {
   const home = mkdtempSync(join(tmpdir(), "distill-diag-"));
   setup?.(home);
   const result = spawnSync(process.execPath, ["-e", `import { Diag } from ${JSON.stringify(diagUrl)}; ${code}`], {
-    env: { ...process.env, HOME: home, PI_DEBUG: debug }, encoding: "utf8",
+    env: { ...process.env, HOME: home, PI_CODING_AGENT_DIR: join(home, ".pi", "agent"), PI_DEBUG: debug }, encoding: "utf8",
   });
   expect(result.status).toBe(0);
-  return { home, stderr: result.stderr, dir: join(home, ".pi/data/dc-distill") };
+  return { home, stderr: result.stderr, dir: join(home, ".pi/agent/data/dc-distill") };
 }
 
 const oversized = "x".repeat(5 * 1024 * 1024 + 1);
@@ -47,7 +47,7 @@ test("both sinks rotate on later writes and preserve existing archives", () => {
     Diag.debug("test", "second");
     await Diag.monitor("second");
   `, (home) => {
-    const dir = join(home, ".pi/data/dc-distill");
+    const dir = join(home, ".pi/agent/data/dc-distill");
     mkdirSync(dir, { recursive: true });
     for (const sink of ["diag.log", "diag.ndjson"]) {
       writeFileSync(join(dir, sink), oversized);
@@ -63,7 +63,7 @@ test("both sinks rotate on later writes and preserve existing archives", () => {
 
 test("exact threshold remains unrotated until the next append", () => {
   const { dir } = isolated(`Diag.warn("test", "append"); await Diag.monitor("append");`, (home) => {
-    const dir = join(home, ".pi/data/dc-distill");
+    const dir = join(home, ".pi/agent/data/dc-distill");
     mkdirSync(dir, { recursive: true });
     for (const sink of ["diag.log", "diag.ndjson"]) writeFileSync(join(dir, sink), "x".repeat(5 * 1024 * 1024));
   });

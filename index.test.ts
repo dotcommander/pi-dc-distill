@@ -893,6 +893,25 @@ describe("dc-distill handoff capture", () => {
 
 
 describe("optional feature gates", () => {
+  test("default tool outputs follow the store's selected data root", async () => {
+    const root = mkdtempSync(join(tmpdir(), "dc-distill-selected-store-"));
+    const stub = createStubCtx();
+    const store = new DistillStore({ dataDir: root, projectIdentity: stub.ctx.cwd });
+    createDistillExtension({
+      storeFactory: () => store,
+      loadFeatureSettings: () => ({ toolOutput: { enabled: true }, recall: { enabled: false } }),
+    })(stub.pi);
+    await simulate.hook(stub, "session_start", {});
+    const patch: any = (await simulate.hook(stub, "tool_result", {
+      toolName: "read", toolCallId: "selected-output", input: {},
+      content: [{ type: "text", text: "x".repeat(13000) }], isError: false,
+    })).find(Boolean);
+    const artifactPath = patch.details.dcDistillOutputCompactor.artifactPath;
+    expect(artifactPath.startsWith(join(store.projectRoot, "tool-output") + "/")).toBe(true);
+    expect(existsSync(artifactPath)).toBe(true);
+    await simulate.hook(stub, "session_shutdown", {});
+  });
+
   for (const toolOutput of [false, true]) {
     for (const recall of [false, true]) {
       test(`independent tool output=${toolOutput}, recall=${recall} gates at registration, start, commit, context and shutdown`, async () => {

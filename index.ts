@@ -1,3 +1,5 @@
+import { join } from "node:path";
+import { Path } from "./lib/paths.ts";
 import { LEGACY_COMPACTION_CARD_TYPE } from "./lib/legacy.ts";
 /** dc-distill: deterministic, local compaction with a prepare/commit lifecycle. */
 import { randomUUID } from "node:crypto";
@@ -439,7 +441,9 @@ function createExtension(pi: ExtensionAPI, options: DistillExtensionOptions = {}
     setup: (activePi) => {
       registerOutputCompactor(activePi, {
         config: { enabled: true },
-        artifactRoot: options.outputArtifactRoot,
+        artifactRoot: options.outputArtifactRoot ?? ((cwd) => join(
+          runtime.store?.projectRoot ?? Path.project("dc-distill", cwd).path, "tool-output",
+        )),
         isEnabled: (ctx) => isOwner(runtime, ctx) && runtime.featureSettings.toolOutput.enabled,
       });
       registerBlockSpec<CompactionCardDetails>(

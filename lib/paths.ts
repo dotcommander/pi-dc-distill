@@ -21,16 +21,17 @@
 
 import { sha256Hex } from "./sha256.ts";
 import { existsSync, mkdirSync, readFileSync } from "node:fs";
-import { homedir } from "node:os";
+import { getAgentDir } from "@earendil-works/pi-coding-agent";
 import { basename, isAbsolute, join, relative, resolve } from "node:path";
 import { writeFileAtomicSync } from "./fs-support.ts";
 
-const PI_ROOT: string = join(homedir(), ".pi");
-const CACHE_DIR: string = join(PI_ROOT, "cache");
-const DATA_DIR: string = join(PI_ROOT, "data");
+/** Resolve on each access: Pi profiles can change between sessions. */
+export function agentDir(): string {
+  return resolve(getAgentDir());
+}
 
 /**
- * extName is a directory NAMESPACE under ~/.pi/{data,cache} — a bare name,
+ * extName is a directory NAMESPACE under ~/.pi/agent/{data,cache} — a bare name,
  * never a path. Rejecting separators and dot segments here is what keeps
  * `Path.data("../other")` from escaping the namespace root.
  */
@@ -43,18 +44,18 @@ export function assertSafeExtName(extName: string): void {
   }
 }
 
-/** global-state: ~/.pi/data/<extName>/ — survives cache wipes */
+/** global-state: ~/.pi/agent/data/<extName>/ — survives cache wipes */
 export function dataDir(extName: string): string {
   assertSafeExtName(extName);
-  const p = join(DATA_DIR, extName);
+  const p = join(agentDir(), "data", extName);
   mkdirSync(p, { recursive: true });
   return p;
 }
 
-/** global-cache: ~/.pi/cache/<extName>/ — re-derivable, safe to delete */
+/** global-cache: ~/.pi/agent/cache/<extName>/ — re-derivable, safe to delete */
 export function cacheDir(extName: string): string {
   assertSafeExtName(extName);
-  const p = join(CACHE_DIR, extName);
+  const p = join(agentDir(), "cache", extName);
   mkdirSync(p, { recursive: true });
   return p;
 }
@@ -73,25 +74,18 @@ export function projectSlug(cwd: string): string {
   return `${name}-${hash}`;
 }
 
-const projectDirMemo = new Map<string, string>();
-
 /**
- * project-state: ~/.pi/data/<extName>/projects/<slug>/.
+ * project-state: ~/.pi/agent/data/<extName>/projects/<slug>/.
  *
- * All project-scoped state is stored under ~/.pi/data/ keyed by a slug derived
+ * All project-scoped state is stored under ~/.pi/agent/data/ keyed by a slug derived
  * from the project directory path. No files are written inside the project
  * directory itself.
  */
 export function projectDir(extName: string, cwd: string): string {
   assertSafeExtName(extName);
-  const memoKey = `${extName}\0${cwd}`;
-  const memoized = projectDirMemo.get(memoKey);
-  if (memoized) return memoized;
-
   const base = dataDir(extName);
   const p = join(base, "projects", projectSlug(cwd));
   mkdirSync(p, { recursive: true });
-  projectDirMemo.set(memoKey, p);
   return p;
 }
 
@@ -181,19 +175,19 @@ export interface PathOverloads {
 }
 
 export const Path: PathOverloads = {
-  /** Persistent state directory: ~/.pi/data/<extName>/ */
+  /** Persistent state directory: ~/.pi/agent/data/<extName>/ */
   data(extName: string): PathHandle {
     assertSafeExtName(extName);
     return makeHandle(dataDir(extName));
   },
 
-  /** Re-derivable cache directory: ~/.pi/cache/<extName>/ */
+  /** Re-derivable cache directory: ~/.pi/agent/cache/<extName>/ */
   cache(extName: string): PathHandle {
     assertSafeExtName(extName);
     return makeHandle(cacheDir(extName));
   },
 
-  /** Per-project state directory: ~/.pi/data/<extName>/projects/<slug>/ */
+  /** Per-project state directory: ~/.pi/agent/data/<extName>/projects/<slug>/ */
   project(extName: string, cwd: string): PathHandle {
     assertSafeExtName(extName);
     return makeHandle(projectDir(extName, cwd));

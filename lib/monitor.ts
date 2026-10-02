@@ -122,7 +122,7 @@ export class Monitor {
     this.state.awaitingPostCompactionSample = true
   }
 
-  /** Diagnostic: append to ~/.pi/data/dc-distill/diag.log for debugging event delivery. */
+  /** Diagnostic: append to the selected agent's data/dc-distill/diag.log. */
   diagnostic(msg: string): void {
     this._diagLog(msg)
   }

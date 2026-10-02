@@ -1,6 +1,7 @@
+import { createCacheRun, protectCacheOutput, type CacheRun } from "./cache-runs.ts";
 import { sha256Hex } from "./sha256.ts";
 import { mkdir, readFile, writeFile } from "node:fs/promises";
-import { basename, resolve } from "node:path";
+import { resolve } from "node:path";
 import { canonicalRecordFromMessage } from "./compaction-source.ts";
 import { compileSessionJsonl, type LocalCompileResult } from "./local-compact.ts";
 
@@ -9,6 +10,8 @@ export type CompactionSelector = "first" | "last" | number;
 export interface SessionEvaluationOptions {
   sessionFile: string;
   outputDirectory: string;
+  /** Producer-owned run; producer finalizes after its consumers finish. */
+  managedRun?: CacheRun;
   compaction?: CompactionSelector;
   wholeSession?: boolean;
   historicalFile?: string;
@@ -97,6 +100,7 @@ async function writeArtifact(path: string, content: string, force: boolean): Pro
 export async function evaluateSession(options: SessionEvaluationOptions): Promise<SessionEvaluationReport> {
   const sessionFile = resolve(options.sessionFile);
   const outputDirectory = resolve(options.outputDirectory);
+  if (options.managedRun?.directory !== outputDirectory) await protectCacheOutput(outputDirectory);
   const entries = parseJsonl(await readFile(sessionFile, "utf8"));
   if (options.wholeSession && options.compaction !== undefined) {
     throw new Error("whole-session mode cannot be combined with a compaction selector");
@@ -180,7 +184,6 @@ export async function evaluateSession(options: SessionEvaluationOptions): Promis
   return report;
 }
 
-export function defaultEvaluationDirectory(sessionFile: string): string {
-  const stem = basename(sessionFile).replace(/\.(jsonl|json)$/i, "") || "session";
-  return resolve(".work", "distill-evaluations", stem);
+export function defaultEvaluationDirectory(_sessionFile: string): string {
+  return createCacheRun("evaluations").directory;
 }

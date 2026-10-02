@@ -1,6 +1,7 @@
+import { resolve } from "node:path";
 import assert from "node:assert/strict";
 import { readFile } from "node:fs/promises";
-import { resolve } from "node:path";
+import { createCacheRun, finalizeCacheRun, type CacheRun } from "../lib/cache-runs.ts";
 import { compileSessionJsonl } from "../lib/local-compact.ts";
 import { evaluateSession } from "../lib/session-evaluator.ts";
 
@@ -13,10 +14,11 @@ function section(summary: string, name: string): string {
 }
 
 /** Replay the public synthetic fixture through the existing evaluator. */
-export async function compareSyntheticSession(outputDirectory: string) {
+export async function compareSyntheticSession(outputDirectory: string, managedRun?: CacheRun) {
   const report = await evaluateSession({
     sessionFile: fixture.pathname,
     outputDirectory,
+    managedRun,
     wholeSession: true,
     force: true,
   });
@@ -42,14 +44,20 @@ export async function compareSyntheticSession(outputDirectory: string) {
 }
 
 if (import.meta.main) {
-  const outputDirectory = resolve(".work", "distill-evaluations", "synthetic-parser");
-  const { report, summary } = await compareSyntheticSession(outputDirectory);
-  const reduction = ((1 - report.current.bytes / report.input.bytes) * 100).toFixed(1);
-  console.log(`pi-dc-distill synthetic comparison: PASS`);
-  console.log(`Before: ${report.input.bytes} UTF-8 bytes of serialized JSONL (${report.input.entries} records)`);
-  console.log(`After:  ${report.current.bytes} UTF-8 bytes of summary (${reduction}% smaller)`);
-  console.log("These are fixture byte counts, not model-token or cost estimates.");
-  console.log("Preserved: objective, decision, modified files, synthetic verification status, next action.");
-  console.log(`Artifacts: ${outputDirectory}\n`);
-  console.log(summary);
+  const run = createCacheRun("compare");
+  const outputDirectory = run.directory;
+  console.log(`Artifacts: ${outputDirectory}`);
+  let success = false;
+  try {
+    const { report, summary } = await compareSyntheticSession(outputDirectory, run);
+    const reduction = ((1 - report.current.bytes / report.input.bytes) * 100).toFixed(1);
+    console.log(`pi-dc-distill synthetic comparison: PASS`);
+    console.log(`Before: ${report.input.bytes} UTF-8 bytes of serialized JSONL (${report.input.entries} records)`);
+    console.log(`After:  ${report.current.bytes} UTF-8 bytes of summary (${reduction}% smaller)`);
+    console.log("These are fixture byte counts, not model-token or cost estimates.");
+    console.log("Preserved: objective, decision, modified files, synthetic verification status, next action.");
+    console.log(`Artifacts: ${outputDirectory}\n`);
+    console.log(summary);
+    success = true;
+  } finally { await finalizeCacheRun(run, success); }
 }

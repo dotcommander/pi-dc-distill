@@ -4,10 +4,10 @@ Run this opt-in workload locally with Bun. It uses synthetic data, never launche
 Pi, and never contacts a provider. No benchmark runs during `bun test`.
 
 ```sh
-bun scripts/benchmark-compiler.ts .work/compiler-benchmark before
+bun scripts/benchmark-compiler.ts ~/.pi/agent/cache/dc-distill/benchmark before
 # Apply the scoped compiler optimization.
-bun scripts/benchmark-compiler.ts .work/compiler-benchmark after
-bun scripts/benchmark-compiler.ts --compare .work/compiler-benchmark/before.json .work/compiler-benchmark/after.json
+bun scripts/benchmark-compiler.ts ~/.pi/agent/cache/dc-distill/benchmark after
+bun scripts/benchmark-compiler.ts --compare ~/.pi/agent/cache/dc-distill/benchmark/before.json ~/.pi/agent/cache/dc-distill/benchmark/after.json
 ```
 
 The first run seals each source as an exclusive-create JSON file. Later runs reuse
@@ -29,7 +29,7 @@ snapshots, not allocation totals. Short samples are sensitive to noise.
 The comparison command checks runtime identity, workload names, sealed input
 hashes/sizes, canonical metadata, and every compiler-result field. It intentionally
 ignores sample timings and resource measurements when testing exact parity.
-Retain raw receipts under ignored `.work/`, rather than committing large inputs
+Keep benchmark output explicit under the selected agent cache, rather than committing large inputs
 or machine-specific results. These synthetic results do not establish installed
 Pi runtime performance.
 

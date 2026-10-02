@@ -5,8 +5,8 @@
 compiled build step. The optional `dc-distill-session` CLI uses Bun.
 
 The package is configured for the public npm registry. Publishing makes the
-allowlisted source and documentation public even while the GitHub repository is
-private. GitHub description and topics are independent of npm publication.
+allowlisted source and documentation public. GitHub description and topics are
+independent of npm publication.
 
 ## Prepare the package
 
@@ -33,10 +33,10 @@ unpublished version and an account with maintainer access. Confirm that the
 specific version shown by `npm pkg get version` has not already been published:
 
 ```bash
-npm view pi-dc-distill@0.1.1 version --registry=https://registry.npmjs.org/
+npm view pi-dc-distill@0.1.2 version --registry=https://registry.npmjs.org/
 ```
 
-Replace `0.1.1` with the proposed version for subsequent releases. npm does not
+Replace `0.1.2` with the proposed version for subsequent releases. npm does not
 allow reuse of a published name/version pair, even after unpublishing.
 
 Run the checks and inspect the package contents:
@@ -73,8 +73,8 @@ for private source repositories.
 Verify the exact released version, then install it in Pi:
 
 ```bash
-npm view pi-dc-distill@0.1.1 version dist.integrity --registry=https://registry.npmjs.org/
-pi install npm:pi-dc-distill@0.1.1
+npm view pi-dc-distill@0.1.2 version dist.integrity --registry=https://registry.npmjs.org/
+pi install npm:pi-dc-distill@0.1.2
 ```
 
 For normal installation after publication, use `pi install npm:pi-dc-distill`.

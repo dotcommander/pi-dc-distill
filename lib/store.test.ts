@@ -139,3 +139,14 @@ test("deferred migration leaves optional legacy data and markers untouched until
   expect(existsSync(join(dataDir, "recall.json"))).toBe(true);
   expect(readFileSync(join(legacyDir, "recall.json"), "utf8")).toBe(original);
 });
+
+test("selected dataDir owns default project recall and logs", async () => {
+  const dataDir = root();
+  const store = new DistillStore({ dataDir, projectIdentity: "/selected/project" });
+  expect(store.projectRoot.startsWith(join(dataDir, "projects"))).toBe(true);
+  expect(store.projectsRoot).toBe(join(dataDir, "projects"));
+  await store.persistRecall(entry("2026-01-01T00:00:00Z", "selected"));
+  await store.appendLog({ kind: "selected" });
+  expect(existsSync(join(store.projectRoot, "recall.json"))).toBe(true);
+  expect(existsSync(join(dataDir, "compact-log.jsonl"))).toBe(true);
+});

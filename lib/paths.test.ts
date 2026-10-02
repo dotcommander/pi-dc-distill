@@ -9,6 +9,7 @@ import { homedir, tmpdir } from "node:os";
 import { join } from "node:path";
 import {
   Path,
+  agentDir,
   assertSafeExtName,
   cacheDir,
   dataDir,
@@ -16,9 +17,7 @@ import {
   projectSlug,
 } from "./paths.ts";
 
-// Bun's os.homedir() resolves the passwd entry rather than $HOME, so these
-// tests operate against the real home under unique self-cleaning namespaces
-// instead of redirecting HOME.
+// Tests use unique namespaces beneath the selected Pi agent profile.
 const STAMP = `${process.pid}-${Date.now().toString(36)}`;
 const created: string[] = [];
 
@@ -53,15 +52,15 @@ describe("assertSafeExtName", () => {
 });
 
 describe("dataDir / cacheDir", () => {
-  test("dataDir creates and returns ~/.pi/data/<ext>", () => {
+  test("dataDir creates and returns ~/.pi/agent/data/<ext>", () => {
     const p = trackedDataDir(`dc-pathtest-${STAMP}`);
-    expect(p).toBe(join(homedir(), ".pi", "data", `dc-pathtest-${STAMP}`));
+    expect(p).toBe(join(agentDir(), "data", `dc-pathtest-${STAMP}`));
     expect(existsSync(p)).toBe(true);
   });
 
-  test("cacheDir creates and returns ~/.pi/cache/<ext>", () => {
+  test("cacheDir creates and returns ~/.pi/agent/cache/<ext>", () => {
     const p = trackedCacheDir(`dc-pathtest-${STAMP}`);
-    expect(p).toBe(join(homedir(), ".pi", "cache", `dc-pathtest-${STAMP}`));
+    expect(p).toBe(join(agentDir(), "cache", `dc-pathtest-${STAMP}`));
     expect(existsSync(p)).toBe(true);
   });
 });
@@ -75,11 +74,11 @@ describe("projectSlug / projectDir", () => {
     expect(projectSlug("/Users/x/code/other")).not.toBe(slug);
   });
 
-  test("projectDir lands under data/<ext>/projects/<slug> and is memoized", () => {
+  test("projectDir lands under data/<ext>/projects/<slug> without cross-profile caching", () => {
     const ext = `dc-pathtest-proj-${STAMP}`;
     const p = projectDir(ext, `${tmpdir()}/proj-one`);
     created.push(p);
-    expect(p.startsWith(join(homedir(), ".pi", "data", ext, "projects"))).toBe(
+    expect(p.startsWith(join(agentDir(), "data", ext, "projects"))).toBe(
       true,
     );
     expect(existsSync(p)).toBe(true);
@@ -91,7 +90,7 @@ describe("Path facade", () => {
   test("Path.data handle: join containment, read/write round-trip", () => {
     const h = Path.data(`dc-pathtest-h-${STAMP}`);
     created.push(h.path);
-    expect(h.path).toBe(join(homedir(), ".pi", "data", `dc-pathtest-h-${STAMP}`));
+    expect(h.path).toBe(join(agentDir(), "data", `dc-pathtest-h-${STAMP}`));
     expect(h.join("recall.json")).toBe(join(h.path, "recall.json"));
     expect(h.exists("recall.json")).toBe(false);
     h.write("recall.json", [{ q: "query" }]);
@@ -138,4 +137,25 @@ describe("Path facade", () => {
     expect(a).toContain("alpha-");
     expect(b).toContain("beta-");
   });
+});
+
+test("agent roots are lazy, expand tilde, and never reuse old project paths", () => {
+  const previous = process.env.PI_CODING_AGENT_DIR;
+  try {
+    delete process.env.PI_CODING_AGENT_DIR;
+    expect(agentDir()).toBe(join(homedir(), ".pi", "agent"));
+    process.env.PI_CODING_AGENT_DIR = "~/.pi/custom-profile";
+    expect(agentDir()).toBe(join(homedir(), ".pi", "custom-profile"));
+    process.env.PI_CODING_AGENT_DIR = join(tmpdir(), `profile-one-${STAMP}`);
+    const first = projectDir("dc-distill", "/same/project");
+    created.push(join(agentDir(), "data"));
+    process.env.PI_CODING_AGENT_DIR = join(tmpdir(), `profile-two-${STAMP}`);
+    const second = projectDir("dc-distill", "/same/project");
+    created.push(join(agentDir(), "data"));
+    expect(first).not.toBe(second);
+    expect(second.startsWith(agentDir())).toBe(true);
+  } finally {
+    if (previous === undefined) delete process.env.PI_CODING_AGENT_DIR;
+    else process.env.PI_CODING_AGENT_DIR = previous;
+  }
 });

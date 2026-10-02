@@ -30,13 +30,13 @@ Use Node.js 22.19.0 or newer and Pi 1.0.0, the installed runtime reviewed here.
 The development SDK baseline remains pinned to Pi 0.99.2:
 
 ```bash
-pi install git:github.com/dotcommander/pi-dc-distill
+pi install npm:pi-dc-distill
 ```
 
-After the first npm release is published, install by package name:
+Alternatively, install from GitHub:
 
 ```bash
-pi install npm:pi-dc-distill
+pi install git:github.com/dotcommander/pi-dc-distill
 ```
 
 Pi loads the TypeScript extension directly; no compiled build is required.
@@ -103,7 +103,7 @@ After:  2950 UTF-8 bytes of summary (75.4% smaller)
 These are sizes for this fixture, not model-token estimates or a general
 compression benchmark. Its recorded test pass is synthetic; the comparison
 checks preservation rather than executing the sample parser's tests.
-Artifacts are written to `.work/distill-evaluations/synthetic-parser/`.
+Artifacts are written to `~/.pi/agent/cache/dc-distill/compare/<unique-run>/`.
 
 ## Use
 
@@ -123,7 +123,7 @@ slash command involved. See [usage](docs/usage.md) for arguments and examples.
 Pi's global and project compaction settings control the autonomous monitor.
 `compaction.enabled: false` disables it; manual compaction remains available.
 There are no extension-specific trigger settings. Core logs and optional
-recall/output artifacts live under `~/.pi/data/dc-distill/`; raw input dumps are
+recall/output artifacts live under `~/.pi/agent/data/dc-distill/`; raw input dumps are
 also off by default and separately enabled with `DC_DISTILL_DUMPS=1`. Monitor diagnostics use
 `diag.log`; Diag NDJSON now uses `diag.ndjson` in the same canonical data
 directory. Both rotate before appending when their existing file exceeds 5 MiB;

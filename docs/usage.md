@@ -164,7 +164,7 @@ and synthetic verification receipt. A second compilation must produce identical
 summary text. No Pi runtime, credentials, or network calls are needed.
 
 The command replaces its generated artifacts in
-`.work/distill-evaluations/synthetic-parser/`. The fixture is included in source
+`~/.pi/agent/cache/dc-distill/compare/<unique-run>/`. The fixture is included in source
 control for repeatable regression checks, not as private session data. See the
 [README comparison](../README.md#try-a-repeatable-comparison).
 
@@ -175,7 +175,7 @@ From a checkout with Bun and dependencies installed:
 ```bash
 bun run distill:session -- /path/to/session.jsonl \
   --compaction last \
-  --out .work/distill-evaluations/example
+  --out ~/.pi/agent/cache/dc-distill/evaluations/example
 ```
 
 The evaluator writes `input.jsonl`, `current.md`, and `report.json`. When a
@@ -188,7 +188,7 @@ its summary body with the current output.
 | `--whole` | Compile all records, including carried compaction records; use for canonical before dumps. |
 | `--historical <file>` | Compare with a saved historical summary or after dump. |
 | `--focus <text>` | Supply an optional focus hint. |
-| `--out <directory>` | Choose output location; default is `.work/distill-evaluations/<session>`. |
+| `--out <directory>` | Choose output location; default is `~/.pi/agent/cache/dc-distill/evaluations/<unique-run>`. |
 | `--force` | Replace evaluator artifacts already present in the output directory. |
 | `--help` | Print CLI help. |
 
@@ -200,7 +200,7 @@ retained diagnostic pair:
 bun run distill:session -- /path/to/attempt-before.jsonl \
   --whole \
   --historical /path/to/attempt-after.txt \
-  --out .work/distill-evaluations/diagnostic-pair
+  --out ~/.pi/agent/cache/dc-distill/evaluations/diagnostic-pair
 ```
 
 A full session replay cannot reproduce Pi's discarded-message preparation
@@ -228,3 +228,21 @@ The operating summary target is 8,192 Unicode code points. Complete optional
 records are removed first, and omissions are reported; the hard wire ceiling
 is 65,536. See [algorithm](algorithm.md) for scoring and eviction, and
 [architecture](architecture.md#compaction-contract) for version-9 metrics and digests.
+
+### Persistence and generated artifacts
+
+All extension defaults resolve Pi's public `getAgentDir()` lazily. Pi normally
+uses `~/.pi/agent`; `PI_CODING_AGENT_DIR` selects another profile and supports
+`~` expansion. Durable logs, diagnostics, dumps, project recall, and tool outputs
+live beneath `<agent>/data/dc-distill/`. Generated artifacts use unique runs beneath
+`<agent>/cache/dc-distill/{evaluations,compare,e2e,demo}/`. Commands print absolute
+artifact paths on success and failure. E2E and demo capture the parent cache and
+put child runtime state under each run's isolated `agent-home/data/dc-distill/`.
+
+Each category retains the current run plus the newest nine other completed
+unprotected runs, including failures. Finalization waits for artifact consumers
+and subprocesses. Unfinished hard-crash artifacts, unmanaged or malformed runs,
+symlinks, and explicitly protected runs are preserved outside this ten-run limit.
+Explicit `--out` paths have no automatic retention; targeting an existing managed
+run protects it before writing, and `--force` still controls overwrites. Benchmark
+output stays explicit. Existing `.work` contents and ignore rules are preserved.

@@ -96,7 +96,7 @@ window, dc-distill falls back to 100,000 / 140,000 / 160,000 tokens.
 
 The monitor retains a fixed 120-second cooldown and post-compaction growth
 guard. These are loop-safety mechanics, not user settings. `auto-check blocked`
-lines in `~/.pi/data/dc-distill/diag.log` record the resolved geometry and its
+lines in `~/.pi/agent/data/dc-distill/diag.log` record the resolved geometry and its
 Pi inputs.
 
 ## Diagnostic Dumps
@@ -121,15 +121,16 @@ delete previously stored files or disable the others.
 
 | File or directory | Purpose |
 | --- | --- |
-| `~/.pi/data/dc-distill/diag.log` | Guard, lifecycle, and migration diagnostics. |
-| `~/.pi/data/dc-distill/compact-log.jsonl` | Locked, rotation-safe failure and committed-success log. |
-| `~/.pi/data/dc-distill/compact-dumps/` | Optional canonical-input/returned-summary pairs. |
-| `~/.pi/data/dc-distill/projects/<slug>/recall.json` | Ten newest committed summaries for one project. |
-| `~/.pi/data/dc-distill/projects/<slug>/tool-output/` | Full oversized tool text and `index.jsonl` provenance records. |
-| `~/.pi/data/dc-distill/recall.json` | Preserved ownerless legacy recall. |
-| `~/.pi/data/dc-distill/.migrated-from-legacy-distill` | Successful older-namespace migration marker. |
-| `~/.pi/data/dc-distill/.migrated-from-dc-shrink` | Successful prior-brand migration marker. |
-| `~/.pi/data/dc-distill/.legacy-migration-conflicts/` | Preserved non-mergeable legacy conflicts. |
+| `~/.pi/agent/data/dc-distill/diag.log` | Guard, lifecycle, and migration diagnostics. |
+| `~/.pi/agent/data/dc-distill/compact-log.jsonl` | Locked, rotation-safe failure and committed-success log. |
+| `~/.pi/agent/data/dc-distill/compact-dumps/` | Optional canonical-input/returned-summary pairs. |
+| `~/.pi/agent/data/dc-distill/projects/<slug>/recall.json` | Ten newest committed summaries for one project. |
+| `~/.pi/agent/data/dc-distill/projects/<slug>/tool-output/` | Full oversized tool text and `index.jsonl` provenance records. |
+| `~/.pi/agent/data/dc-distill/recall.json` | Preserved ownerless legacy recall. |
+| `~/.pi/agent/data/dc-distill/.migrated-from-legacy-distill` | Successful older-namespace migration marker. |
+| `~/.pi/agent/data/dc-distill/.migrated-from-dc-shrink` | Successful prior-brand migration marker. |
+| `~/.pi/agent/data/dc-distill/.migrated-from-legacy-location-dc-distill` | Successful migration from the previous data location. |
+| `~/.pi/agent/data/dc-distill/.legacy-migration-conflicts/` | Preserved non-mergeable legacy conflicts. |
 
 `<slug>` is the sanitized project-directory basename (up to 24 characters)
 plus the first eight hex characters of SHA-256 of its path. Project identity
@@ -151,7 +152,14 @@ do not need to perform a migration step.
 
 With both optional features enabled, migration runs during store initialization/
 session start, never when the module is imported. Otherwise it is deferred. It copies `~/.pi/data/dc-shrink/` and the older `dc-crunch` namespace
-into `~/.pi/data/dc-distill/`, with a separate completion marker for each source.
+into `~/.pi/agent/data/dc-distill/`, with a separate completion marker for each source.
+The default profile also copies the old `~/.pi/data/dc-distill/` location, using
+`.migrated-from-legacy-location-dc-distill`. Existing brand markers do not skip
+this location migration. Custom `PI_CODING_AGENT_DIR` profiles inspect only
+legacy namespaces under their own `data/`; they never automatically import
+shared HOME data. Sources and historical absolute artifact references remain
+unchanged. New writes move immediately even while optional-feature gates defer
+migration. Reverting code does not merge newly written state back into old storage.
 Stop using the old extension before starting the new one; this is a one-time
 copy, not ongoing synchronization. It needs space for the copied artifacts.
 
@@ -215,5 +223,5 @@ runtime storage.
 
 Startup copies historical recall, logs, and artifacts into `dc-distill` without
 deleting sources. Old guard diagnostics in `~/.pi/data/pi-dc-shrink/` remain
-there; new guard diagnostics use `~/.pi/data/pi-dc-distill/`. See
+there; new guard diagnostics use `~/.pi/agent/data/dc-distill/`. See
 [retryable migration](#retryable-migration) for conflicts and storage requirements.

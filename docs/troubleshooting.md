@@ -29,22 +29,22 @@ the [logs](#logs). A missing log file can simply mean no attempt has been record
 ## Logs
 
 ```bash
-tail -n 20 ~/.pi/data/dc-distill/compact-log.jsonl
-tail -n 20 ~/.pi/data/dc-distill/diag.log
+tail -n 20 ~/.pi/agent/data/dc-distill/compact-log.jsonl
+tail -n 20 ~/.pi/agent/data/dc-distill/diag.log
 ```
 
 Failure entries contain `kind: "failure"` and reasons. Committed success entries
 distinguish rebuilt-message after tokens from optional post-hook full-context
 tokens and record the token source. A prepared but uncommitted attempt produces
 no success entry. Autonomous checks blocked above the auto boundary are written
-to `~/.pi/data/dc-distill/diag.log` once per changing reason. Terminal
+to `~/.pi/agent/data/dc-distill/diag.log` once per changing reason. Terminal
 `session_compact_failed` events are also recorded there and release stale
 pending/latch state.
 
 ## Dumps
 
 ```bash
-ls -1 ~/.pi/data/dc-distill/compact-dumps
+ls -1 ~/.pi/agent/data/dc-distill/compact-dumps
 ```
 
 Each collision-safe pair includes millisecond time, PID, and attempt suffix:

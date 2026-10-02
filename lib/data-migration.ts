@@ -9,9 +9,9 @@ import {
   writeFileSync,
   renameSync,
 } from "node:fs";
-import { basename, dirname, join } from "node:path";
+import { basename, dirname, join, resolve } from "node:path";
 import { homedir } from "node:os";
-import { Path } from "./paths.ts";
+import { Path, agentDir } from "./paths.ts";
 import { Fs } from "./fs-support.ts";
 
 const CURRENT_NAMESPACE = "dc-distill";
@@ -24,6 +24,8 @@ export interface DistillDataMigrationOptions {
   /** Previous branded namespace; explicit legacyDir isolates test/custom stores. */
   priorDir?: string;
   currentDir?: string;
+  /** Explicit source for the location migration, isolated from shared HOME. */
+  locationDir?: string;
   now?: () => Date;
 }
 
@@ -36,7 +38,14 @@ export interface DistillDataMigrationResult {
 }
 
 function defaultLegacyDir(): string {
-  return join(homedir(), ".pi", "data", LEGACY_NAMESPACE);
+  return join(legacyDataRoot(), LEGACY_NAMESPACE);
+}
+
+function legacyDataRoot(): string {
+  const root = agentDir();
+  return root === resolve(homedir(), ".pi", "agent")
+    ? join(homedir(), ".pi", "data")
+    : join(root, "data");
 }
 
 function defaultCurrentDir(): string {
@@ -182,14 +191,13 @@ function migrateDirectory(
     // dc-distill no longer owns a settings file. Preserve legacy settings in
     // place rather than copying dead configuration into current storage.
     if (entry === "settings.json" || entry.startsWith(".migrated-") || entry.endsWith(".lock") || entry.endsWith(".tmp") || entry === ".lock") continue;
-    migrateEntry(
-      join(legacyDir, entry),
-      join(currentDir, entry),
-      currentDir,
-      entry,
-      result,
-      conflictPrefix,
-    );
+    try {
+      migrateEntry(
+        join(legacyDir, entry), join(currentDir, entry), currentDir, entry, result, conflictPrefix,
+      );
+    } catch (error) {
+      result.errors.push(`${entry}: ${errorMessage(error)}`);
+    }
   }
 
   result.status = result.errors.length === 0 ? "migrated" : "failed";
@@ -216,9 +224,14 @@ export function migrateDistillData(
     { dir: options.legacyDir ?? defaultLegacyDir(), marker: MIGRATION_FLAG, prefix: "" },
   ];
   const priorDir = options.priorDir ?? (options.legacyDir === undefined
-    ? join(homedir(), ".pi", "data", LEGACY_DATA_NAMESPACE)
+    ? join(legacyDataRoot(), LEGACY_DATA_NAMESPACE)
     : undefined);
   if (priorDir) sources.push({ dir: priorDir, marker: LEGACY_MIGRATION_FLAG, prefix: LEGACY_DATA_NAMESPACE });
+  const locationDir = options.locationDir ?? (options.legacyDir === undefined
+    ? join(legacyDataRoot(), CURRENT_NAMESPACE) : undefined);
+  if (locationDir && resolve(locationDir) !== resolve(currentDir)) sources.unshift({
+    dir: locationDir, marker: ".migrated-from-legacy-location-dc-distill", prefix: CURRENT_NAMESPACE,
+  });
   const results = sources.map(({ dir, marker, prefix }) => {
     try {
       return migrateDirectory(dir, currentDir, marker, now, prefix);

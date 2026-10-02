@@ -8,8 +8,8 @@ import {
   rm,
   stat,
 } from "node:fs/promises";
-import { join } from "node:path";
-import { Path } from "./paths.ts";
+import { dirname, join } from "node:path";
+import { Path, projectSlug } from "./paths.ts";
 import { Fs } from "./fs-support.ts";
 import { migrateDistillData, type DistillDataMigrationResult } from "./data-migration.ts";
 import type { CompactEvent } from "./types.ts";
@@ -92,13 +92,15 @@ export class DistillStore {
   readonly projectsRoot: string;
   readonly projectIdentity: string;
   readonly legacyDir?: string;
+  private readonly customDataDir: boolean;
   private readonly now: () => Date;
   private readonly pid: number;
 
   constructor(options: DistillStoreOptions = {}) {
+    this.customDataDir = options.dataDir !== undefined;
     this.dataDir = options.dataDir ?? Path.data("dc-distill").path;
     this.projectRoot = options.projectRoot
-      ?? Path.project("dc-distill", options.projectIdentity ?? process.cwd()).path;
+      ?? join(options.projectsRoot ?? join(this.dataDir, "projects"), projectSlug(options.projectIdentity ?? process.cwd()));
     this.projectsRoot = options.projectsRoot ?? join(this.dataDir, "projects");
     this.projectIdentity = options.projectIdentity ?? process.cwd();
     this.legacyDir = options.legacyDir;
@@ -112,7 +114,8 @@ export class DistillStore {
       return { status: "skipped", copied: [], merged: [], preserved: [], errors: [] };
     }
     return migrateDistillData({
-      legacyDir: this.legacyDir,
+      legacyDir: this.legacyDir ?? (this.customDataDir ? join(dirname(this.dataDir), "dc-crunch") : undefined),
+      priorDir: this.customDataDir && this.legacyDir === undefined ? join(dirname(this.dataDir), "dc-shrink") : undefined,
       currentDir: this.dataDir,
       now: this.now,
     });

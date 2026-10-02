@@ -12,7 +12,7 @@ import { LEGACY_DATA_DIR_ENV } from "./legacy.ts";
  *   1. compact-log.jsonl — one-line JSON per compaction event (append)
  *   2. compact-dumps/    — full before/after strings per event (one file pair per compaction)
  *
- * All writes go to ~/.pi/data/dc-distill/ (via Path.data facade).
+ * All writes go to ~/.pi/agent/data/dc-distill/ (via Path.data facade).
  */
 
 import { appendFileSync, existsSync, mkdirSync, readdirSync, renameSync, rmSync, statSync, writeFileSync } from "node:fs";
@@ -99,7 +99,7 @@ export function logFailure(reasons: string[]): void {
 /**
  * Dump full before/after strings for a compaction event.
  *
- * Writes two files to ~/.pi/data/dc-distill/compact-dumps/:
+ * Writes two files to ~/.pi/agent/data/dc-distill/compact-dumps/:
  *   <ts>-before.jsonl  — raw messages being compacted (one JSON per line)
  *   <ts>-after.txt     — the resulting summary
  *

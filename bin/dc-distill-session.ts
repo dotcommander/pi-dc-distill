@@ -1,4 +1,6 @@
 #!/usr/bin/env bun
+import { resolve } from "node:path";
+import { finalizeCacheRun } from "../lib/cache-runs.ts";
 import { defaultEvaluationDirectory, evaluateSession, type CompactionSelector } from "../lib/session-evaluator.ts";
 
 const usage = `Usage: dc-distill-session <session.jsonl> [options]
@@ -9,7 +11,7 @@ Options:
   --compaction <first|last|N>  Replay records before this historical compaction (default: last)
   --whole                      Compile every record, including compaction records (for before dumps)
   --historical <file>          Compare with a retained historical summary/after dump
-  --out <directory>            Write artifacts here (default: .work/distill-evaluations/<session>)
+  --out <directory>            Write artifacts here (default: Pi agent cache/dc-distill/evaluations/<unique-run>)
   --focus <text>               Supply the same optional focus accepted by /compact
   --force                      Replace evaluator artifacts already in the output directory
   --help                       Show this help
@@ -62,17 +64,25 @@ async function main(args: string[]): Promise<void> {
     }
   }
   if (!sessionFile) fail("a Pi session JSONL file is required");
-  const out = outputDirectory ?? defaultEvaluationDirectory(sessionFile);
-  const report = await evaluateSession({
-    sessionFile,
-    outputDirectory: out,
-    compaction,
-    focus,
-    force,
-    wholeSession,
-    historicalFile,
-  });
-  console.log(JSON.stringify({ outputDirectory: out, ...report }, null, 2));
+  const out = resolve(outputDirectory ?? defaultEvaluationDirectory(sessionFile));
+  let success = false;
+  console.log(`Artifacts: ${out}`);
+  try {
+    const report = await evaluateSession({
+      sessionFile,
+      outputDirectory: out,
+      ...(outputDirectory === undefined ? { managedRun: { directory: out, category: "evaluations" as const } } : {}),
+      compaction,
+      focus,
+      force,
+      wholeSession,
+      historicalFile,
+    });
+    console.log(JSON.stringify({ outputDirectory: out, ...report }, null, 2));
+    success = true;
+  } finally {
+    if (outputDirectory === undefined) await finalizeCacheRun({ directory: out, category: "evaluations" }, success);
+  }
 }
 
 main(process.argv.slice(2)).catch((error) => {
