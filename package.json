@@ -2,6 +2,7 @@
   "name": "pi-dc-distill",
   "version": "0.1.1",
   "description": "Deterministic, local context compaction for the Pi coding agent. No LLM calls; includes tool-output previews and project-scoped recall.",
+  "author": "Gary Blankenship",
   "license": "MIT",
   "type": "module",
   "main": "./index.ts",
@@ -35,6 +36,8 @@
     "LICENSE",
     "tsconfig.json",
     "!**/*.test.ts",
+    "!**/.work/**",
+    "!**/.*",
     "bun.lock",
     "tests/compare-session.ts",
     "tests/fixtures/**"

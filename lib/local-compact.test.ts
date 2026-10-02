@@ -1082,7 +1082,7 @@ describe("compileSessionJsonl literal anchors", () => {
         sessionLine,
         userMsg(
           [
-            "Debug TASK-492 in /Users/vampire/go/src/private/pi-extensions/extensions/dc-app/features/distill/lib/local-compact.ts.",
+            "Debug TASK-492 in /home/user/projects/pi-extensions/features/distill/lib/local-compact.ts.",
             `Keep run id ${uuid}, commit ${sha}, short id a1b2c3d4, and port=5432.`,
           ].join(" "),
         ),
@@ -1093,7 +1093,7 @@ describe("compileSessionJsonl literal anchors", () => {
 
     const anchors = literalBlock(result.summary);
     expect(anchors).toContain("TASK-492");
-    expect(anchors).toContain("/Users/vampire/go/src/private/pi-extensions/extensions/dc-app/features/distill/lib/local-compact.ts");
+    expect(anchors).toContain("/home/user/projects/pi-extensions/features/distill/lib/local-compact.ts");
     expect(anchors).toContain(uuid);
     expect(anchors).toContain(sha);
     expect(anchors).toContain("a1b2c3d4");
@@ -1137,7 +1137,7 @@ describe("compileSessionJsonl literal anchors", () => {
     const result = compileSessionJsonl(
       [
         sessionLine,
-        userMsg(`${shortHexNoise} ${uuid} issue=4921 TASK-77 /Users/vampire/project/src/app.ts`),
+        userMsg(`${shortHexNoise} ${uuid} issue=4921 TASK-77 /home/user/project/src/app.ts`),
       ].join("\n"),
     );
 
@@ -1145,7 +1145,7 @@ describe("compileSessionJsonl literal anchors", () => {
     expect(anchors).toContain(uuid);
     expect(anchors).toContain("issue=4921");
     expect(anchors).toContain("TASK-77");
-    expect(anchors).toContain("/Users/vampire/project/src/app.ts");
+    expect(anchors).toContain("/home/user/project/src/app.ts");
     expect(anchors.filter((anchor) => /^a1b2c3[0-9a-f]{2}$/.test(anchor)).length).toBeLessThanOrEqual(6);
   });
 
@@ -1230,12 +1230,12 @@ describe("compileSessionJsonl literal anchors", () => {
         id: "a1b21cfd",
         status: "running",
         agentId: "471f5042-71fb-416",
-        cwd: "/Users/vampire/code/ts/pi-dc-memory",
+        cwd: "/home/user/code/ts/pi-dc-memory",
         objective: "implement preservation and recovery patch",
       }), false, "task-running"),
     ].join("\n")).summary;
     expect(runningOnly).toContain("Task a1b21cfd; agent 471f5042-71fb-416; running at snapshot");
-    expect(runningOnly).toContain("/Users/vampire/code/ts/pi-dc-memory");
+    expect(runningOnly).toContain("/home/user/code/ts/pi-dc-memory");
 
     const completed = compileSessionJsonl([
       sessionLine,
@@ -1269,11 +1269,11 @@ describe("compileSessionJsonl literal anchors", () => {
     const summary = compileSessionJsonl([
       sessionLine,
       userMsg("inspect the delegated repository"),
-      toolCall("bash", { command: "cd /Users/vampire/knowledge && git status --short" }, "git-status"),
+      toolCall("bash", { command: "cd /home/user/knowledge && git status --short" }, "git-status"),
       toolResult("bash", " M INDEX.md", false, "git-status"),
     ].join("\n")).summary;
 
-    expect(summary).toContain("[git receipt, cwd=/Users/vampire/knowledge]");
+    expect(summary).toContain("[git receipt, cwd=/home/user/knowledge]");
     expect(summary).not.toContain("[git receipt, cwd=/tmp/proj]");
   });
 
