@@ -212,8 +212,9 @@ export class DistillStore {
 
     const entries: StoredRecallEntry[] = [];
     try {
-      for (const name of await readdir(this.projectsRoot)) {
-        const projectEntries = await readRecall(join(this.projectsRoot, name, "recall.json"));
+      for (const project of await readdir(this.projectsRoot, { withFileTypes: true })) {
+        if (!project.isDirectory()) continue;
+        const projectEntries = await readRecall(join(this.projectsRoot, project.name, "recall.json"));
         entries.push(...projectEntries.filter((entry) => entry.project !== undefined));
       }
     } catch (error) {

@@ -49,6 +49,44 @@ describe("DistillStore", () => {
     expect(all[1].project).toBe("/work/beta");
   });
 
+  test("all recall skips nondirectory project entries and missing recall files", async () => {
+    const dataDir = root();
+    const store = new DistillStore({ dataDir, projectIdentity: "/work/valid" });
+    await store.persistRecall(entry("2026-01-01T00:00:00Z", "valid"));
+    await mkdir(join(store.projectsRoot, "empty"));
+    await writeFile(join(store.projectsRoot, ".DS_Store"), "not-json");
+    await writeFile(join(store.projectsRoot, ".lock"), "not-json");
+    await writeFile(join(dataDir, "recall.json"), JSON.stringify([
+      entry("2026-01-02T00:00:00Z", "legacy"),
+    ]));
+
+    const all = await store.loadRecall("all");
+    expect(all.map(item => item.summary)).toEqual(["legacy", "valid"]);
+    expect(all[0].owner).toBe("legacy-unscoped");
+    expect(all[1].project).toBe("/work/valid");
+  });
+
+  test("all recall preserves corrupt project data errors among valid and nondirectory entries", async () => {
+    const dataDir = root();
+    const store = new DistillStore({ dataDir, projectIdentity: "/work/valid" });
+    await store.persistRecall(entry("2026-01-01T00:00:00Z", "valid"));
+    await writeFile(join(store.projectsRoot, ".DS_Store"), "not-json");
+    const corrupt = join(store.projectsRoot, "corrupt");
+    await mkdir(corrupt);
+    await writeFile(join(corrupt, "recall.json"), "not-json");
+
+    await expect(store.loadRecall("all")).rejects.toBeInstanceOf(SyntaxError);
+  });
+
+  test("all recall preserves genuine project recall read errors", async () => {
+    const dataDir = root();
+    const store = new DistillStore({ dataDir, projectIdentity: "/work/valid" });
+    await store.persistRecall(entry("2026-01-01T00:00:00Z", "valid"));
+    await mkdir(join(store.projectsRoot, "unreadable", "recall.json"), { recursive: true });
+
+    await expect(store.loadRecall("all")).rejects.toMatchObject({ code: "EISDIR" });
+  });
+
   test("locked concurrent recall writers retain the newest ten entries", async () => {
     const dataDir = root();
     const store = new DistillStore({
