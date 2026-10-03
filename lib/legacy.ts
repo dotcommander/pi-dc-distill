@@ -6,7 +6,6 @@ export const LEGACY_CONTINUATION_MESSAGE_TYPE = "dc-shrink-continuation";
 export const LEGACY_COMPACTION_CARD_TYPE = "dc-shrink-compaction";
 export const LEGACY_OUTPUT_NOTICE_PREFIX = "[dc-shrink] Compacted ";
 export const LEGACY_DUMPS_ENV = "DC_SHRINK_DUMPS";
-export const LEGACY_DATA_DIR_ENV = "DC_SHRINK_DATA_DIR";
 
 export function isDistillCompactor(value: unknown): boolean {
   return value === "dc-distill" || value === LEGACY_COMPACTOR;

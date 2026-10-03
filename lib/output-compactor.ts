@@ -523,7 +523,7 @@ export function createOutputCompactor(options: OutputCompactorOptions = {}) {
       });
 
       // The first line, the "Full output saved" line, and the "Receipt:" line are
-      // parser anchors consumed by extractOutputArtifactReceipt in local-compact.ts;
+      // parser anchors consumed by extractOutputArtifactReceipt in compiler/tool-tracker.ts;
       // keep them byte-for-byte and line-anchored.
       const notice = [
         `[dc-distill] Compacted ${toolName} output.`,

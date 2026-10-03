@@ -51,7 +51,6 @@ import {
   dumpsEnabled,
   type PiCompactionSettings,
 } from "./lib/settings.ts";
-import { formatDistillStatus } from "./lib/status.ts";
 import { projectActiveBranchRecall } from "./lib/recall-projection.ts";
 import { DistillStore } from "./lib/store.ts";
 import { hasLocalCompactor, runStrategies } from "./lib/strategy.ts";

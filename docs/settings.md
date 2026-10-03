@@ -225,9 +225,7 @@ and update or replace that entry. Do not load both packages in one session.
 Pi's `/compact`, `recall_compaction`, and compaction settings are unchanged.
 Historical handoff/session identifiers and output receipts remain readable.
 The old dump variable is a fallback; an explicitly set new variable takes
-precedence. The diagnostic logging helper accepts `DC_DISTILL_DATA_DIR`, with
-`DC_SHRINK_DATA_DIR` as a fallback. This helper override does not relocate all
-runtime storage.
+precedence. Runtime storage follows Pi's agent-directory paths described above.
 
 Startup copies historical recall, logs, and artifacts into `dc-distill` without
 deleting sources. Old guard diagnostics in `~/.pi/data/pi-dc-shrink/` remain
