@@ -16,6 +16,11 @@ receipts, and drops repetition and low-signal content to stay under a fixed
 budget. A local, rule-based compiler produces the summary — no LLM call is
 involved.
 
+The priority is an accurate account of the previous session, useful continuity,
+and readable context, followed by compression. A smaller summary is useful only
+when it preserves the obligations, decisions, evidence, and context needed to
+resume. Fewer bytes or repetition markers do not prove summary quality.
+
 The split of responsibility is simple: Pi owns `/compact`, decides which
 entries to keep, and rebuilds the conversation. pi-dc-distill compiles only
 the entries Pi discards, and its result replaces Pi's default LLM summary

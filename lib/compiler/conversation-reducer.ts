@@ -175,13 +175,23 @@ export function conversationEvictionCandidates(
 }
 
 export function trimTurn(text: string, ageFromNewest = 0): string {
-  if (isCompletionReport(terminalText(text))) return trimCompletion(text);
+  return trimTurnWithLimit(text, turnPreviewLimit(text, ageFromNewest));
+}
+
+/** Derive preview policy from the original source, before display projection. */
+export function turnPreviewLimit(text: string, ageFromNewest = 0): number | null {
+  if (isCompletionReport(terminalText(text))) return null;
   const signals = extractSignals(text);
   const baseLimit = turnTrimLimit(signals);
   const factor = ageFromNewest < 5 ? 1 : ageFromNewest < 20 ? 0.5 : 0.25;
-  const limit = isRecencyExemptTurn(text, signals)
+  return isRecencyExemptTurn(text, signals)
     ? baseLimit
     : Math.max(160, Math.floor(baseLimit * factor));
+}
+
+/** null retains the existing completion-report treatment. */
+export function trimTurnWithLimit(text: string, limit: number | null): string {
+  if (limit === null) return trimCompletion(text);
   if (text.length <= limit) return text;
   const clipped = sliceU16(text, limit);
   const cutAt = Math.max(clipped.lastIndexOf(" "), clipped.lastIndexOf("\n"));

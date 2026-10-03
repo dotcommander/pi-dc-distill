@@ -7,7 +7,7 @@ import { CompactionInputError } from "./compiler/errors.ts";
 import { normalizeSessionJsonl, filterNoise, compressToolResults } from "./compiler/normalizer.ts";
 import { extractPath, pathIdentity, snapshotObservations, transcriptChangeImpact, renderVerificationReceipt, createEvidenceState, renderEvidenceRisks, renderGitObservations, limitedVerificationSlice, shellCommand, isVerificationCommand, verificationIdentity, effectiveShellCwd, collectConversationToolCall, collectConversationToolResult } from "./compiler/tool-tracker.ts";
 import { collectSourceAnchorsFromUserText, collectLiteralAnchors, collectTaskAgentNotification } from "./compiler/anchors.ts";
-import { extractSignals, isReferentialImplementation, conversationEvictionCandidates, trimTurn, compactAssistantTurns, hasTerminalNoWorkCompletion, classifyRequestGroups, removeCompletedHistoricalRequests } from "./compiler/conversation-reducer.ts";
+import { extractSignals, isReferentialImplementation, conversationEvictionCandidates, turnPreviewLimit, trimTurnWithLimit, compactAssistantTurns, hasTerminalNoWorkCompletion, classifyRequestGroups, removeCompletedHistoricalRequests } from "./compiler/conversation-reducer.ts";
 import { buildResumeIndex, buildResumeTasks, buildResumePlan } from "./compiler/resume-index.ts";
 import { formatSummary, enforceOperatingBudget, readRetainedContext } from "./compiler/budget-formatter.ts";
 import { DisplayProjectionBudget } from "./compiler/display-projection.ts";
@@ -208,9 +208,10 @@ function extractConversation(blocks: NormalizedBlock[], sessionCwd?: string, pre
     const turn = turns[index];
     const sourceText = turn.text;
     const age = turn.protectedRequest ? 0 : turns.length - index - 1;
+    const previewLimit = turnPreviewLimit(sourceText, age);
     const displayText = displayBudget.project(sourceText, turn.origin === "custom" || protectedText.some(text => text && sourceText.includes(text)));
-    turn.text = trimTurn(sourceText, age);
-    if (displayText !== sourceText) turn.displayText = trimTurn(displayText, age);
+    turn.text = trimTurnWithLimit(sourceText, previewLimit);
+    if (displayText !== sourceText) turn.displayText = trimTurnWithLimit(displayText, previewLimit);
   }
   let finalTurns = turns;
   let totalChars = finalTurns.reduce((sum, turn) => sum + turn.text.length, 0);

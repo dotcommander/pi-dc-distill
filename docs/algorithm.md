@@ -142,6 +142,11 @@ completion suppresses stale resume work.
 
 ### Optional prose display cleanup
 
+Accuracy, useful continuity, and readability take priority over compression.
+The goal is to preserve obligations, decisions, evidence, and the context needed
+to resume the previous session. Smaller wire output and counted repetitions are
+size observations, not proof of fidelity or a complete account of that session.
+
 Eligible conversation prose receives a separate display projection before its
 preview is clipped. The original semantic turn preview remains the input to
 turn scoring, selection, the resume index, and evidence handling. This changes
@@ -166,9 +171,12 @@ are conservatively bypassed. Uncertain syntax keeps the ordinary preview.
 Eligible background may still be shortened when it shares a turn with ordinary
 prose instructions; this is not a guarantee of preserving every implied obligation.
 
-Display clipping respects the existing preview caps, preferring a natural
-whitespace boundary and an ellipsis, with a complete-code-point fallback for
-unbroken text. It cannot guarantee complete sentences or preserve everything
+The preview cap and recency policy are derived once from the original source
+and applied unchanged to both its semantic preview and compressed display.
+Shortening repeated background does not reclassify the display under a smaller
+preview cap. Existing completion-report treatment is retained. Display clipping
+prefers a natural whitespace boundary and an ellipsis, with a
+complete-code-point fallback for unbroken text. It cannot guarantee complete sentences or preserve everything
 beyond the cap. Other budget eviction still removes complete optional records.
 
 A recent-user-intent display row can disappear only when the same uniquely
@@ -374,6 +382,15 @@ compiler decisions and summary text. The live wire metrics also depend on Pi's p
 token estimates. `inputDigest` hashes canonical input, and `summaryDigest`
 hashes the exact returned wire summary. The strategy rejects summaries shorter
 than 50 string units as unusable.
+
+The offline quality evaluator checks synthetic required and forbidden facts,
+evidence handling, optional recall, and deterministic output. Checkpoint oracles
+also check declared task status, exact pin text and attribution, decisions, and
+verification identities across controlled compaction cycles. Those checks
+support fidelity for their covered cases; they do not establish comprehensive
+session understanding or preservation of every important contextual detail.
+Compression ratios cannot substitute for these checks or for inspecting whether
+the summary remains useful for continuing the actual work.
 
 Weights are engineering judgment, not fitted measurements of resumption
 quality. The repository includes regression/fidelity tests and a

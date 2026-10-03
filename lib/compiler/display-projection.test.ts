@@ -2,7 +2,7 @@ import { describe, expect, test } from "bun:test";
 import { DisplayProjectionBudget, DISPLAY_SCAN_LIMITS, visibleUserIntents } from "./display-projection.ts";
 import { buildResumeIndex } from "./resume-index.ts";
 import { formatSummary, enforceOperatingBudget } from "./budget-formatter.ts";
-import { trimTurn } from "./conversation-reducer.ts";
+import { trimTurn, turnPreviewLimit, trimTurnWithLimit } from "./conversation-reducer.ts";
 import { compileSessionJsonl } from "../local-compact.ts";
 import { emptyCheckpoint, buildCheckpoint, checkpointDigest, checkpointReadyTasks } from "./checkpoint.ts";
 import { digest } from "./helpers.ts";
@@ -27,6 +27,23 @@ describe("bounded plain prose display", () => {
     expect(result.summary).toContain(projected);
     const conversationText = result.summary.match(/## Conversation\n([\s\S]*?)(?=\n<(?:[a-z][a-z-]*)[>\s]|$)/)?.[1] ?? "";
     expect(conversationText).not.toContain("context material context material");
+  });
+  test("compression keeps a unique tail within the original long-form preview cap", () => {
+    const source = `DEMO-ANCHOR must survive compaction. ${Array.from({ length: 62 }, (_, i) => `detail${i}`).join(" ")} ${"context material ".repeat(14)}Unique suffix 42; do not retire unfinished work.`;
+    const projected = new DisplayProjectionBudget().project(source);
+    expect(source.length).toBeGreaterThanOrEqual(800);
+    expect(source.length).toBeLessThanOrEqual(1000);
+    expect(projected.length).toBeGreaterThan(500);
+    expect(projected.length).toBeLessThan(800);
+    expect(trimTurn(source)).toBe(source);
+    expect(trimTurn(projected)).not.toContain("Unique suffix 42");
+    const result = compileSessionJsonl(user(source), undefined, undefined, false);
+    expect(result.summary).toContain(projected);
+    expect(result.summary).toContain("Unique suffix 42; do not retire unfinished work.");
+    // The original age treatment still applies; projection does not grant a larger cap.
+    const agedLimit = turnPreviewLimit(source, 5);
+    expect(trimTurnWithLimit(source, agedLimit)).toBe(trimTurn(source, 5));
+    expect(trimTurnWithLimit(projected, agedLimit)).not.toContain("Unique suffix 42");
   });
   test("numbers, negation and similar phrases never become interchangeable", () => {
     const source = "Do not change setting 12. ".repeat(6) + "Do change setting 12. Do not change setting 13. Unique tail.";
