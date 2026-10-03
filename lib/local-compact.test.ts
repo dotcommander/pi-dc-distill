@@ -1,7 +1,12 @@
 import { describe, expect, test } from "bun:test";
-import { compileSessionJsonl } from "./local-compact.ts";
+import { compileSessionJsonl, enforceSummaryLimit } from "./local-compact.ts";
+import { checkpointDigest } from "./compiler/checkpoint.ts";
 import { DISTILL_HANDOFF_ENTRY_TYPE } from "./handoff.ts";
+import { buildCompactionSource, canonicalizeCompactionSource } from "./compaction-source.ts";
+import { normalizeSessionJsonl } from "./compiler/normalizer.ts";
+import { prepareCheckpointUpdate } from "./checkpoint-update.ts";
 import { readRetainedContext } from "./compiler/budget-formatter.ts";
+import { digest } from "./compiler/helpers.ts";
 import { runStrategies } from "./strategy.ts";
 
 const line = (obj: unknown) => JSON.stringify(obj);
@@ -1838,4 +1843,135 @@ describe("compound shell verification freshness", () => {
       expect(summary).toContain(`Verify: ${wireCommand}`);
     }
   });
+});
+
+describe("failure-history retirement across compactions", () => {
+  const carryLine = (checkpoint: Parameters<typeof checkpointDigest>[0]) =>
+    line({ type: "session", id: "s1", cwd: "/tmp/proj", checkpoint, checkpointDigest: checkpointDigest(checkpoint) });
+
+  test("stale tool failures retire at the next compaction; persistent failures survive and re-enter", () => {
+    const block = (s: string) => s.match(/<checkpoint-v1>\n[\s\S]*?\n<\/checkpoint-v1>/)?.[0] ?? "";
+    const cycle1 = compileSessionJsonl([sessionLine, userMsg("work"),
+      toolCall("bash", { command: "git status" }, "c1"), toolResult("bash", "command failed", true, "c1")].join("\n"), undefined, undefined, false);
+    expect(block(cycle1.summary)).toContain("failure failure-");
+    expect(block(cycle1.summary)).not.toContain("auto-resolved failures:");
+    const cycle2 = compileSessionJsonl([carryLine(cycle1.checkpoint), line({ type: "compaction", summary: cycle1.summary }), userMsg("continue")].join("\n"), undefined, undefined, false);
+    expect(block(cycle2.summary)).not.toContain("failure failure-");
+    expect(block(cycle2.summary)).toContain("auto-resolved failures: 0 by later success; 1 retired as not re-observed");
+    const cycle3 = compileSessionJsonl([carryLine(cycle2.checkpoint), line({ type: "compaction", summary: cycle2.summary }), userMsg("retry"),
+      toolCall("bash", { command: "git status" }, "c2"), toolResult("bash", "command failed", true, "c2")].join("\n"), undefined, undefined, false);
+    expect(block(cycle3.summary)).toContain("failure failure-");
+  });
+
+  test("failed invocation retried successfully in the same window resolves without rendering a failure", () => {
+    const result = compileSessionJsonl([sessionLine,
+      toolCall("bash", { command: "ls" }, "c1"), toolResult("bash", "exit 1", true, "c1"),
+      toolCall("bash", { command: "ls" }, "c2"), toolResult("bash", "ok", false, "c2")].join("\n"), undefined, undefined, false);
+    expect(result.summary).not.toContain("failure failure-");
+    expect(result.summary).toContain("auto-resolved failures: 1 by later success");
+  });
+
+  test("retirement is deterministic: identical input yields byte-identical summary", () => {
+    const input = [sessionLine, userMsg("work"),
+      toolCall("bash", { command: "ls" }, "c1"), toolResult("bash", "nope", true, "c1")].join("\n");
+    const first = compileSessionJsonl(input, undefined, undefined, false);
+    const second = compileSessionJsonl(input, undefined, undefined, false);
+    expect(second.summary).toBe(first.summary);
+  });
+});
+
+
+describe("failure ownership and exact invocation retries", () => {
+  const compile = (records: string[]) => compileSessionJsonl([sessionLine, ...records].join("\n"), undefined, undefined, false);
+  const carry = (c: ReturnType<typeof compileSessionJsonl>["checkpoint"]) => line({ type: "session", id: "s1", cwd: "/tmp/proj", checkpoint: c, checkpointDigest: checkpointDigest(c) });
+  test("recognized failed verification has one owner and a fresh cross-compaction retry resolves it", () => {
+    const first = compile([toolCall("bash", { command: "bun test" }, "v1"), toolResult("bash", "1 fail\n0 pass\nexit code 1", true, "v1")]);
+    expect(first.checkpoint.failures).toHaveLength(1);
+    expect(first.checkpoint.failures[0].attemptedFix).toBe("");
+    for (const [output, status] of [["no tests to run", false], ["1 pass\n0 fail", undefined]] as const) {
+      const second = compileSessionJsonl([carry(first.checkpoint), toolCall("bash", { command: "bun test" }, "v2"), line({ type: "message", message: { role: "toolResult", toolCallId: "v2", toolName: "bash", isError: status, content: [{ type: "text", text: output }] } })].join("\n"), undefined, undefined, false);
+      expect(second.checkpoint.failures[0].resolution).toBeNull();
+    }
+    const passed = compileSessionJsonl([carry(first.checkpoint), toolCall("bash", { command: "bun test" }, "v2"), toolResult("bash", "1 pass\n0 fail", false, "v2")].join("\n"), undefined, undefined, false);
+    expect(passed.checkpoint.failures[0].resolution).toBe("resolved: later success with same invocation");
+    const sameWindow = compile([toolCall("bash", { command: "bun test" }, "v1"), toolResult("bash", "1 fail", true, "v1"), toolCall("bash", { command: "bun test" }, "v2"), toolResult("bash", "1 pass\n0 fail", false, "v2")]);
+    expect(sameWindow.checkpoint.failures).toHaveLength(1);
+    expect(sameWindow.checkpoint.failures[0].resolution).toBe("resolved: later success with same invocation");
+  });
+  test("diagnostic results without source references retain one verification failure owner", () => {
+    const input = [sessionLine, userMsg("check the build"),
+      toolCall("bash", { command: "bun test" }, "diagnostic"), toolResult("bash", "1 fail", true, "diagnostic")].join("\n");
+    const normalized = normalizeSessionJsonl(input);
+    expect(normalized.blocks.filter(block => block.kind === "tool_result").every(block => block.sourceReference === undefined)).toBe(true);
+    const result = compileSessionJsonl(input, undefined, undefined, false);
+    expect(result.checkpoint.evidence.verification.filter(receipt => receipt.status === "FAIL")).toHaveLength(1);
+    expect(result.checkpoint.failures).toHaveLength(1);
+    expect(result.checkpoint.failures[0].attemptedFix).toBe("");
+    expect(result.checkpoint.failures[0].resolution).toBeNull();
+  });
+  test("duplicate call IDs across raw names preserve verification errors without claiming receipts", () => {
+    const result = compile([toolCall("bash", { command: "bun test" }, "dup"), toolCall("read", { path: "/tmp/a" }, "dup"), toolResult("bash", "1 fail", true, "dup")]);
+    expect(result.checkpoint.failures).toHaveLength(1);
+    expect(result.checkpoint.failures[0].attemptedFix).toBe("unpaired tool result; attempted fix unknown");
+    expect(result.checkpoint.failures[0].resolution).toBeNull();
+    expect(result.checkpoint.evidence.verification.some(receipt => receipt.status === "FAIL")).toBe(false);
+  });
+  test("duplicate call IDs across raw names cannot resolve a reobserved generic failure", () => {
+    const args = { path: "/tmp/a" };
+    const first = compile([toolCall("read", args, "original"), toolResult("read", "boom", true, "original")]);
+    const second = compileSessionJsonl([carry(first.checkpoint), toolCall("read", args, "repeat"), toolResult("read", "boom", true, "repeat"),
+      toolCall("read", args, "dup"), toolCall("bash", { command: "ls" }, "dup"), toolResult("read", "ok", false, "dup")].join("\n"), undefined, undefined, false);
+    expect(second.checkpoint.failures.find(failure => failure.signature === first.checkpoint.failures[0].signature)?.resolution).toBeNull();
+  });
+  test("nested reordered arguments match, ordered arrays differ, and earlier success cannot clear later failure", () => {
+    const args = { path: "/tmp/a", options: { mode: "safe", sequence: [1, 2] } };
+    const reordered = { options: { sequence: [1, 2], mode: "safe" }, path: "/tmp/a" };
+    const records = [toolCall("custom_tool", args, "a"), toolResult("custom_tool", "boom", true, "a"), toolCall("custom_tool", reordered, "b"), toolResult("custom_tool", "ok", false, "b")];
+    expect(compile(records).checkpoint.failures[0].resolution).toBe("resolved: later success with same invocation");
+    reordered.options.sequence = [2, 1];
+    expect(compile([records[0], records[1], toolCall("custom_tool", reordered, "b"), records[3]]).checkpoint.failures[0].resolution).toBeNull();
+    expect(compile([toolCall("custom_tool", args, "a"), toolResult("custom_tool", "ok", false, "a"), toolCall("custom_tool", args, "b"), toolResult("custom_tool", "boom", true, "b")]).checkpoint.failures[0].resolution).toBeNull();
+  });
+  test("validated legacy argument format can match reordered retry without changing provenance signature", () => {
+    const first = compile([toolCall("custom_tool", { z: 1, a: { z: 2, a: 3 } }, "a"), toolResult("custom_tool", "boom", true, "a")]);
+    const old = JSON.parse(JSON.stringify(first.checkpoint));
+    const attemptedFix = 'custom_tool: {"z":1,"a":{"z":2,"a":3}}';
+    old.failures[0].attemptedFix = attemptedFix;
+    old.failures[0].signature = digest(`${attemptedFix}\0boom`);
+    const retry = compileSessionJsonl([carry(old), toolCall("custom_tool", { a: { a: 3, z: 2 }, z: 1 }, "b"), toolResult("custom_tool", "ok", false, "b")].join("\n"), undefined, undefined, false);
+    expect(retry.checkpoint.failures[0].signature).toBe(old.failures[0].signature);
+    expect(retry.checkpoint.failures[0].resolution).toBe("resolved: later success with same invocation");
+  });
+});
+
+test("hard summary fallback exhausts whole file markers before protected overflow", () => {
+  const files = { readFiles: ["first", "second"], modifiedFiles: ["modified"], omittedReadFiles: 0, omittedModifiedFiles: 0 };
+  const render = () => "x".repeat(65530) + files.readFiles.join("") + files.modifiedFiles.join("");
+  expect(enforceSummaryLimit(render, files).length).toBeLessThanOrEqual(65536);
+  expect(files.omittedReadFiles + files.omittedModifiedFiles).toBeGreaterThan(0);
+  const exhausted = { readFiles: ["read"], modifiedFiles: ["write"], omittedReadFiles: 0, omittedModifiedFiles: 0 };
+  expect(() => enforceSummaryLimit(() => "x".repeat(65537), exhausted)).toThrow("structured summary exceeds");
+  expect(exhausted).toEqual({ readFiles: [], modifiedFiles: [], omittedReadFiles: 1, omittedModifiedFiles: 1 });
+});
+
+
+test("multiblock user pins retain authoritative per-block text and identity through compilation", () => {
+  const message = { role: "user", content: [{ type: "text", text: "First exact request" }, { type: "text", text: "Second 😀 exact constraint" }], timestamp: 1 };
+  const tail = { role: "user", content: "retained tail", timestamp: 2 };
+  const source = buildCompactionSource({ messagesToSummarize: [message] as never[], firstKeptEntryId: "tail", branchEntries: [
+    { type: "message", id: "multiblock", parentId: null, timestamp: "2026-01-01T00:00:00Z", message },
+    { type: "message", id: "tail", parentId: "multiblock", timestamp: "2026-01-01T00:00:01Z", message: tail },
+  ] as never[], sessionId: "s1", cwd: "/tmp/proj" });
+  const canonical = canonicalizeCompactionSource(source);
+  const blocks = normalizeSessionJsonl(canonical.bytes).blocks.filter(b => b.kind === "user");
+  expect(blocks.map(b => b.text)).toEqual(message.content.map(b => b.text));
+  expect(blocks.map(b => b.sourceReference?.blockIndex)).toEqual([0, 1]);
+  const saved = prepareCheckpointUpdate({ version: 1, expectedBase: { checkpointDigest: null, updateEntryId: null }, operations: [
+    { op: "pin", id: "P1", purpose: "request", source: { kind: "span", entryId: "multiblock", messageIndex: 0, blockIndex: 0, start: 0, end: 19 } },
+    { op: "pin", id: "P2", purpose: "constraint", source: { kind: "excerpt", excerpt: "Second 😀 exact constraint" } },
+  ] }, { checkpoint: null, checkpointDigest: null, updateEntryId: null, nextUpdateEntryId: "update", occurrences: source.occurrences! as never });
+  const compiled = compileSessionJsonl([line({ type: "session", id: "s1", cwd: "/tmp/proj", checkpoint: saved.checkpoint, checkpointDigest: saved.checkpointDigest }), ...canonical.bytes.split("\n").filter(row => row.trim() && JSON.parse(row).type !== "session")].join("\n"), undefined, undefined, false);
+  expect(compiled.checkpoint.pins.map(p => p.text)).toEqual(message.content.map(b => b.text));
+  expect(compiled.checkpoint.pins.map(p => p.source.blockIndex)).toEqual([0, 1]);
+  expect(compiled.checkpoint.pins.map(p => p.source.contentDigest)).toEqual(blocks.map(b => b.sourceReference!.contentDigest));
 });

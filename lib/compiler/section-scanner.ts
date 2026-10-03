@@ -1,6 +1,6 @@
 /** Bounded structural recognition; example text never opens a control section. */
 export interface ScannedSections { valid: boolean; sections: Map<string, string>; headings: Map<string, string> }
-const known = new Set(["read-files", "modified-files", "resume-state", "current-intent", "verification", "resume-risks", "working-tree", "resume-tasks", "resume-index", "retained-context", "goal-state", "path-root", "file-evidence", "literal-anchors", "active-tasks", "source-anchors", "recent-tool-calls", "recent-tool-results", "budget-omissions", "ready-tasks", "graph-ready-tasks", "task-state", "full-session-recovery"]);
+const known = new Set(["read-files", "modified-files", "resume-state", "current-intent", "verification", "resume-risks", "working-tree", "resume-tasks", "resume-index", "retained-context", "goal-state", "path-root", "file-evidence", "literal-anchors", "active-tasks", "source-anchors", "recent-tool-calls", "recent-tool-results", "budget-omissions", "summary-omissions", "change-impact", "checkpoint-v1", "ready-tasks", "graph-ready-tasks", "task-state", "full-session-recovery"]);
 export function outsideExampleLines(lines: readonly string[]): boolean[] {
   let fence: { char: string; size: number } | undefined;
   return lines.map(line => {
@@ -26,15 +26,15 @@ export function scanSections(text: string): ScannedSections {
   const closeHeading = (end: number) => { if (heading) result.headings.set(heading.name, lines.slice(heading.start, end).join("\n").trim()); heading = undefined; };
   for (let i = 0; i < lines.length; i++) {
     if (!outside[i]) continue;
-    const inline = /^<([a-z-]+)>([^<]*)<\/\1>$/.exec(lines[i]);
+    const inline = /^<([a-z][a-z0-9-]*)>([^<]*)<\/\1>$/.exec(lines[i]);
     if (inline && known.has(inline[1])) {
       closeHeading(i);
       if (seen.has(inline[1])) { result.valid = false; break; }
       seen.add(inline[1]); result.sections.set(inline[1], inline[2].trim()); continue;
     }
-    const token = /^<\/?([a-z-]+)(?:\s+[^<>]*)?>$/.exec(lines[i]);
+    const token = /^<\/?([a-z][a-z0-9-]*)(?:\s+[^<>]*)?>$/.exec(lines[i]);
     if (!token) {
-      const malformed = /^<\/?([a-z-]+)(?:>|\s)/.exec(lines[i]);
+      const malformed = /^<\/?([a-z][a-z0-9-]*)(?:>|\s)/.exec(lines[i]);
       if (malformed && known.has(malformed[1])) { result.valid = false; break; }
     }
     if (token && (known.has(token[1]) || token[1] === "context-excerpt")) {

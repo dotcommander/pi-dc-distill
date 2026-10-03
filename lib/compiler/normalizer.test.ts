@@ -1,6 +1,8 @@
 import { expect, test } from "bun:test";
 import { compressToolResults, filterNoise, normalizeSessionJsonl } from "./normalizer.ts";
 import { KIND_USER, KIND_TOOL_RESULT } from "./types.ts";
+import { digest } from "./helpers.ts";
+import type { CheckpointSourceReference } from "./checkpoint.ts";
 
 const instruction = "Continue from where you left off. Do not deploy; first inspect src/parser.ts.";
 
@@ -38,6 +40,31 @@ test("explicitly typed transient messages remain excluded", () => {
   for (const customType of ["dc-hooks-session", "session-primer", "bard-context", "dc-distill-continuation"]) {
     expect(normalizeSessionJsonl(JSON.stringify({ type: "custom_message", customType, content: instruction })).blocks).toEqual([]);
   }
+});
+
+test("multi-block user text retains each original source occurrence", () => {
+  const text = "Keep the exact source pin.";
+  const sourceReferences: CheckpointSourceReference[] = [0, 1].map(blockIndex => ({ entryId: "user-entry", blockIndex, contentDigest: digest(text), sourceKind: "user" }));
+  const { blocks } = normalizeSessionJsonl(JSON.stringify({
+    type: "message", sourceReferences,
+    message: { role: "user", content: [{ type: "text", text }, { type: "text", text }] },
+  }));
+  expect(blocks.map(block => block.text)).toEqual([text, text]);
+  expect(blocks.map(block => block.sourceReference)).toEqual(sourceReferences);
+});
+
+test("user provenance follows retained text and images past empty and unsupported blocks", () => {
+  const content = [{ type: "text", text: "  " }, { type: "other" }, { type: "text", text: "Inspect parser." }, { type: "image", mimeType: "image/png" }, { type: "text", text: "Do not deploy." }];
+  const sourceReferences: CheckpointSourceReference[] = content.map((block, blockIndex) => ({ entryId: "mixed-user", blockIndex, contentDigest: digest(JSON.stringify(block)), sourceKind: "user" }));
+  const { blocks } = normalizeSessionJsonl(JSON.stringify({ type: "message", sourceReferences, message: { role: "user", content } }));
+  expect(blocks.map(block => block.text)).toEqual(["Inspect parser.", "[image: image/png]", "Do not deploy."]);
+  expect(blocks.map(block => block.sourceReference?.blockIndex)).toEqual([2, 3, 4]);
+});
+
+test("missing or duplicate source occurrences remain unassigned", () => {
+  const ref: CheckpointSourceReference = { entryId: "ambiguous-user", blockIndex: 0, contentDigest: digest("Inspect parser."), sourceKind: "user" };
+  const { blocks } = normalizeSessionJsonl(JSON.stringify({ type: "message", sourceReferences: [ref, ref], message: { role: "user", content: [{ type: "text", text: "Inspect parser." }, { type: "text", text: "Do not deploy." }] } }));
+  expect(blocks.map(block => block.sourceReference)).toEqual([undefined, undefined]);
 });
 
 test("error compression reserves two tail lines and four indexed diagnostics", () => {

@@ -1,4 +1,4 @@
-import { checkpointDigest, emptyCheckpoint, validateCheckpoint, type ResumeCheckpointV1, type CheckpointSourceReference } from "./compiler/checkpoint.ts";
+import { canonicalJson, checkpointDigest, emptyCheckpoint, validateCheckpoint, type ResumeCheckpointV1, type CheckpointSourceReference } from "./compiler/checkpoint.ts";
 import { parseAnyStructuredDistillHandoff, DISTILL_HANDOFF_ENTRY_TYPE } from "./handoff.ts";
 import { sha256Hex } from "./sha256.ts";
 import { codePointLength, codePointPrefix } from "./unicode.ts";
@@ -168,7 +168,7 @@ export function prepareCheckpointUpdate(value: unknown, context: CheckpointUpdat
     }
     if (handoff.version === 3) for (const precondition of handoff.preconditions) {
       const prior = checkpoint.preconditions.find((item) => item.id === precondition.id);
-      if (prior && JSON.stringify(prior) !== JSON.stringify(precondition)) fail("Conflicting precondition reuse.");
+      if (prior && canonicalJson(prior) !== canonicalJson(precondition)) fail("Conflicting precondition reuse.");
       if (!prior) checkpoint.preconditions.push({ ...precondition });
     }
     for (const invariant of handoff.invariants) if (!checkpoint.constraints.includes(invariant)) checkpoint.constraints.push(invariant);

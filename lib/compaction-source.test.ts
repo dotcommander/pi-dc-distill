@@ -410,6 +410,47 @@ describe("authoritative projected occurrence binding", () => {
     expect(() => canonicalizeCompactionSource(buildCompactionSource(packet))).toThrow("protected_overflow");
   });
 
+  const structuralCases = [
+    { name: "visited values", payload: (length: number) => Array.from({ length }, () => 0), error: "visited value limit" },
+    { name: "containers", payload: (length: number) => Array.from({ length }, () => ({})), error: "container limit" },
+  ];
+
+  for (const { name, payload, error } of structuralCases) {
+    test(`counts wide valid mandatory ${name} once in each traversal`, () => {
+      const message = { role: "toolResult", toolName: "read", toolCallId: "wide", isError: false,
+        content: [{ type: "text", text: "protected é😀 observation" }], metadata: payload(name === "containers" ? 60_000 : 600_000) };
+      const source = buildCompactionSource(input([message]));
+      expect(source.mandatoryMessages).toEqual([message]);
+      const actual = canonicalizeCompactionSource(source);
+      const expected = [
+        { type: "session", ...source.session, occurrences: source.occurrences!.map(item => item.reference) },
+        { type: "message", message, sourceKind: "tool-observation", sourceReferences: source.messageReferences![0] },
+      ].map(record => JSON.stringify(record)).join("\n") + "\n";
+      expect(actual.bytes).toBe(expected);
+      expect(actual.digestScope).toBe("compaction-input");
+      expect(actual.recordCount).toBe(1);
+    });
+
+    test(`rejects mandatory ${name} exceeding the aggregate limit across records`, () => {
+      const messages = ["first", "second"].map(toolCallId => ({ role: "toolResult", toolName: "read", toolCallId,
+        isError: false, content: [{ type: "text", text: toolCallId }], metadata: payload(name === "containers" ? 55_000 : 550_000) }));
+      const source = buildCompactionSource(input(messages));
+      expect(source.mandatoryMessages?.length).toBe(2);
+      expect(() => canonicalizeCompactionSource(source)).toThrow(error);
+    });
+  }
+
+  test("serialization retains the aggregate limit across mandatory and optional records", () => {
+    const metadata = Array.from({ length: 550_000 }, () => 0);
+    const source = buildCompactionSource(input([
+      { role: "toolResult", toolName: "read", toolCallId: "protected", isError: false,
+        content: [{ type: "text", text: "protected" }], metadata },
+      { role: "user", content: "optional", metadata },
+    ]));
+    expect(source.mandatoryMessages?.length).toBe(1);
+    expect(() => canonicalizeCompactionSource(source)).toThrow("visited value limit");
+  });
+
   test("deep required analysis stops at the configured container bound", () => {
     let value: unknown = "end";
     for (let i = 0; i < 65; i++) value = { nested: value };

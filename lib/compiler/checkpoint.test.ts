@@ -132,3 +132,107 @@ describe("checkpoint v1 durable authority", () => {
   });
 
 });
+
+describe("failure retirement policy", () => {
+  const RETIRED = "retired: not re-observed in compaction input";
+  const RESOLVED = "resolved: later success with same invocation";
+  const failing = (key: string) => ({ signature: digest(key), attemptedFix: `${key}: {}`, observedOutcome: "boom", sources: [] });
+
+  test("carried failure with no fresh occurrence retires at the next compaction", () => {
+    const first = buildCheckpoint(undefined, declaration, blank, undefined, undefined, undefined, [], [failing("stale-tool")]);
+    expect(first.failures.filter(f => f.resolution === null)).toHaveLength(1);
+    const second = buildCheckpoint(first, undefined, blank);
+    expect(second.failures.filter(f => f.resolution === null)).toHaveLength(0);
+    expect(second.failures.filter(f => f.resolution === RETIRED)).toHaveLength(1);
+    const third = buildCheckpoint(second, undefined, blank, undefined, undefined, undefined, [], [failing("brand-new")]);
+    expect(third.failures.find(f => f.signature === digest("brand-new"))?.resolution).toBeNull();
+    expect(third.failures.filter(f => f.resolution === RETIRED)).toHaveLength(1);
+  });
+
+  test("re-observed carried failure survives and aggregates", () => {
+    const failure = failing("repeat-tool");
+    const first = buildCheckpoint(undefined, declaration, blank, undefined, undefined, undefined, [], [failure]);
+    const second = buildCheckpoint(first, undefined, blank, undefined, undefined, undefined, [], [failure]);
+    const kept = second.failures.find(f => f.signature === failure.signature)!;
+    expect(kept.resolution).toBeNull();
+    expect(kept.occurrences).toBe(2);
+  });
+
+  test("later success with the same invocation identity resolves the failure", () => {
+    const attemptedFix = 'bash: {"command":"ls"}';
+    const failure = { signature: digest(`${attemptedFix}\0exit 1`), attemptedFix, observedOutcome: "exit 1", sources: [] };
+    const second = buildCheckpoint(undefined, declaration, blank, undefined, undefined, undefined, [], [failure], new Set([attemptedFix]));
+    expect(second.failures.find(f => f.attemptedFix === attemptedFix)?.resolution).toBe(RESOLVED);
+  });
+
+  test("verification failure resolves when the same identity passes in the same compaction input", () => {
+    const rec = (status: "FAIL" | "PASS") => ({ id: `verify-${status}`, tool: "bash", command: "bun test", cwd: "/repo", status, evidence: status === "FAIL" ? "1 failed" : "ok", mutationEpoch: 0, freshnessEstablished: true });
+    const c = buildCheckpoint(undefined, declaration, { ...blank, verification: [rec("FAIL"), rec("PASS")] });
+    expect(c.failures).toHaveLength(1);
+    expect(c.failures[0].resolution).toBe(RESOLVED);
+  });
+
+  test("rejected hypotheses keep their own resolution and are not retired", () => {
+    const withHypothesis = { ...declaration, "rejected-hypotheses": [{ id: "rh-1", claim: "Parser mis-serializes code points", evidence: "Not reproduced under property test" }] };
+    const first = buildCheckpoint(undefined, withHypothesis, blank, undefined, undefined, undefined, [], [failing("plain")]);
+    const second = buildCheckpoint(first, undefined, blank);
+    expect(second.failures.find(f => f.id === "rh-1")?.resolution).toBe("rejected hypothesis");
+    expect(second.failures.find(f => f.signature === digest("plain"))?.resolution).toBe(RETIRED);
+  });
+
+  test("render shows one transparency line instead of retired records", () => {
+    const first = buildCheckpoint(undefined, declaration, blank, undefined, undefined, undefined, [], [failing("render-tool")]);
+    expect(renderCheckpoint(first)).toContain("failure failure-");
+    const text = renderCheckpoint(buildCheckpoint(first, undefined, blank));
+    expect(text).not.toContain("failure failure-");
+    expect(text).toContain("auto-resolved failures: 0 by later success; 1 retired as not re-observed; 0 omitted historical");
+  });
+
+  test("retired failures count toward the resolved retention bound", () => {
+    const many = Array.from({ length: 12 }, (_, i) => failing(`cap-${i}`));
+    const first = buildCheckpoint(undefined, declaration, blank, undefined, undefined, undefined, [], many);
+    expect(first.failures).toHaveLength(12);
+    const second = buildCheckpoint(first, undefined, blank);
+    expect(second.failures).toHaveLength(10);
+    expect(second.omittedResolvedFailures).toBe(2);
+  });
+});
+
+
+describe("exact verification failure recovery", () => {
+  const receipt = (status: "FAIL" | "PASS" | "SKIP" | "INCOMPLETE", extra = {}) => ({ id: status, tool: "bash", command: "bun test", cwd: "/repo", status, evidence: status === "FAIL" ? "1 failed" : "ok", mutationEpoch: 0, freshnessEstablished: true, ...extra });
+  const first = () => buildCheckpoint(undefined, undefined, { ...blank, verification: [receipt("FAIL")] });
+  test("carried FAIL resolves only on the exact fresh PASS, keeping its original signature", () => {
+    const base = first();
+    const next = buildCheckpoint(base, undefined, { ...blank, verification: [receipt("PASS")] });
+    expect(next.failures[0]).toMatchObject({ signature: base.failures[0].signature, resolution: "resolved: later success with same invocation" });
+    for (const change of [{ command: "bun test " }, { tool: "exec" }, { cwd: "/other" }]) {
+      expect(buildCheckpoint(base, undefined, { ...blank, verification: [receipt("PASS", change)] }).failures[0].resolution).not.toBe("resolved: later success with same invocation");
+    }
+  });
+  test("SKIP, INCOMPLETE, missing freshness, unknown cwd, stale and overlapping passes cannot clear failures", () => {
+    for (const r of [receipt("SKIP"), receipt("INCOMPLETE"), receipt("PASS", { freshnessEstablished: undefined }), receipt("PASS", { freshnessEstablished: false })]) {
+      expect(buildCheckpoint(first(), undefined, { ...blank, verification: [r] }).failures[0].resolution).toBeNull();
+    }
+    expect(buildCheckpoint(first(), undefined, { ...blank, mutationEpoch: 1, verification: [receipt("PASS")] }).failures[0].resolution).toBeNull();
+    expect(buildCheckpoint(first(), undefined, { ...blank, pendingMutations: [{ name: "write", potentiallyModifying: true }], verification: [receipt("PASS")] }).failures[0].resolution).toBeNull();
+    const unknown = buildCheckpoint(undefined, undefined, { ...blank, verification: [receipt("FAIL", { cwd: undefined })] });
+    expect(buildCheckpoint(unknown, undefined, { ...blank, verification: [receipt("PASS", { cwd: undefined })] }).failures[0].resolution).toBeNull();
+    expect(buildCheckpoint(undefined, undefined, { ...blank, verification: [receipt("PASS"), receipt("FAIL")] }).failures[0].resolution).toBeNull();
+  });
+  test("unresolved identity receipts survive count and byte pressure; protected overflow cancels", () => {
+    const more = Array.from({ length: 60 }, (_, i) => receipt("PASS", { id: `extra-${i}`, command: `bun test ${i}`, evidence: "x".repeat(1200) }));
+    const kept = buildCheckpoint(first(), undefined, { ...blank, verification: [receipt("INCOMPLETE"), ...more] });
+    expect(kept.evidence.verification.some(r => r.status === "FAIL" && r.command === "bun test")).toBe(true);
+    expect(buildCheckpoint(kept, undefined, { ...blank, verification: [receipt("PASS")] }).failures[0].resolution).toBe("resolved: later success with same invocation");
+    expect(() => buildCheckpoint(undefined, undefined, { ...blank, verification: [receipt("FAIL", { command: "bun test " + "x".repeat(66000) })] })).toThrow("protected checkpoint");
+  });
+  test("receipt-less legacy verification failures remain conservative", () => {
+    const base = first(); const legacy = { ...base, evidence: blank };
+    expect(buildCheckpoint(legacy, undefined, { ...blank, verification: [receipt("PASS")] }).failures[0].resolution).toBeNull();
+  });
+  test("historical omissions render without retained resolved records", () => {
+    const c = emptyCheckpoint(); c.omittedResolvedFailures = 9;
+    expect(renderCheckpoint(c)).toContain("auto-resolved failures: 0 by later success; 0 retired as not re-observed; 9 omitted historical");
+  });
+});

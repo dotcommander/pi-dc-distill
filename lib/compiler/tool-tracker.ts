@@ -150,7 +150,7 @@ export function limitedVerificationSlice(
   return [...values.slice(values.length - limit), `... (${values.length - limit} verification rows omitted)`];
 }
 
-function popPendingToolCall(
+export function popPendingToolCall(
   calls: PendingToolCall[],
   resultName: string,
   resultCallId?: string,

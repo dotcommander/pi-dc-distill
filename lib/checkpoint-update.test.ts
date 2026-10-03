@@ -99,3 +99,16 @@ describe("explicit checkpoint updates", () => {
     expect(() => readCheckpointUpdateBase([{ type: "compaction", details: { compactor: "dc-distill", version: 13 } }])).toThrow("missing");
   });
 });
+
+
+test("equivalent reordered precondition keys are accepted atomically", () => {
+  const ctx = context(); ctx.checkpoint = emptyCheckpoint();
+  ctx.checkpoint.preconditions.push({ id: "V1", kind: "verification-pass", runner: "bash", command: "bun test", cwd: "/work" });
+  ctx.checkpointDigest = checkpointDigest(ctx.checkpoint);
+  const handoff = { objective: "Continue", invariants: [], decisions: [], "rejected-hypotheses": [], tasks: [], "verification-needed": [], preconditions: [{ cwd: "/work", command: "bun test", runner: "bash", kind: "verification-pass", id: "V1" }] };
+  ctx.handoff = `\`\`\`distill-handoff-v3\n${JSON.stringify(handoff)}\n\`\`\``;
+  expect(prepareCheckpointUpdate(update([], ctx), ctx).checkpoint.preconditions).toEqual(ctx.checkpoint.preconditions);
+  handoff.preconditions[0].command = "bun test changed";
+  ctx.handoff = `\`\`\`distill-handoff-v3\n${JSON.stringify(handoff)}\n\`\`\``;
+  expect(() => prepareCheckpointUpdate(update([], ctx), ctx)).toThrow("Conflicting precondition");
+});

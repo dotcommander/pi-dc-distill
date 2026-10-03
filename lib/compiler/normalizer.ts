@@ -88,13 +88,13 @@ function stripNoiseFromCompaction(text: string): string {
 
 function normalizeUser(blocks: Array<Record<string, unknown>>): NormalizedBlock[] {
   const out: NormalizedBlock[] = [];
-  const raw = textJoin(blocks);
-  const text = sanitize(raw).trim();
-  if (text) {
-    out.push({ kind: KIND_USER, text, origin: "human" });
-  }
   for (const block of blocks) {
-    if (block.type === "image") {
+    // Keep original occurrences separate so a pin's block identity and digest
+    // remain authoritative, including repeated text and interleaved images.
+    if (block.type === "text") {
+      const text = sanitize(typeof block.text === "string" ? block.text : "").trim();
+      if (text) out.push({ kind: KIND_USER, text, origin: "human" });
+    } else if (block.type === "image") {
       out.push({ kind: KIND_USER, text: `[image: ${String(block.mimeType ?? "")}]`, origin: "human" });
     }
   }
@@ -377,9 +377,11 @@ export function normalizeSessionJsonl(content: string, signal?: AbortSignal): { 
     const original = hasBlockReferences ? contentBlocks(message.content) : [];
     const assistantIndices = hasBlockReferences && message.role === "assistant"
       ? original.flatMap((block,index) => ["text","thinking","toolCall"].includes(String(block.type)) ? [index] : []) : [];
+    const userIndices = hasBlockReferences && message.role === "user"
+      ? original.flatMap((block,index) => block.type === "image" || (block.type === "text" && typeof block.text === "string" && sanitize(block.text).trim()) ? [index] : []) : [];
     const referenceFor = (index: number) => {
       if (!Array.isArray(entry.sourceReferences)) return isRecord(entry.sourceReference) ? entry.sourceReference as unknown as NormalizedBlock["sourceReference"] : undefined;
-      const blockIndex = message.role === "assistant" ? assistantIndices[index] : original.length === 1 ? 0 : undefined;
+      const blockIndex = message.role === "assistant" ? assistantIndices[index] : message.role === "user" ? userIndices[index] : original.length === 1 ? 0 : undefined;
       const references = entry.sourceReferences.filter(ref => isRecord(ref) && ref.blockIndex === blockIndex);
       return blockIndex !== undefined && references.length === 1 ? references[0] as NormalizedBlock["sourceReference"] : undefined;
     };

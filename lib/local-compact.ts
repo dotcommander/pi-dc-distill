@@ -5,14 +5,14 @@ import { RECALL_NOTE, COMPILE_SEPARATOR, MAX_STRUCTURED_SUMMARY_CODE_POINTS, che
 import { KIND_USER, KIND_ASSISTANT, KIND_TOOL_CALL, KIND_TOOL_RESULT, KIND_THINKING, KIND_COMPACTION, type NormalizedBlock, type ConversationTurn, type ToolCallFingerprint, type ToolResultEntry, type ConversationResult, type LocalCompileResult, type ToolAdjacent, type PendingToolCall, type VerificationReceipt } from "./compiler/types.ts";
 import { CompactionInputError } from "./compiler/errors.ts";
 import { normalizeSessionJsonl, filterNoise, compressToolResults } from "./compiler/normalizer.ts";
-import { extractPath, pathIdentity, snapshotObservations, transcriptChangeImpact, renderVerificationReceipt, createEvidenceState, renderEvidenceRisks, renderGitObservations, limitedVerificationSlice, shellCommand, isVerificationCommand, verificationIdentity, effectiveShellCwd, collectConversationToolCall, collectConversationToolResult } from "./compiler/tool-tracker.ts";
+import { extractPath, pathIdentity, snapshotObservations, transcriptChangeImpact, renderVerificationReceipt, createEvidenceState, renderEvidenceRisks, renderGitObservations, limitedVerificationSlice, shellCommand, isVerificationCommand, verificationIdentity, effectiveShellCwd, collectConversationToolCall, collectConversationToolResult, popPendingToolCall } from "./compiler/tool-tracker.ts";
 import { collectSourceAnchorsFromUserText, collectLiteralAnchors, collectTaskAgentNotification } from "./compiler/anchors.ts";
 import { extractSignals, isReferentialImplementation, conversationEvictionCandidates, turnPreviewLimit, trimTurnWithLimit, compactAssistantTurns, hasTerminalNoWorkCompletion, classifyRequestGroups, removeCompletedHistoricalRequests } from "./compiler/conversation-reducer.ts";
 import { buildResumeIndex, buildResumeTasks, buildResumePlan } from "./compiler/resume-index.ts";
 import { formatSummary, enforceOperatingBudget, readRetainedContext } from "./compiler/budget-formatter.ts";
 import { DisplayProjectionBudget } from "./compiler/display-projection.ts";
 import { choosePathRoot } from "./compiler/path-roots.ts";
-import { buildCheckpoint, validateCheckpoint, checkpointDigest } from "./compiler/checkpoint.ts";
+import { canonicalJson, buildCheckpoint, validateCheckpoint, checkpointDigest } from "./compiler/checkpoint.ts";
 import { codePointLength } from "./unicode.ts";
 
 export { CompactionInputError } from "./compiler/errors.ts";
@@ -55,6 +55,7 @@ function extractConversation(blocks: NormalizedBlock[], sessionCwd?: string, pre
   let omittedErrorResults = 0;
   let omittedRecentResults = 0;
   const verification = new Map<string, VerificationReceipt>();
+  const verificationHistory: Array<VerificationReceipt & { id: string }> = [];
   const workingTree = new OrderedSet();
   const sourceAnchors = new OrderedSet();
   const activeTasks = new OrderedSet();
@@ -123,6 +124,8 @@ function extractConversation(blocks: NormalizedBlock[], sessionCwd?: string, pre
         lastErrorRun,
         evidenceState,
       );
+      for (const [id, receipt] of verification) if (receipt.sourceSequence === sourceSequence)
+        verificationHistory.push({ ...receipt, id: `${id}:observation:${sourceSequence}` });
       if (collected.pendingError) pendingError = true;
       omittedErrorResults = collected.omittedErrorResults;
       omittedRecentResults = collected.omittedRecentResults;
@@ -275,7 +278,9 @@ function extractConversation(blocks: NormalizedBlock[], sessionCwd?: string, pre
     : buildResumeIndex(finalTurns, finalReadFiles, finalModifiedFiles, finalRecentToolCalls, lexical);
   const pathRoot = choosePathRoot([...finalReadFiles, ...finalModifiedFiles, ...resumeIndex.activeFiles], sessionCwd);
 
-  const observationSnapshot = Object.freeze({...snapshotObservations(evidenceState, verification), pendingMutations: pendingCalls.filter(call=>call.potentiallyModifying).map(call=>({...call}))});
+  const currentSnapshot = snapshotObservations(evidenceState, verification);
+  const observationSnapshot = Object.freeze({...currentSnapshot,
+    verification: Object.freeze([...verificationHistory, ...currentSnapshot.verification.filter(r => r.status === "INCOMPLETE" && r.sourceSequence === undefined)]), pendingMutations: pendingCalls.filter(call=>call.potentiallyModifying).map(call=>({...call}))});
   return {
     selectionSourceSequences,
     observationSnapshot,
@@ -343,19 +348,62 @@ function rejectMalformedUnicode(values: unknown[]): void {
   }
 }
 
-function observedFailures(blocks: NormalizedBlock[]) {
-  const calls = new Map<string, NormalizedBlock[]>();
-  for (const block of blocks) if (block.kind === KIND_TOOL_CALL && block.callId) {
-    const key = `${block.name}\0${block.callId}`; const group = calls.get(key) ?? []; group.push(block); calls.set(key, group);
-  }
-  return blocks.flatMap(block => {
-    if (block.kind !== KIND_TOOL_RESULT || block.isError !== true || /^(?:File unchanged since last read|No changes to apply|Nothing to replace|No changes were made)\b/i.test(block.text ?? "")) return [];
-    const group = block.callId ? calls.get(`${block.name}\0${block.callId}`) : undefined;
-    const call = group?.length === 1 ? group[0] : undefined;
-    const attemptedFix = call ? `${call.name}: ${JSON.stringify(call.args ?? {})}` : "unpaired tool result; attempted fix unknown";
+/** Reuse the tracker's strict global-ID and chronological pairing before display reduction. */
+function invocationOutcomes(blocks: NormalizedBlock[], previous: import("./compiler/types.ts").ObservationSnapshot | undefined, verificationOwners: ReadonlySet<NormalizedBlock>) {
+  const state = createEvidenceState(blocks);
+  const pending: PendingToolCall[] = (previous?.pendingMutations ?? []).map(call => ({ ...call }));
+  for (const call of pending) if (call.callId && blocks.some(block => block.kind === KIND_TOOL_CALL && block.callId === call.callId)) state.duplicateIds.add(call.callId);
+  const sources = new Map<PendingToolCall, NormalizedBlock["sourceReference"]>();
+  const failures: NonNullable<Parameters<typeof buildCheckpoint>[7]> = [];
+  const succeeded = new Set<string>();
+  for (const block of blocks) {
+    if (block.kind === KIND_TOOL_CALL) {
+      const call: PendingToolCall = { name: block.name ?? "", callId: block.callId, args: block.args ?? {} };
+      pending.push(call);
+      sources.set(call, block.sourceReference);
+      continue;
+    }
+    if (block.kind !== KIND_TOOL_RESULT) continue;
+    const { call, matched } = popPendingToolCall(pending, block.name ?? "", block.callId, state.duplicateIds);
+    const command = matched ? shellCommand(call) : undefined;
+    const identity = matched ? `${call.name}: ${canonicalJson(call.args ?? {})}` : undefined;
+    if (identity && !(command && isVerificationCommand(command))) {
+      // Last explicit terminal outcome wins; missing diagnostic status never proves success.
+      if (block.isError === false) succeeded.add(identity);
+      else succeeded.delete(identity);
+    }
+    if (block.isError !== true || /^(?:File unchanged since last read|No changes to apply|Nothing to replace|No changes were made)\b/i.test(block.text ?? "")) continue;
+    // Suppress a generic failure only when an authoritative verification receipt owns this result.
+    if (verificationOwners.has(block)) continue;
+    const attemptedFix = identity ?? "unpaired tool result; attempted fix unknown";
     const observedOutcome = block.text ?? "";
-    return [{signature: digest(`${attemptedFix}\0${observedOutcome}`),attemptedFix,observedOutcome,sources: [call?.sourceReference,block.sourceReference].filter((source): source is NonNullable<typeof source> => source !== undefined)}];
-  });
+    failures.push({ signature: digest(`${attemptedFix}\0${observedOutcome}`), attemptedFix, observedOutcome,
+      sources: [matched ? sources.get(call) : undefined, block.sourceReference].filter((source): source is NonNullable<typeof source> => source !== undefined) });
+  }
+  return { failures, succeeded };
+}
+
+/** Exhaust whole optional file markers before rejecting a hard wire overflow. */
+export function enforceSummaryLimit(render: () => string, conv: Pick<ConversationResult, "readFiles" | "modifiedFiles" | "omittedReadFiles" | "omittedModifiedFiles">): string {
+  let summary = render();
+  // The operating budget may stop at protected state above its soft target.
+  // At the hard wire limit, exhaust the remaining whole file display records before cancelling.
+  while (codePointLength(summary) > MAX_STRUCTURED_SUMMARY_CODE_POINTS && (conv.readFiles.length > 0 || conv.modifiedFiles.length > 0)) {
+    if (conv.readFiles.length >= conv.modifiedFiles.length && conv.readFiles.length > 0) {
+      conv.readFiles.shift();
+      conv.omittedReadFiles++;
+    } else if (conv.modifiedFiles.length > 0) {
+      conv.modifiedFiles.shift();
+      conv.omittedModifiedFiles++;
+    }
+    summary = render();
+  }
+  if (codePointLength(summary) > MAX_STRUCTURED_SUMMARY_CODE_POINTS) {
+    throw new CompactionInputError(
+      `structured summary exceeds ${formatInteger(MAX_STRUCTURED_SUMMARY_CODE_POINTS)} code points`, "protected_overflow",
+    );
+  }
+  return summary;
 }
 
 export function compileSessionJsonl(content: string, userFocus?: string, signal?: AbortSignal, recallEnabled = true, selection: "baseline" | "coverage" = "baseline"): LocalCompileResult {
@@ -378,15 +426,24 @@ export function compileSessionJsonl(content: string, userFocus?: string, signal?
     previous = validateCheckpoint(update.checkpoint, update.checkpointDigest);
     previous.updateEntryId = update.entryId;
   }
+  const filteredBlocks = filterNoise(normalized.blocks);
+  const displayBlocks = compressToolResults(filteredBlocks);
   const conv = extractConversation(
-    compressToolResults(filterNoise(normalized.blocks)),
+    displayBlocks,
     normalized.meta.cwd, previous?.evidence,
     previous ? [...previous.pins.filter(pin => pin.status === "active").map(pin => pin.text), ...previous.constraints, ...previous.tasks.map(task => task.action)] : [],
   );
   const declarations = (normalized.meta.declarations ?? []).flatMap((text, index) => { const handoff = parseAnyStructuredDistillHandoff(text); return handoff ? [{ handoff, source: normalized.meta.declarationSources?.[index] }] : []; });
+  const verificationOwners = new Set(conv.observationSnapshot!.verification.flatMap(receipt => {
+    // Compression preserves indices; the pre-compression object identifies the exact result
+    // even diagnostic inputs without persisted source references.
+    const result = receipt.sourceSequence === undefined ? undefined : filteredBlocks[receipt.sourceSequence];
+    return result?.kind === KIND_TOOL_RESULT ? [result] : [];
+  }));
+  const outcomes = invocationOutcomes(normalized.blocks, previous?.evidence, verificationOwners);
   conv.checkpoint = buildCheckpoint(previous, declarations.map(item => item.handoff),
     conv.observationSnapshot!, normalized.meta.predecessorEntryId, conv.observedFiles, declarations.map(item => item.source), conv.resumeRisks,
-    observedFailures(normalized.blocks));
+    outcomes.failures, outcomes.succeeded);
   conv.observationSnapshot = conv.checkpoint.evidence;
   conv.retainedContext = readRetainedContext(normalized.meta.priorSummaries);
   if (!recallEnabled) {
@@ -395,22 +452,7 @@ export function compileSessionJsonl(content: string, userFocus?: string, signal?
   }
   enforceOperatingBudget(normalized.meta, conv, userFocus, recallEnabled, selection);
   checkAbort(signal);
-  let summary = `${formatSummary(normalized.meta, conv, userFocus)}${recallEnabled ? `${COMPILE_SEPARATOR}${RECALL_NOTE}` : ""}`;
-  while (codePointLength(summary) > MAX_STRUCTURED_SUMMARY_CODE_POINTS && (conv.readFiles.length > 0 || conv.modifiedFiles.length > 0)) {
-    if (conv.readFiles.length >= conv.modifiedFiles.length && conv.readFiles.length > 0) {
-      conv.readFiles.shift();
-      conv.omittedReadFiles++;
-    } else if (conv.modifiedFiles.length > 0) {
-      conv.modifiedFiles.shift();
-      conv.omittedModifiedFiles++;
-    }
-    summary = `${formatSummary(normalized.meta, conv, userFocus)}${recallEnabled ? `${COMPILE_SEPARATOR}${RECALL_NOTE}` : ""}`;
-  }
-  if (codePointLength(summary) > MAX_STRUCTURED_SUMMARY_CODE_POINTS) {
-    throw new CompactionInputError(
-      `structured summary exceeds ${formatInteger(MAX_STRUCTURED_SUMMARY_CODE_POINTS)} code points`, "protected_overflow",
-    );
-  }
+  const summary = enforceSummaryLimit(() => `${formatSummary(normalized.meta, conv, userFocus)}${recallEnabled ? `${COMPILE_SEPARATOR}${RECALL_NOTE}` : ""}`, conv);
   checkAbort(signal);
   return {
     summary,

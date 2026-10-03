@@ -298,6 +298,15 @@ serialization has a separate digest; the wire summary is hashed independently.
 Validated declarations and explicitly pinned user text survive repeated compaction.
 Other prose remains attributed context; implied obligations or user authorization
 are not inferred. Terminal prose or missing items cannot retire unresolved work.
+Failure history is bounded by evidence: at each compaction a carried unresolved
+failure with no fresh occurrence retires
+(`retired: not re-observed in compaction input`), and a failure whose exact
+invocation identity — tool name and arguments, or the same verification runner,
+command bytes, and working directory — later succeeds resolves
+(`resolved: later success with same invocation`). Auto-resolved records render
+only as one bounded transparency count and share the ten-resolved retention
+bound with omission accounting. This projection-only behavior changes no
+details field, so `details.version` stays 13.
 
 `save_distill_handoff` optionally accepts `checkpoint: { version: 1, expectedBase:
 { checkpointDigest, updateEntryId }, operations }`. Pin, resolve, and supersede

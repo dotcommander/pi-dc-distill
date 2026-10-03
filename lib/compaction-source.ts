@@ -411,9 +411,13 @@ export function canonicalizeCompactionSource(
   const mandatory = new Set(source.mandatoryMessages ?? []);
   const handoffs = source.protectedHandoffs ?? (source.handoff ? [{ handoff: source.handoff, sourceReference: source.handoffReference }] : []);
   const protectedHandoff = source.protectedHandoffs !== undefined;
+  // Reservation and serialization each enforce the aggregate structural limits.
+  // Include metadata in both, but never charge protected records twice to the
+  // serialization budget simply because their byte reservations need preflight.
+  const preflightBudget: StructuralBudget = { ...budget };
   let reserved = 0;
   const measure = (write: (writer: CappedJsonWriter) => boolean): void => {
-    const candidate = new CappedJsonWriter(arena, required.offset, MAX_INPUT_BYTES, signal, budget);
+    const candidate = new CappedJsonWriter(arena, required.offset, MAX_INPUT_BYTES, signal, preflightBudget);
     if (!write(candidate)) return;
     candidate.raw("\n");
     reserved += candidate.offset - required.offset;
