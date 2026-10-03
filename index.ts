@@ -19,6 +19,7 @@ import { Tool } from "./lib/tool-result.ts";
 import { Entries } from "./lib/entries-support.ts";
 import { Events } from "./lib/events-support.ts";
 import { Type } from "typebox";
+import { StringEnum } from "@earendil-works/pi-ai";
 import {
   buildCompactionSource,
   sourceOccurrences,
@@ -817,7 +818,7 @@ function createExtension(pi: ExtensionAPI, options: DistillExtensionOptions = {}
         parameters: Type.Object({
           query: Type.String(),
           limit: Type.Optional(Type.Number({ default: 3 })),
-          scope: Type.Optional(Type.Union([Type.Literal("project"), Type.Literal("all")], { default: "project" })),
+          scope: Type.Optional(StringEnum(["project", "all"] as const, { default: "project" })),
         }),
         run: async (args, exec) => {
           try {
