@@ -281,8 +281,16 @@ settings merge.
 - below auto: no action
 - Pi trigger = `contextWindow - reserveTokens`
 - auto = `min(120,000, Pi trigger - 20,000)`: Mechanical compaction
-- warn = `Pi trigger`: cooperative Warn
+- warn = `Pi trigger`: cooperative Warn (empty band when the floor clamps to it)
+- headroom floor = `max(warn, contextWindow - 16,384 - 4,096)`: unconditional
+  Mechanical compaction with emergency-grade guard bypass, because pi-ai's
+  request clamp leaves less than 16,384 answer tokens above it
 - emergency = `contextWindow`: unconditional Mechanical compaction
+
+A blocked at-or-above-auto observation sets a `missedAuto` marker; the next
+unblocked warn-band observation then compacts mechanically
+(`missed-auto-pursuit`) instead of steering. Decided checks log
+`auto-check decided tier=… reason=… policy=v2` in diag.log.
 
 `compaction.enabled: false` makes the autonomous monitor a no-op; manual
 `/compact` still enters the deterministic `session_before_compact` hook. Fixed

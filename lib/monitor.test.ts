@@ -378,3 +378,18 @@ test("nonfinite usage cannot poison the last finite estimate or API count", () =
     expect(monitor.state.apiTokenCount).toBe(122_000);
   }
 });
+
+// ── missedAuto reset (trigger policy v2) ─────────────────────────────────
+describe("missedAuto state reset", () => {
+  test("fresh monitor state starts with missedAuto false", () => {
+    const monitor = new Monitor(() => 1_000_000)
+    expect(monitor.state.missedAuto).toBe(false)
+  })
+  test("recordCompaction() clears a missed-auto window on commit", () => {
+    const monitor = new Monitor(() => 1_000_000)
+    monitor.state.missedAuto = true
+    monitor.recordCompaction(20)
+    expect(monitor.state.missedAuto).toBe(false)
+    expect(monitor.state.awaitingPostCompactionSample).toBe(true)
+  })
+})

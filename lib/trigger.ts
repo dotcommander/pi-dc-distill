@@ -11,11 +11,20 @@ const FALLBACK_AUTO_THRESHOLD = 100_000;
 const FALLBACK_WARN_THRESHOLD = 140_000;
 const FALLBACK_EMERGENCY_THRESHOLD = 160_000;
 /** Preferred autonomous boundary when Pi's own safety geometry allows it. */
-export const TRIGGER_POLICY_VERSION = 1;
+export const TRIGGER_POLICY_VERSION = 2;
 export const TRIGGER_POLICY_NAME = "distill-fixed-cap-lead";
 export const AUTO_TARGET_TOKENS = 120_000;
 /** dc-distill prefers this lead before Pi's own automatic trigger. */
 export const DISTILL_LEAD_TOKENS = 20_000;
+/**
+ * Answer budget the headroom floor protects. pi-ai clamps every request to
+ * min(maxTokens, window - input - PI_AI_SAFETY_MARGIN_TOKENS) with a floor of
+ * 1, so past window - 20,480 the model cannot finish a unit and steering is
+ * unsatisfiable. Emergency-grade: ordinary guards must not delay it.
+ */
+export const ANSWER_HEADROOM_TOKENS = 16_384;
+/** pi-ai's request-build safety margin subtracted from the context window. */
+export const PI_AI_SAFETY_MARGIN_TOKENS = 4_096;
 /** Floors make Pi's reserve geometry usable on very small windows. */
 const MIN_AUTO_THRESHOLD = 8_000;
 const MIN_WARN_THRESHOLD = 4_000;
@@ -49,6 +58,7 @@ export interface ResolvedThreshold {
 export interface ResolvedTriggerThresholds {
   auto: ResolvedThreshold;
   warn: ResolvedThreshold;
+  headroomFloor: ResolvedThreshold;
   emergency: ResolvedThreshold;
 }
 
@@ -76,6 +86,16 @@ export function resolveTriggerThresholds(
     return {
       auto: { effective: FALLBACK_AUTO_THRESHOLD, source: "fallback" },
       warn: { effective: FALLBACK_WARN_THRESHOLD, source: "fallback" },
+      headroomFloor: {
+        effective: Math.min(
+          FALLBACK_EMERGENCY_THRESHOLD,
+          Math.max(
+            FALLBACK_WARN_THRESHOLD,
+            FALLBACK_EMERGENCY_THRESHOLD - ANSWER_HEADROOM_TOKENS - PI_AI_SAFETY_MARGIN_TOKENS,
+          ),
+        ),
+        source: "fallback",
+      },
       emergency: { effective: FALLBACK_EMERGENCY_THRESHOLD, source: "fallback" },
     };
   }
@@ -96,6 +116,10 @@ export function resolveTriggerThresholds(
   );
   const auto = Math.min(AUTO_TARGET_TOKENS, geometryAuto);
   const warn = piCompactThreshold;
+  const headroomFloor = Math.min(
+    emergency,
+    Math.max(warn, window - ANSWER_HEADROOM_TOKENS - PI_AI_SAFETY_MARGIN_TOKENS),
+  );
 
   return {
     auto: {
@@ -103,6 +127,7 @@ export function resolveTriggerThresholds(
       source: auto < geometryAuto ? "policy-capped" : "pi-derived",
     },
     warn: { effective: warn, source: "pi-derived" },
+    headroomFloor: { effective: headroomFloor, source: "pi-derived" },
     emergency: { effective: emergency, source: "pi-derived" },
   };
 }
@@ -156,6 +181,20 @@ export function validateTriggerGeometry(
       message: `effective emergency threshold (${thresholds.emergency.effective}) must be above effective warn threshold (${thresholds.warn.effective})`,
     });
   }
+  if (thresholds.headroomFloor.effective < thresholds.warn.effective) {
+    violations.push({
+      field: "headroomFloorThreshold",
+      value: thresholds.headroomFloor.effective,
+      message: `effective headroom floor (${thresholds.headroomFloor.effective}) must not be below effective warn threshold (${thresholds.warn.effective})`,
+    });
+  }
+  if (thresholds.headroomFloor.effective > thresholds.emergency.effective) {
+    violations.push({
+      field: "headroomFloorThreshold",
+      value: thresholds.headroomFloor.effective,
+      message: `effective headroom floor (${thresholds.headroomFloor.effective}) must not exceed effective emergency threshold (${thresholds.emergency.effective})`,
+    });
+  }
   if (MIN_REPEAT_GROWTH < 0) {
     violations.push({
       field: "minRepeatGrowth",
@@ -168,7 +207,9 @@ export function validateTriggerGeometry(
 }
 
 export interface CompactionAssessment extends CompactEvaluation {
-  updates: Partial<Pick<CompactState, "awaitingPostCompactionSample" | "repeatBaselineTokens">>;
+  updates: Partial<
+    Pick<CompactState, "awaitingPostCompactionSample" | "repeatBaselineTokens" | "missedAuto">
+  >;
 }
 
 /** Pure assessment: callers explicitly apply returned state updates. */
@@ -203,6 +244,7 @@ export function assessCompaction(
   const cooldownMs = options.cooldownMs ?? COOLDOWN_MS;
   const effectiveAuto = thresholds.auto.effective;
   const effectiveWarn = thresholds.warn.effective;
+  const effectiveHeadroomFloor = thresholds.headroomFloor.effective;
   const effectiveEmergency = thresholds.emergency.effective;
 
   // Emergency: approaching Pi's hard context limit — fire regardless of
@@ -214,36 +256,68 @@ export function assessCompaction(
     });
   }
 
+  // Headroom floor: past this line pi-ai's request clamp leaves less than
+  // ANSWER_HEADROOM_TOKENS of answer budget and steering cannot finish a unit.
+  // Emergency-grade guard bypass; an unsynced estimate only inflates ~2.7x,
+  // which fires this earlier — same parity as emergency.
+  if (state.tokenEstimate >= effectiveHeadroomFloor) {
+    return decided({
+      tier: Tier.Mechanical,
+      reason: "headroom-floor: answer headroom exhausted — compact now",
+    });
+  }
+
   // If we couldn't sync with Pi's real token count, the monitor estimate is
   // inflated (~2.7x). Skip auto-threshold compaction to avoid premature fires.
-  if (!piSynced) return blocked("missing-pi-sync");
+  if (!piSynced) {
+    if (state.tokenEstimate >= effectiveAuto) updates.missedAuto = true;
+    return blocked("missing-pi-sync");
+  }
 
   if (state.awaitingPostCompactionSample) {
     updates.awaitingPostCompactionSample = false;
     updates.repeatBaselineTokens =
       state.tokenEstimate >= effectiveAuto ? state.tokenEstimate : null;
+    updates.missedAuto = state.tokenEstimate >= effectiveAuto;
     return blocked("post-compaction-sample");
   }
 
   if (state.tokenEstimate < effectiveAuto) {
     updates.repeatBaselineTokens = null;
+    updates.missedAuto = false;
     return blocked("below-auto");
   }
 
-  if (now - state.lastCompactionTime < cooldownMs) return blocked("cooldown");
+  if (now - state.lastCompactionTime < cooldownMs) {
+    // Estimate is at or above auto here; the window is missed while blocked.
+    updates.missedAuto = true;
+    return blocked("cooldown");
+  }
 
   if (state.repeatBaselineTokens !== null) {
     const growth = state.tokenEstimate - state.repeatBaselineTokens;
-    if (growth < MIN_REPEAT_GROWTH) return blocked("repeat-growth");
+    if (growth < MIN_REPEAT_GROWTH) {
+      updates.missedAuto = true;
+      return blocked("repeat-growth");
+    }
   }
 
   if (state.tokenEstimate >= effectiveWarn) {
+    if (state.missedAuto) {
+      // The auto window was missed while blocked; steering cannot recover it.
+      updates.missedAuto = false;
+      return decided({
+        tier: Tier.Mechanical,
+        reason: "missed-auto-pursuit: auto window missed — compact now",
+      });
+    }
     return decided({
       tier: Tier.Warn,
       reason: `warn: context exceeded ${formatCompactTokens(effectiveWarn)} tokens — finish current unit`,
     });
   }
 
+  updates.missedAuto = false;
   return decided({
     tier: Tier.Mechanical,
     reason: `auto: context exceeded ${formatCompactTokens(effectiveAuto)} tokens`,

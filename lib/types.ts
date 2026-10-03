@@ -17,6 +17,8 @@ export interface CompactState {
   compactionCount: number;
   /** API-reported totalTokens from the last assistant response. 0 until first response. */
   apiTokenCount: number;
+  /** True when a ≥auto observation was blocked by ordinary guards; pursued mechanically at warn. */
+  missedAuto: boolean;
 }
 
 export interface CompactDecision {

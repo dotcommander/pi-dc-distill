@@ -36,8 +36,11 @@ The monitor checks at `agent_settled`, after a response and its tool calls settl
 It normally attempts compaction at the lower of 120,000 tokens or 20,000 tokens
 before Pi's native trigger. A startup warmup, 120-second cooldown, in-flight
 latch, post-compaction growth guard, and Pi-sync guard can delay attempts.
-At the native trigger it issues a cooperative warning; at the reported context
-limit, emergency compaction bypasses cooldown and sync.
+At the native trigger it issues a cooperative warning until the headroom floor
+(`contextWindow - 20,480`, the answer budget pi-ai's request clamp protects) is
+reached; at or above the floor, and at the reported context limit, mechanical
+compaction bypasses cooldown and sync guards. A missed auto window blocked by
+ordinary guards is pursued mechanically at the next unblocked warn-band check.
 
 Pi's `compaction.enabled: false` disables the autonomous monitor. See
 [trigger policy](settings.md#trigger-policy) for exact geometry and small-window

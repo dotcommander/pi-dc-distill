@@ -7,7 +7,7 @@ import {
   resolvePiCompactionSettings, resolveDistillFeatureSettings,
   type PiCompactionSettings, type DistillFeatureSettings,
 } from "./settings.ts";
-import { assessCompaction, resolveTriggerThresholds, type CompactEvaluation, validateTriggerGeometry } from "./trigger.ts";
+import { TRIGGER_POLICY_VERSION, assessCompaction, resolveTriggerThresholds, type CompactEvaluation, validateTriggerGeometry } from "./trigger.ts";
 import { Tier } from "./types.ts";
 
 export interface SessionLease { readonly sessionId: string; readonly generation: number }
@@ -261,7 +261,20 @@ export class Phase1Controller {
       this.lastWarnTime = this.clock();
     }
     this.diagnosticKey = null;
+    this.logDecided(ctx, evaluation);
     return evaluation;
+  }
+  private logDecided(ctx: ExtensionContext, evaluation: CompactEvaluation): void {
+    try {
+      const model = ctx.model ? `${ctx.model.provider}/${ctx.model.id}` : "unknown";
+      const decision = evaluation.decision;
+      this.monitor.diagnostic(["auto-check decided",
+        `tier=${decision ? Tier[decision.tier] : "unknown"}`,
+        `reason=${decision?.reason ?? "unknown"}`,
+        "source=agent_settled", `policy=v${TRIGGER_POLICY_VERSION}`, `model=${model}`,
+        `tokens=${this.monitor.state.tokenEstimate}`,
+      ].join(" "));
+    } catch { /* Diagnostics cannot interrupt policy. */ }
   }
   private logBlock(ctx: ExtensionContext, reason: string, thresholds: CompactEvaluation["thresholds"]): void {
     try {

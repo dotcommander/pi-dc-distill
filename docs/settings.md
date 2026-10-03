@@ -95,6 +95,16 @@ and concurrency guards still apply. Very small windows use fixed internal floors
 keep auto, warn, and emergency ordered. If an older Pi cannot report a context
 window, dc-distill falls back to 100,000 / 140,000 / 160,000 tokens.
 
+Trigger policy version 2 adds a headroom floor at
+`max(warn, contextWindow - 20,480)` (a 16,384-token answer budget plus pi-ai's
+4,096-token request-clamp margin): at or above the floor the monitor compacts
+mechanically with emergency-grade guard bypass instead of steering, because
+pi-ai's request clamp would leave less than 16,384 answer tokens. A missed auto
+window (an at-or-above-auto observation blocked by cooldown, growth, sync, or
+post-compaction guards) is pursued mechanically at the next unblocked
+warn-band observation instead of being answered with steering. The fallback
+floor clamps to the 140,000 fallback warn line.
+
 The monitor retains a fixed 120-second cooldown and post-compaction growth
 guard. These are loop-safety mechanics, not user settings. `auto-check blocked`
 lines in `~/.pi/agent/data/dc-distill/diag.log` record the resolved geometry and its

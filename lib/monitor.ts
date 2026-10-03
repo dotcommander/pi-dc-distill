@@ -53,6 +53,7 @@ export class Monitor {
       exchangeCount: 0,
       compactionCount: 0,
       apiTokenCount: 0,
+      missedAuto: false,
     }
   }
 
@@ -120,6 +121,7 @@ export class Monitor {
     this.state.apiTokenCount = 0
     this.state.repeatBaselineTokens = null
     this.state.awaitingPostCompactionSample = true
+    this.state.missedAuto = false
   }
 
   /** Diagnostic: append to the selected agent's data/dc-distill/diag.log. */
