@@ -262,8 +262,15 @@ matching commits produce effects once. Initialization rechecks its lifetime leas
 after every await; compatibility handles arriving after shutdown are disposed.
 Model/tree changes revise context without restarting initialization or warmup.
 
-`session_compact_failed` records the terminal outcome and clears the current
-attempt. Non-primary hooks are no-ops, except `session_before_compact`, which
+`session_compact_failed` releases an attempt only when its identity matches.
+An anonymous aborted event can release a reservation whose preparation was
+cancelled or whose returned result can no longer be appended. Other anonymous
+failures retain the ambiguous reservation: a late or foreign failure must not
+release another attempt. Recovery requires the originating terminal callback or
+a lifecycle reset, such as session replacement or shutdown. Correlating a native
+non-aborted failure with its owning attempt requires host-supplied identity;
+automatic release for that case is deferred until Pi exposes it.
+Non-primary hooks are no-ops, except `session_before_compact`, which
 cancels to prevent LLM fallback. Missing or invalid identity cannot claim ownership.
 Owner shutdown retires the lifetime so a new primary session can claim cleanly.
 Store references are captured before awaits; an already-started write may finish,

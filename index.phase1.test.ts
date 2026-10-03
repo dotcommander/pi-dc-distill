@@ -1,4 +1,4 @@
-import { describe, expect, test } from "bun:test";
+import { describe, expect, spyOn, test } from "bun:test";
 import { createDistillExtension } from "./index.ts";
 import { createStubCtx, simulate as rawSimulate } from "./tests/harness/fake-pi.ts";
 import { withPreparationBranch } from "./tests/harness/preparation-fixture.ts";
@@ -7,6 +7,7 @@ const simulate = { ...rawSimulate, hook: (stub: Parameters<typeof rawSimulate.ho
 
 import { DistillStore } from "./lib/store.ts";
 import { DISTILL_CONTINUATION_MESSAGE_TYPE } from "./lib/continuation.ts";
+import { Monitor } from "./lib/monitor.ts";
 
 function deferred<T>() {
   let resolve!: (value: T) => void;
@@ -257,4 +258,96 @@ test("monitor checks resume after a cancelled native attempt is released", async
     { reason: "threshold", aborted: true, willRetry: false, fromExtension: false });
   await simulate.hook(stub, "agent_settled", {});
   expect(compactCalls(stub)).toHaveLength(1);
+});
+
+describe("matching terminal commit rejection", () => {
+  for (const change of ["context-revision-changed", "model-changed", "settings-changed", "snapshot-unavailable"] as const) {
+    for (const diagnosticThrows of [false, true]) {
+      test(`${change} releases only its attempt when diagnostics ${diagnosticThrows ? "throw" : "succeed"}`, async () => {
+        let reserveTokens = 16_384;
+        const diagnostics: string[] = [];
+        const diagnostic = spyOn(Monitor.prototype, "diagnostic").mockImplementation((message) => {
+          if (diagnosticThrows) throw new Error("diagnostic unavailable");
+          diagnostics.push(message);
+        });
+        try {
+          const { stub, logs, dumps } = fixture({ loadCompactionSettings: () => ({ enabled: true, reserveTokens }) });
+          stub.ctx.model = { provider: "fake", id: "original", contextWindow: 200_000 } as any;
+          await simulate.hook(stub, "session_start", {});
+          const [prepared] = await simulate.hook(stub, "session_before_compact", event());
+          const committed = { fromExtension: true, compactionEntry: { type: "compaction", ...(prepared as any).compaction } };
+          const originalModel = stub.ctx.model;
+          if (change === "context-revision-changed") await simulate.hook(stub, "session_tree", {});
+          if (change === "model-changed") stub.ctx.model = { ...originalModel, id: "changed" } as any;
+          if (change === "settings-changed") reserveTokens++;
+          if (change === "snapshot-unavailable") stub.ctx.model = new Proxy(originalModel!, {
+            get() { throw new Error("model unavailable"); },
+          });
+          await simulate.hook(stub, "session_compact", committed);
+          expect(logs).toHaveLength(0);
+          expect(dumps).toHaveLength(0);
+          expect(continuationCalls(stub)).toHaveLength(0);
+          if (!diagnosticThrows) expect(diagnostics).toContain(`compaction commit rejected reason=${change} reservation=released`);
+          stub.ctx.model = originalModel;
+          const [fresh] = await simulate.hook(stub, "session_before_compact", event());
+          expect(fresh).toHaveProperty("compaction.details.version", 13);
+          // A late rejected event must not clear the newly prepared reservation.
+          await simulate.hook(stub, "session_compact", committed);
+          expect((await simulate.hook(stub, "session_before_compact", event()))[0]).toEqual({ cancel: true });
+          await simulate.hook(stub, "session_compact", {
+            fromExtension: true, compactionEntry: { type: "compaction", ...(fresh as any).compaction },
+          });
+          expect(logs).toHaveLength(1);
+        } finally { diagnostic.mockRestore(); }
+      });
+    }
+  }
+  test("foreign terminal events preserve a prepared reservation", async () => {
+    const { stub, logs } = fixture();
+    await simulate.hook(stub, "session_start", {});
+    const [prepared] = await simulate.hook(stub, "session_before_compact", event());
+    const entry = { type: "compaction", ...(prepared as any).compaction };
+    await simulate.hook(stub, "session_compact", { fromExtension: false, compactionEntry: entry });
+    await simulate.hook(stub, "session_compact", { fromExtension: true, compactionEntry: {
+      ...entry, details: { ...entry.details, attemptId: "foreign" },
+    } });
+    expect((await simulate.hook(stub, "session_before_compact", event()))[0]).toEqual({ cancel: true });
+    await simulate.hook(stub, "session_compact", { fromExtension: true, compactionEntry: entry });
+    expect(logs).toHaveLength(1);
+  });
+});
+
+test("ambiguous failure reports recovery and a lifecycle reset restores admission", async () => {
+  const diagnostics: string[] = [];
+  const diagnostic = spyOn(Monitor.prototype, "diagnostic").mockImplementation(message => { diagnostics.push(message); });
+  try {
+    const { stub, logs, dumps } = fixture();
+    await simulate.hook(stub, "session_start", {});
+    await simulate.hook(stub, "session_before_compact", event());
+    await simulate.hook(stub, "session_compact_failed", { aborted: false, reason: "threshold", errorMessage: "ENOSPC" });
+    expect(diagnostics).toContain("compaction failure ownership=ambiguous reservation=retained recovery=originating-terminal-callback-or-session-reset");
+    expect((await simulate.hook(stub, "session_before_compact", event()))[0]).toEqual({ cancel: true });
+    expect(logs).toHaveLength(0);
+    expect(dumps).toHaveLength(0);
+    await simulate.hook(stub, "session_shutdown", {});
+    await simulate.hook(stub, "session_start", {});
+    expect((await simulate.hook(stub, "session_before_compact", event()))[0]).toHaveProperty("compaction.details.version", 13);
+  } finally { diagnostic.mockRestore(); }
+});
+
+test("ambiguous failure cannot block the originating callback even when diagnostics fail", async () => {
+  const diagnostic = spyOn(Monitor.prototype, "diagnostic").mockImplementation(() => { throw new Error("diagnostic unavailable"); });
+  try {
+    const { stub, store } = fixture();
+    store.appendFailure = async () => { throw new Error("failure store unavailable"); };
+    await simulate.hook(stub, "session_start", {});
+    stub.ctx.getContextUsage = () => ({ tokens: 200_000, contextWindow: 200_000, percent: 100 });
+    await simulate.hook(stub, "agent_settled", {});
+    const callbacks = compactCalls(stub)[0]!.args[0] as any;
+    await simulate.hook(stub, "session_compact_failed", { aborted: false, reason: "threshold", errorMessage: "ENOSPC" });
+    await simulate.hook(stub, "agent_settled", {});
+    expect(compactCalls(stub)).toHaveLength(1);
+    callbacks.onError(new Error("originating failure"));
+    expect((await simulate.hook(stub, "session_before_compact", event()))[0]).toHaveProperty("compaction.details.version", 13);
+  } finally { diagnostic.mockRestore(); }
 });

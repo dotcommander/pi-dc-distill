@@ -26,6 +26,9 @@ export interface Phase1Options {
   loadCompactionSettings?: (cwd: string) => PiCompactionSettings;
   loadFeatureSettings?: (cwd: string) => DistillFeatureSettings;
 }
+export type CommitRejectionReason = "unowned-attempt" | "commit-in-flight" | "preparation-cancelled"
+  | "context-revision-changed" | "model-changed" | "settings-changed" | "snapshot-unavailable";
+export type CommitOutcome = { accepted: true } | { accepted: false; reason: CommitRejectionReason };
 type SampleStatus = "finite-positive" | "unavailable" | "invalid" | "thrown";
 
 /** Shared-runtime lifecycle and autonomous policy; durable transactions stay in index. */
@@ -197,9 +200,21 @@ export class Phase1Controller {
     return this.ticket === ticket && this.isCurrent(ticket.lease, ctx);
   }
   beginCommit(ticket: AttemptTicket, ctx: ExtensionContext): boolean {
-    if (!this.snapshotMatches(ticket, ctx, false) || this.preparationCancelled || this.committing) return false;
-    this.committing = true;
-    return true;
+    return this.beginCommitOutcome(ticket, ctx).accepted;
+  }
+  beginCommitOutcome(ticket: AttemptTicket, ctx: ExtensionContext): CommitOutcome {
+    try {
+      if (!this.ownsAttempt(ticket, ctx)) return { accepted: false, reason: "unowned-attempt" };
+      if (this.committing) return { accepted: false, reason: "commit-in-flight" };
+      if (this.preparationCancelled) return { accepted: false, reason: "preparation-cancelled" };
+      if (ticket.contextRevision !== this.contextRevision) return { accepted: false, reason: "context-revision-changed" };
+      if (ticket.modelIdentity !== this.modelIdentity(ctx)) return { accepted: false, reason: "model-changed" };
+      this.refreshSettings(ctx);
+      if (ticket.settings.enabled !== this.compactionSettings.enabled
+        || ticket.settings.reserveTokens !== this.compactionSettings.reserveTokens) return { accepted: false, reason: "settings-changed" };
+      this.committing = true;
+      return { accepted: true };
+    } catch { return { accepted: false, reason: "snapshot-unavailable" }; }
   }
   finishAttempt(ticket: AttemptTicket | null): boolean {
     if (ticket === null || this.ticket !== ticket) return false;

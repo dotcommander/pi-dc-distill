@@ -655,8 +655,16 @@ function createExtension(pi: ExtensionAPI, options: DistillExtensionOptions = {}
         // An unowned or stale event cannot clear the current reservation.
         if (!matches) return;
 
-        if (!runtime.beginCommit(ticket, ctx)) return;
+        let releaseReservation = false;
         try {
+          const admission = runtime.beginCommitOutcome(ticket, ctx);
+          if (!admission.accepted && (admission.reason === "unowned-attempt" || admission.reason === "commit-in-flight")) return;
+          releaseReservation = true;
+          if (!admission.accepted) {
+            try { runtime.monitor.diagnostic(`compaction commit rejected reason=${admission.reason} reservation=released`); }
+            catch { /* Rejection diagnostics cannot prevent scoped terminal cleanup. */ }
+            return;
+          }
           let usage: ReturnType<ExtensionContext["getContextUsage"]>;
           try { usage = ctx.getContextUsage?.(); } catch { usage = undefined; }
           const fullContextAfter = typeof usage?.tokens === "number" && Number.isFinite(usage.tokens) && usage.tokens > 0
@@ -713,7 +721,7 @@ function createExtension(pi: ExtensionAPI, options: DistillExtensionOptions = {}
           }
           if (pending.autonomous) reconcileContinuation(runtime, ctx, pending.attemptId);
         } finally {
-          clearAttempt(runtime, ticket);
+          if (releaseReservation) clearAttempt(runtime, ticket);
         }
       },
 
@@ -725,6 +733,10 @@ function createExtension(pi: ExtensionAPI, options: DistillExtensionOptions = {}
         // ownership until the captured callback, identified terminal event, or
         // session reset. Guessing from reason/fromExtension could clear B for A.
         const identified = (event as { attemptId?: unknown }).attemptId === ticket.attemptId;
+        if (!identified && event.aborted !== true) {
+          try { runtime.monitor.diagnostic("compaction failure ownership=ambiguous reservation=retained recovery=originating-terminal-callback-or-session-reset"); }
+          catch { /* A diagnostic cannot change conservative reservation ownership. */ }
+        }
         try {
           const outcome = event.aborted ? "aborted" : "failed";
           const failure = `Compaction ${outcome} (${errorText(event.reason)}): ${errorText(event.errorMessage ?? "no error message")}`;

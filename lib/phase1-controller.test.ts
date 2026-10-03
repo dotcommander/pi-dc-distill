@@ -119,6 +119,22 @@ describe("Phase 1 lifecycle and tickets", () => {
     expect(controller.beginCommit(current, stub.ctx)).toBe(false);
     expect(controller.finishAttempt(current)).toBe(true);
   });
+  test("typed commit rejection preserves foreign, committing, and cancelled ownership", () => {
+    const { stub, controller } = fixture();
+    const old = controller.beginPreparation(stub.ctx)!;
+    controller.start(stub.ctx);
+    const current = controller.beginPreparation(stub.ctx)!;
+    expect(controller.beginCommitOutcome(old, stub.ctx)).toEqual({ accepted: false, reason: "unowned-attempt" });
+    expect(controller.activeAttempt).toBe(current);
+    controller.cancelPreparation(current);
+    expect(controller.beginCommitOutcome(current, stub.ctx)).toEqual({ accepted: false, reason: "preparation-cancelled" });
+    expect(controller.finishAttempt(current)).toBe(true);
+    const next = controller.beginPreparation(stub.ctx)!;
+    expect(controller.beginCommitOutcome(next, stub.ctx)).toEqual({ accepted: true });
+    expect(controller.beginCommitOutcome(next, stub.ctx)).toEqual({ accepted: false, reason: "commit-in-flight" });
+    expect(controller.activeAttempt).toBe(next);
+    expect(controller.commitInFlight).toBe(true);
+  });
   test("late UI handles are disposed after shutdown or same-identity replacement", () => {
     const { stub, controller } = fixture();
     const lease = controller.lease(stub.ctx)!;
@@ -216,5 +232,51 @@ describe("Checkpoint operation ownership", () => {
     setSettings(new Proxy({}, { get() { throw { toString() { throw new Error("broken formatter"); } }; } }));
     controller.monitor.diagnostic = () => { throw new Error("sink unavailable"); };
     expect(() => controller.assess(stub.ctx)).not.toThrow();
+  });
+});
+
+describe("Phase 1 decided diagnostics (policy v2)", () => {
+  test("decided assessments log one policy=v2 line; blocked assessments log none", () => {
+    const { stub, controller, diagnostics, usage, advance } = fixture();
+    controller.warmupTurnsRemaining = 0;
+    advance();
+    usage(200_000);
+    const evaluation = controller.assess(stub.ctx);
+    expect(evaluation?.decision?.tier).toBe(Tier.Mechanical);
+    expect(evaluation?.decision?.reason).toBe("emergency: approaching context limit");
+    expect(diagnostics).toHaveLength(1);
+    expect(diagnostics[0]).toContain("auto-check decided");
+    expect(diagnostics[0]).toContain("tier=Mechanical");
+    expect(diagnostics[0]).toContain("reason=emergency: approaching context limit");
+    expect(diagnostics[0]).toContain("policy=v2");
+    diagnostics.length = 0;
+    usage(50_000);
+    controller.assess(stub.ctx);
+    expect(diagnostics).toHaveLength(0);
+  });
+  test("warn steer decisions log the decided line after warning cooldown", () => {
+    const { stub, controller, diagnostics, usage, advance, setSettings } = fixture();
+    controller.warmupTurnsRemaining = 0;
+    advance();
+    setSettings({ compaction: { enabled: true, reserveTokens: 50_000 } });
+    usage(160_000);
+    const evaluation = controller.assess(stub.ctx);
+    expect(evaluation?.decision?.tier).toBe(Tier.Warn);
+    expect(diagnostics).toHaveLength(1);
+    expect(diagnostics[0]).toContain("auto-check decided");
+    expect(diagnostics[0]).toContain("tier=Warn");
+    expect(diagnostics[0]).toContain("finish current unit");
+    expect(diagnostics[0]).toContain("policy=v2");
+  });
+  test("a headroom-floor decision logs the decided line during cooldown", () => {
+    const { stub, controller, diagnostics, usage, setSettings } = fixture();
+    controller.warmupTurnsRemaining = 0;
+    setSettings({ compaction: { enabled: true, reserveTokens: 50_000 } });
+    usage(185_000); // above floor 179,520; no advance() so cooldown is active
+    const evaluation = controller.assess(stub.ctx);
+    expect(evaluation?.decision?.reason).toBe("headroom-floor: answer headroom exhausted — compact now");
+    expect(diagnostics).toHaveLength(1);
+    expect(diagnostics[0]).toContain("auto-check decided");
+    expect(diagnostics[0]).toContain("policy=v2");
   });
 });
