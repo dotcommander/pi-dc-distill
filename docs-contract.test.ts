@@ -123,4 +123,30 @@ describe("runtime-contract drift audit", () => {
     expect(architecture?.text).toContain("agent_settled");
     expect(readme?.text).toContain("agent_settled");
   });
+
+  /** Settings keys the runtime actually reads; owner: lib/settings.ts normalizeDistillFeatureSettings. */
+  const RUNTIME_READ_SETTINGS_KEYS = [
+    'extensionConfig["dc-distill"].toolOutput.enabled',
+    'extensionConfig["dc-distill"].recall.enabled',
+  ] as const;
+
+  test("settings claims match the runtime-read extensionConfig keys", async () => {
+    const docs = await loadDocs();
+    const settings = docs.find((doc) => doc.file.endsWith(join("docs", "settings.md")));
+    expect(settings).toBeDefined();
+    for (const key of RUNTIME_READ_SETTINGS_KEYS) {
+      expect(
+        settings!.text.includes(key),
+        `docs/settings.md does not document runtime-read key ${key}`,
+      ).toBe(true);
+    }
+    // Both drift classes shipped before: flags existed undocumented, then docs
+    // claimed no extension configuration while the runtime read keys.
+    for (const doc of docs) {
+      expect(
+        doc.text.toLowerCase().includes("no extension configuration"),
+        `${doc.file} claims the extension has no extension configuration while the runtime reads extensionConfig keys`,
+      ).toBe(false);
+    }
+  });
 });
