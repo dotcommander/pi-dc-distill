@@ -179,6 +179,10 @@ export class Phase1Controller {
   cancelPreparation(ticket: AttemptTicket): void {
     if (this.ticket === ticket) this.preparationCancelled = true;
   }
+  /** Whether the active attempt cancelled its own preparation, so no result can commit. */
+  hasCancelledPreparation(): boolean {
+    return this.ticket !== null && this.preparing && this.preparationCancelled;
+  }
   snapshotMatches(ticket: AttemptTicket, ctx: ExtensionContext, checkBranch = true): boolean {
     if (!this.ownsAttempt(ticket, ctx) || ticket.contextRevision !== this.contextRevision
       || ticket.modelIdentity !== this.modelIdentity(ctx)) return false;

@@ -166,7 +166,7 @@ released in `finally`. Historical v8–v12 autonomous continuations remain reada
 
 Session replacement, shutdown, autonomous errors, cancellation, foreign
 compaction, mismatches, and duplicate events cannot create success artifacts.
-`session_compact_failed` releases pending/latch state only when its attempt identity matches. Anonymous failures preserve ambiguous reservations until an originating terminal callback or lifecycle reset; late events cannot clear another attempt. Preparation cancellation likewise retains its reservation.
+`session_compact_failed` releases pending/latch state only when its attempt identity matches. Anonymous failures preserve ambiguous reservations until an originating terminal callback or lifecycle reset; late events cannot clear another attempt. Preparation cancellation likewise retains its reservation, except that an anonymous aborted terminal event — the only terminal callback a native trigger has — releases an attempt that provably cannot commit: one whose preparation the runtime cancelled, or whose returned result can no longer be appended by the host.
 
 ## Trigger Policy
 

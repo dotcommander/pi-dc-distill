@@ -203,3 +203,58 @@ test("postcommit artifacts and their failure diagnostics cannot undo a commit or
   expect(compactCalls(stub)).toHaveLength(0);
   expect((await simulate.hook(stub, "session_before_compact", event()))[0]).toHaveProperty("compaction.details.version", 13);
 });
+
+test("a cancelled native attempt must not wedge later native compactions", async () => {
+  const { stub } = fixture();
+  await simulate.hook(stub, "session_start", {});
+  // Native threshold trigger whose signal aborted at hook entry: dc-distill
+  // cancels silently, and the host always follows with an anonymous aborted
+  // failure event (no attemptId, no ctx.compact callbacks).
+  const aborted = new AbortController();
+  aborted.abort();
+  const cancelled = await simulate.hook(stub, "session_before_compact",
+    { ...event(), reason: "threshold", signal: aborted.signal });
+  expect(cancelled[0]).toEqual({ cancel: true });
+  await simulate.hook(stub, "session_compact_failed",
+    { reason: "threshold", aborted: true, willRetry: false, fromExtension: false });
+  // The next native attempt must be intercepted, not cancelled by a stale latch.
+  const [retried] = await simulate.hook(stub, "session_before_compact", event());
+  expect(retried).toHaveProperty("compaction.details.compactor", "dc-distill");
+});
+
+test("a native abort after a returned result releases the dead reservation", async () => {
+  const { stub } = fixture();
+  await simulate.hook(stub, "session_start", {});
+  const [prepared] = await simulate.hook(stub, "session_before_compact", event());
+  expect(prepared).toHaveProperty("compaction.details.version", 13);
+  // Host aborted after the hook returned its result but before appending it.
+  await simulate.hook(stub, "session_compact_failed",
+    { reason: "threshold", aborted: true, willRetry: false, fromExtension: false });
+  const [retried] = await simulate.hook(stub, "session_before_compact", event());
+  expect(retried).toHaveProperty("compaction.details.version", 13);
+});
+
+test("an anonymous non-aborted failure still preserves the ambiguous reservation", async () => {
+  const { stub } = fixture();
+  await simulate.hook(stub, "session_start", {});
+  const [prepared] = await simulate.hook(stub, "session_before_compact", event());
+  expect(prepared).toHaveProperty("compaction.details.version", 13);
+  await simulate.hook(stub, "session_compact_failed",
+    { reason: "threshold", aborted: false, errorMessage: "Auto-compaction failed: native summary error", fromExtension: false });
+  const [retried] = await simulate.hook(stub, "session_before_compact", event());
+  expect(retried).toEqual({ cancel: true });
+});
+
+test("monitor checks resume after a cancelled native attempt is released", async () => {
+  const { stub } = fixture();
+  await simulate.hook(stub, "session_start", {});
+  stub.ctx.getContextUsage = () => ({ tokens: 200_000, contextWindow: 200_000, percent: 100 });
+  const aborted = new AbortController();
+  aborted.abort();
+  expect((await simulate.hook(stub, "session_before_compact",
+    { ...event(), reason: "threshold", signal: aborted.signal }))[0]).toEqual({ cancel: true });
+  await simulate.hook(stub, "session_compact_failed",
+    { reason: "threshold", aborted: true, willRetry: false, fromExtension: false });
+  await simulate.hook(stub, "agent_settled", {});
+  expect(compactCalls(stub)).toHaveLength(1);
+});

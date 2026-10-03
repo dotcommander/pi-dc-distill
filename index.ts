@@ -733,7 +733,17 @@ function createExtension(pi: ExtensionAPI, options: DistillExtensionOptions = {}
           try { runtime.monitor.diagnostic(failure); } catch { /* Total diagnostics. */ }
           if (!event.aborted) await reportFailure(runtime, [failure]);
         } catch { /* A diagnostic must never release an ambiguously owned attempt. */ }
-        finally { if (identified) clearAttempt(runtime, ticket); }
+        finally {
+          if (identified) clearAttempt(runtime, ticket);
+          else if (event.aborted === true
+            && (runtime.hasCancelledPreparation() || runtime.pending?.ticket === ticket)) {
+            // Native triggers carry no attemptId and no ctx.compact callbacks;
+            // their anonymous aborted event is the attempt's only terminal
+            // callback. Release only provably dead attempts: one this runtime
+            // cancelled, or one whose returned result can no longer be appended.
+            clearAttempt(runtime, ticket);
+          }
+        }
       },
     },
 
