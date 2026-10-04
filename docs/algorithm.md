@@ -292,8 +292,8 @@ latest human request, latest assistant turn, and latest substantive assistant
 turn. Explicit state and risks receive priority; if protected content cannot
 fit within the safety ceiling, compilation fails rather than slicing structure.
 
-The structured compiler cap is 65,300 code points; the live wire ceiling,
-without a metric prefix, is 65,536. The hard-cap pass drops read/modified
+The structured compiler and the wire summary share one hard cap of
+65,536 code points, and no metric prefix is added to the wire text. The hard-cap pass drops read/modified
 paths, larger list first, then fails closed if necessary. File lists retain at
 most 50 newest paths each and recent tool calls at most 20. Omitted paths are
 counted, not sliced into misleading partial paths.
@@ -400,7 +400,7 @@ does not establish semantic equivalence or optimal weights.
 ## What the sizes and metrics mean
 
 - **Bytes:** the README comparison measures UTF-8 serialized JSONL before and
-  summary text after. Its 75.4% reduction is specific to that fixture.
+  summary text after. Its 67.4% reduction is specific to that fixture.
 - **Unicode code points:** the 8,192 target and 65,536 wire ceiling bound text
   structure, not model tokens. Some turn/preview limits use JavaScript string
   units instead.

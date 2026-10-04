@@ -1,6 +1,6 @@
 <svg xmlns="http://www.w3.org/2000/svg" width="1440" height="900" viewBox="0 0 1440 900" role="img" aria-labelledby="title desc">
 <title id="title">pi-dc-distill: from bulky session to focused resume context</title>
-<desc id="desc">Illustrated terminals compare a synthetic parser session with its compacted summary. The original is 11,988 UTF-8 bytes and the summary is 2,950 bytes, 75.4 percent smaller. Objective, decision, modified files, synthetic checks and next action are retained. Fixture example only, not a general benchmark.</desc>
+<desc id="desc">Illustrated terminals compare a synthetic parser session with its compacted summary. The original is 11,988 UTF-8 bytes and the summary is 3,913 bytes, 67.4 percent smaller. Objective, decision, modified files, synthetic checks and next action are retained. Fixture example only, not a general benchmark.</desc>
 <defs><linearGradient id="bg" x2="1" y2="1"><stop stop-color="#0b1323"/><stop offset="1" stop-color="#111d2e"/></linearGradient></defs>
 <rect width="1440" height="900" rx="28" fill="url(#bg)"/>
 <g font-family="Menlo,Consolas,monospace">
@@ -50,8 +50,8 @@
 <path d="M706 446h26m-9-9 9 9-9 9" fill="none" stroke="#7cdae8" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"/>
 <text x="48" y="778" fill="#e0e9f3" font-size="40" font-weight="700">11,988 bytes</text>
 <text x="48" y="812" fill="#8fa3ba" font-size="22">Serialized JSONL · 13 records</text>
-<text x="768" y="778" fill="#b5ef64" font-size="40" font-weight="700">2,950 bytes</text>
-<text x="768" y="812" fill="#c8dbb3" font-size="22">Summary · 75.4% smaller</text>
+<text x="768" y="778" fill="#b5ef64" font-size="40" font-weight="700">3,913 bytes</text>
+<text x="768" y="812" fill="#c8dbb3" font-size="22">Summary · 67.4% smaller</text>
 <path d="M48 840h1344" stroke="#2b3d53"/>
 <text x="48" y="875" fill="#96abc2" font-size="21">Fixture byte counts, not tokens or a general compression benchmark.</text>
 </g></svg>

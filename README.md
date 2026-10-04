@@ -6,7 +6,7 @@
 [![Bun](https://img.shields.io/badge/Bun-1.4.0-black?logo=bun)](https://bun.sh)
 [![Pi](https://img.shields.io/badge/Pi-1.0.0-6366f1)](https://github.com/earendil-works/pi)
 
-![Illustrated synthetic parser session before and after compaction: 11,988 to 2,950 UTF-8 bytes, with objective, decisions, files, synthetic checks, and next action retained.](docs/assets/distill-before-after.svg)
+![Illustrated synthetic parser session before and after compaction: 11,988 to 3,913 UTF-8 bytes, with objective, decisions, files, synthetic checks, and next action retained.](docs/assets/distill-before-after.svg)
 
 pi-dc-distill is a compaction extension for
 [Pi](https://github.com/earendil-works/pi). When a session grows long, it
@@ -145,7 +145,7 @@ Current fixture result:
 
 ```text
 Before: 11988 UTF-8 bytes of serialized JSONL (13 records)
-After:  2950 UTF-8 bytes of summary (75.4% smaller)
+After:  3913 UTF-8 bytes of summary (67.4% smaller)
 ```
 
 These numbers describe this fixture only — they are not model-token
