@@ -28,11 +28,65 @@ test("diagnostic sinks share dc-distill while preserving historical files and or
     writeFileSync(join(old, "diag.ndjson"), "historical");
   });
   const entry = JSON.parse(readFileSync(join(dir, "diag.ndjson"), "utf8"));
-  expect(entry).toMatchObject({ level: "warn", scope: "test", msg: "first", err: { name: "Error", message: "detail" } });
+  expect(entry).toMatchObject({ level: "warn", scope: "test", msg: "first", session: "unknown", err: { name: "Error", message: "detail" } });
+  expect(Number.isInteger(entry.pid) && entry.pid > 0).toBe(true);
   expect(Number.isFinite(Date.parse(entry.ts))).toBe(true);
-  expect(readFileSync(join(dir, "diag.log"), "utf8").split("\n").filter(Boolean).map((line) => line.slice(25))).toEqual(["one", "two", "three"]);
+  expect(readFileSync(join(dir, "diag.log"), "utf8").split("\n").filter(Boolean).map((line) => line.slice(25))).toEqual(
+    ["one", "two", "three"].map((msg) => `${msg} session=unknown pid=${entry.pid}`),
+  );
   expect(readFileSync(join(home, ".pi/data/pi-dc-distill/diag.ndjson"), "utf8")).toBe("historical");
   expect(stderr).toBe("");
+});
+
+test("all shared sinks capture full owner provenance and clear it after shutdown", () => {
+  const session = "primary-session-full-identity-123456789";
+  const { dir } = isolated(`
+    Diag.setOwnerSession(${JSON.stringify(session)});
+    Diag.warn("test", "owned warn");
+    Diag.error("test", "owned error");
+    Diag.debug("test", "owned debug");
+    const queued = Diag.monitor("owned queued");
+    const tagged = Diag.monitor("already tagged session=${session} pid=" + process.pid);
+    Diag.setOwnerSession(null);
+    Diag.warn("test", "after shutdown");
+    await Promise.all([queued, tagged, Diag.monitor("unknown queued")]);
+  `);
+  const entries = readFileSync(join(dir, "diag.ndjson"), "utf8").trim().split("\n").map((line) => JSON.parse(line));
+  expect(entries.map((entry) => entry.session)).toEqual([session, session, session, "unknown"]);
+  expect(new Set(entries.map((entry) => entry.pid)).size).toBe(1);
+  expect(Number.isInteger(entries[0].pid) && entries[0].pid > 0).toBe(true);
+  const lines = readFileSync(join(dir, "diag.log"), "utf8").trim().split("\n");
+  expect(lines[0]).toContain(`session=${session} pid=${entries[0].pid}`);
+  expect(lines[1].match(/session=/g)).toHaveLength(1);
+  expect(lines[1].match(/pid=/g)).toHaveLength(1);
+  expect(lines[2]).toContain(`session=unknown pid=${entries[0].pid}`);
+});
+
+test("invalid owner identity and hostile error formatting remain best effort and total", () => {
+  const { dir } = isolated(`
+    Diag.setOwnerSession("   ");
+    Diag.warn("test", "hostile error", { toString() { throw new Error("cannot format"); } });
+    Diag.error("test", "still usable");
+    await Diag.monitor("still usable");
+  `);
+  const entries = readFileSync(join(dir, "diag.ndjson"), "utf8").trim().split("\n").map((line) => JSON.parse(line));
+  expect(entries).toHaveLength(2);
+  expect(entries[0]).toMatchObject({ session: "unknown", err: { message: "unavailable error details" } });
+  expect(entries[1]).toMatchObject({ session: "unknown", msg: "still usable" });
+});
+
+test("text session provenance escapes whitespace and control characters without losing NDJSON identity", () => {
+  const session = "owner\nnext field\t\u0000";
+  const { dir } = isolated(`
+    Diag.setOwnerSession(${JSON.stringify(session)});
+    Diag.warn("test", "identity");
+    await Diag.monitor("identity");
+  `);
+  const entry = JSON.parse(readFileSync(join(dir, "diag.ndjson"), "utf8"));
+  expect(entry.session).toBe(session);
+  const lines = readFileSync(join(dir, "diag.log"), "utf8").trim().split("\n");
+  expect(lines).toHaveLength(1);
+  expect(lines[0]).toContain("session=owner%0Anext%20field%09%00");
 });
 
 test("both sinks rotate on later writes and preserve existing archives", () => {

@@ -19,6 +19,16 @@ import { Path } from "./paths.ts";
 
 const MAX_LOG_BYTES = 5 * 1024 * 1024;
 let monitorWrites: Promise<void> = Promise.resolve();
+let ownerSession: string | null = null;
+
+function sessionIdentity(value: string | null): string {
+  return typeof value === "string" && value.trim().length > 0 ? value : "unknown";
+}
+
+/** Preserve identity while keeping text records on one line and one field. */
+export function diagnosticSessionLabel(value: string | null): string {
+  return sessionIdentity(value).replace(/[\s\x00-\x1f\x7f]/g, (character) => encodeURIComponent(character));
+}
 
 /** Rotate before each append. Existing archives are never overwritten. */
 function rotate(path: string): void {
@@ -46,8 +56,16 @@ function appendDiagnostic(line: string): void {
   }
 }
 
-function appendMonitor(msg: string): Promise<void> {
-  const line = `${new Date().toISOString()} ${msg}\n`;
+function appendMonitor(msg: string, session: string | null = ownerSession): Promise<void> {
+  let line: string;
+  try {
+    // Capture provenance at submission, before asynchronous storage or owner replacement.
+    const suffix = [
+      /(?:^|\s)session=/.test(msg) ? "" : `session=${diagnosticSessionLabel(session)}`,
+      /(?:^|\s)pid=/.test(msg) ? "" : `pid=${process.pid}`,
+    ].filter(Boolean).join(" ");
+    line = `${new Date().toISOString()} ${msg}${suffix ? ` ${suffix}` : ""}\n`;
+  } catch { return Promise.resolve(); }
   monitorWrites = monitorWrites.then(async () => {
     try {
       const path = Path.data("dc-distill").join("diag.log");
@@ -66,6 +84,8 @@ interface DiagEntry {
   level: DiagLevel;
   scope: string;
   msg: string;
+  session: string;
+  pid: number;
   err?: { name?: string; message: string; stack?: string };
 }
 
@@ -73,13 +93,15 @@ const DEBUG_ON = !!process.env.PI_DEBUG;
 const DEBUG_STACK = process.env.PI_DEBUG === "stack";
 
 function normalizeErr(err: unknown): DiagEntry["err"] | undefined {
-  if (err === undefined || err === null) return undefined;
-  if (err instanceof Error) {
-    return DEBUG_STACK
-      ? { name: err.name, message: err.message, stack: err.stack }
-      : { name: err.name, message: err.message };
-  }
-  return { message: String(err) };
+  try {
+    if (err === undefined || err === null) return undefined;
+    if (err instanceof Error) {
+      return DEBUG_STACK
+        ? { name: err.name, message: err.message, stack: err.stack }
+        : { name: err.name, message: err.message };
+    }
+    return { message: String(err) };
+  } catch { return { message: "unavailable error details" }; }
 }
 
 function write(
@@ -88,28 +110,38 @@ function write(
   msg: string,
   err?: unknown,
 ): void {
-  const entry: DiagEntry = {
-    level,
-    scope: scope || "unknown",
-    msg,
-    err: normalizeErr(err),
-  };
-  const timestamped = { ts: new Date().toISOString(), ...entry };
-  appendDiagnostic(JSON.stringify(timestamped) + "\n");
-  if (DEBUG_ON) {
-    try {
-      const errStr = entry.err ? ` — ${entry.err.message}` : "";
-      process.stderr.write(`[${entry.scope}] ${level}: ${msg}${errStr}\n`);
-    } catch {
-      // Swallowed: stderr write must not poison the caller.
+  try {
+    const entry: DiagEntry = {
+      level,
+      scope: scope || "unknown",
+      msg,
+      session: sessionIdentity(ownerSession),
+      pid: process.pid,
+      err: normalizeErr(err),
+    };
+    const timestamped = { ts: new Date().toISOString(), ...entry };
+    appendDiagnostic(JSON.stringify(timestamped) + "\n");
+    if (DEBUG_ON) {
+      try {
+        const errStr = entry.err ? ` — ${entry.err.message}` : "";
+        process.stderr.write(`[${entry.scope}] ${level}: ${msg}${errStr}\n`);
+      } catch {
+        // Swallowed: stderr write must not poison the caller.
+      }
     }
+  } catch {
+    // Formatting, hostile error objects, and storage must never poison the caller.
   }
 }
 
 export const Diag = {
+  /** Only the accepted primary-session lifecycle changes shared diagnostic ownership. */
+  setOwnerSession(session: string | null): void {
+    ownerSession = typeof session === "string" && session.trim().length > 0 ? session : null;
+  },
   /** Serialized text sink used by the asynchronous compaction monitor. */
-  monitor(msg: string): Promise<void> {
-    return appendMonitor(msg);
+  monitor(msg: string, session?: string | null): Promise<void> {
+    return appendMonitor(msg, session);
   },
   warn(scope: string, msg: string, err?: unknown): void {
     write("warn", scope, msg, err);

@@ -11,7 +11,7 @@ const FALLBACK_AUTO_THRESHOLD = 100_000;
 const FALLBACK_WARN_THRESHOLD = 140_000;
 const FALLBACK_EMERGENCY_THRESHOLD = 160_000;
 /** Preferred autonomous boundary when Pi's own safety geometry allows it. */
-export const TRIGGER_POLICY_VERSION = 2;
+export const TRIGGER_POLICY_VERSION = 3;
 export const TRIGGER_POLICY_NAME = "distill-fixed-cap-lead";
 export const AUTO_TARGET_TOKENS = 120_000;
 /** dc-distill prefers this lead before Pi's own automatic trigger. */
@@ -38,6 +38,8 @@ const MIN_WARN_THRESHOLD = 4_000;
  */
 export interface TriggerOptions {
   cooldownMs?: number;
+  /** Trusted restored branch with no prior compaction; controller still owns warmup and current sync. */
+  skipStartupCooldown?: boolean;
   /** Active model context window reported by Pi. */
   contextWindow?: number;
   /** Pi's effective global + project compaction settings. */
@@ -288,7 +290,7 @@ export function assessCompaction(
     return blocked("below-auto");
   }
 
-  if (now - state.lastCompactionTime < cooldownMs) {
+  if (!options.skipStartupCooldown && now - state.lastCompactionTime < cooldownMs) {
     // Estimate is at or above auto here; the window is missed while blocked.
     updates.missedAuto = true;
     return blocked("cooldown");

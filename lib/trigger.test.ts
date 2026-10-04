@@ -209,7 +209,7 @@ test("windows below three tokens disable even emergency autonomous admission", (
 
 const win200r50 = { contextWindow: 200_000, compaction: { ...pi, reserveTokens: 50_000 } };
 
-describe("trigger policy v2 — headroom floor", () => {
+describe("trigger policy v3 — headroom floor", () => {
   test("resolves the floor at window minus answer headroom and pi-ai safety margin", () => {
     const thresholds = resolveTriggerThresholds(win200r50);
     expect(thresholds.headroomFloor).toEqual({ effective: 179_520, source: "pi-derived" });
@@ -257,7 +257,7 @@ describe("trigger policy v2 — headroom floor", () => {
   });
 });
 
-describe("trigger policy v2 — missed-auto pursuit", () => {
+describe("trigger policy v3 — missed-auto pursuit", () => {
   test("a blocked at-auto observation sets the marker and pursuit compacts at warn", () => {
     const state = atTokens(130_000, { lastCompactionTime: Date.now() });
     const blocked1 = assessCompaction(state, true, win200r50, Date.now());
@@ -312,7 +312,7 @@ describe("trigger policy v2 — missed-auto pursuit", () => {
   });
 });
 
-describe("trigger policy v2 — geometry", () => {
+describe("trigger policy v3 — geometry", () => {
   test("keeps auto <= warn <= headroomFloor <= emergency across window and reserve sizes", () => {
     for (const contextWindow of [3, 8_000, 32_000, 128_000, 200_000, 1_000_000]) {
       for (const reserveTokens of [0, 4_000, 16_384, 50_000, 200_000]) {
@@ -335,12 +335,27 @@ describe("trigger policy v2 — geometry", () => {
   });
 });
 
-describe("trigger policy v2 — version", () => {
-  test("exports policy version 2 with the frozen cap, lead, and headroom constants", () => {
-    expect(TRIGGER_POLICY_VERSION).toBe(2);
+describe("trigger policy v3 — version", () => {
+  test("exports policy version 3 with the frozen cap, lead, and headroom constants", () => {
+    expect(TRIGGER_POLICY_VERSION).toBe(3);
     expect(AUTO_TARGET_TOKENS).toBe(120_000);
     expect(DISTILL_LEAD_TOKENS).toBe(20_000);
     expect(ANSWER_HEADROOM_TOKENS).toBe(16_384);
     expect(PI_AI_SAFETY_MARGIN_TOKENS).toBe(4_096);
+  });
+});
+
+describe("policy v3 startup exemption", () => {
+  const options = { contextWindow: 200_000, compaction: pi, skipStartupCooldown: true };
+  test("startup exemption affects cooldown only", () => {
+    const state = atTokens(130_000, { lastCompactionTime: 1_000_000 });
+    expect(assessCompaction(state, true, options, 1_000_000).decision?.tier).toBe(Tier.Mechanical);
+    expect(assessCompaction(state, false, options, 1_000_000).blockedBy).toBe("missing-pi-sync");
+    expect(assessCompaction({ ...state, awaitingPostCompactionSample: true }, true, options, 1_000_000).blockedBy)
+      .toBe("post-compaction-sample");
+    expect(assessCompaction({ ...state, repeatBaselineTokens: 130_000 }, true, options, 1_000_000).blockedBy)
+      .toBe("repeat-growth");
+    expect(assessCompaction(state, true, { ...options, compaction: { ...pi, enabled: false } }, 1_000_000).blockedBy)
+      .toBe("disabled");
   });
 });

@@ -1,5 +1,5 @@
 import type { CompactState } from "./types.ts"
-import { Diag } from "./diag-support.ts";
+import { Diag, diagnosticSessionLabel } from "./diag-support.ts";
 
 interface MessageLike {
   role: string
@@ -29,7 +29,7 @@ function contentBlockText(item: Record<string, unknown>): string {
 
 export class Monitor {
   state: CompactState
-  /** Short owner-session id (first 8 chars) tagging monitor diagnostics for attribution in the shared diag.log. */
+  /** Owner-session identity tagging monitor diagnostics for attribution in the shared diag.log. */
   sessionTag: string | null = null
   private _recorded = false // diagnostic: has record() ever been called?
   private _hasPiSynced = false // has ctx.getContextUsage() ever returned a positive token count?
@@ -113,6 +113,14 @@ export class Monitor {
     return false
   }
 
+  /** Restore guard history without using a persisted heuristic as host usage. */
+  restoreCompaction(timestamp: number): void {
+    this.state.lastCompactionTime = timestamp
+    this.state.repeatBaselineTokens = null
+    this.state.awaitingPostCompactionSample = true
+    this.state.missedAuto = false
+  }
+
   recordCompaction(newTokenEstimate: number): void {
     this.state.lastCompactionTime = this.clock()
     this.state.exchangeCount = 0
@@ -132,7 +140,8 @@ export class Monitor {
   }
 
   private _diagLog(msg: string): void {
-    void Diag.monitor(this.sessionTag ? `${msg} session=${this.sessionTag}` : msg)
+    const provenance = `session=${diagnosticSessionLabel(this.sessionTag)} pid=${process.pid}`
+    void Diag.monitor(msg.includes(provenance) ? msg : `${msg} ${provenance}`)
   }
 
   reset(): void {

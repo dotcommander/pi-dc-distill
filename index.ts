@@ -212,10 +212,16 @@ function reconcileContinuation(runtime: DistillRuntime, ctx: ExtensionContext, c
 async function independentEffect(runtime: DistillRuntime, label: string, effect: () => unknown): Promise<void> {
   const store = runtime.store;
   try { await effect(); }
-  catch (error) {
-    const message = `${label} failed: ${errorText(error)}`;
-    try { runtime.monitor.diagnostic(message); } catch { /* Independent best effort diagnostics. */ }
-    await reportFailure(runtime, [message], undefined, store);
+  catch {
+    // One retry: log writes are lock-serialized, so a first failure is most
+    // plausibly transient contention or rotation. Never throws into the host
+    // callback — the second failure falls through to best-effort reporting.
+    try { await effect(); return; }
+    catch (secondError) {
+      const message = `${label} failed: ${errorText(secondError)}`;
+      try { runtime.monitor.diagnostic(message); } catch { /* Independent best effort diagnostics. */ }
+      await reportFailure(runtime, [message], undefined, store);
+    }
   }
 }
 
@@ -606,6 +612,7 @@ function createExtension(pi: ExtensionAPI, options: DistillExtensionOptions = {}
       model_select: async (_event, ctx) => {
         if (!isOwner(runtime, ctx)) return;
         runtime.contextChanged(ctx);
+        runtime.admissionContextChanged(ctx);
         runtime.refreshSettings(ctx);
       },
 
@@ -618,6 +625,7 @@ function createExtension(pi: ExtensionAPI, options: DistillExtensionOptions = {}
       session_tree: async (_event, ctx) => {
         if (!isOwner(runtime, ctx)) return;
         runtime.contextChanged(ctx);
+        runtime.admissionContextChanged(ctx, true);
         reconcileContinuation(runtime, ctx);
         await reconcileRecall(runtime, ctx);
       },
@@ -626,6 +634,11 @@ function createExtension(pi: ExtensionAPI, options: DistillExtensionOptions = {}
         if (!isOwner(runtime, ctx)) return;
         if (!event.fromExtension && runtime.ownerSessionId) cancelContinuationCallback(runtime.ownerSessionId);
         const pending = runtime.pending;
+        const incomingDetails = event.compactionEntry.details as Record<string, unknown> | undefined;
+        if (!pending || !event.fromExtension || incomingDetails?.compactor !== "dc-distill"
+          || incomingDetails?.version !== VERSION || incomingDetails?.attemptId !== pending.attemptId) {
+          runtime.observeHostCompaction(ctx, event.compactionEntry);
+        }
         if (!pending) return;
         const ticket = pending.ticket;
         if (!runtime.ownsAttempt(ticket, ctx) || runtime.commitInFlight) return;
@@ -697,7 +710,7 @@ function createExtension(pi: ExtensionAPI, options: DistillExtensionOptions = {}
           const fullContextAfter = typeof usage?.tokens === "number" && Number.isFinite(usage.tokens) && usage.tokens > 0
             ? usage.tokens
             : undefined;
-          runtime.recordCommittedCompaction(fullContextAfter ?? pending.tokensAfter);
+          runtime.recordCommittedCompaction(fullContextAfter ?? pending.tokensAfter, entry.id);
           runtime.lastFailure = null;
           runtime.lastFocusEcho = null;
           if (pending.autonomous) reconcileContinuation(runtime, ctx, pending.attemptId);

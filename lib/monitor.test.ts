@@ -2,8 +2,14 @@
 // Run: bun test extensions/dc-app/lib/knowledge/features/distill/lib/monitor.test.ts
 
 import { describe, test, expect, beforeEach } from "bun:test"
-import { Monitor, extractText } from "./monitor.ts"
-import { Diag } from "./diag-support.ts"
+import { mkdtempSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+// Selected Pi profile must be isolated before loading the extension and its SDK.
+process.env.PI_CODING_AGENT_DIR = mkdtempSync(join(tmpdir(), "distill-admission-test-"));
+import type { Monitor as MonitorType } from "./monitor.ts";
+const { Monitor, extractText } = await import("./monitor.ts")
+const { Diag } = await import("./diag-support.ts")
 import type { CompactState } from "./types.ts"
 
 // --- Test fixture helpers ---
@@ -111,7 +117,7 @@ describe("extractText", () => {
 })
 
 describe("Monitor", () => {
-  let monitor: Monitor
+  let monitor: MonitorType
 
   beforeEach(() => {
     monitor = new Monitor()
@@ -407,21 +413,21 @@ describe("monitor diagnostic session attribution", () => {
       monitor.syncFromPi(null);
       monitor.diagnostic("auto-check blocked reason=warmup");
       expect(captured).toHaveLength(3);
-      for (const line of captured) expect(line.endsWith(" session=01a106a8")).toBe(true);
+      for (const line of captured) expect(line.endsWith(` session=01a106a8 pid=${process.pid}`)).toBe(true);
       expect(captured[0]).toContain("first record(): role=user");
       expect(captured[1]).toContain("syncFromPi: pi tokens=null");
-      expect(captured[2]).toBe("auto-check blocked reason=warmup session=01a106a8");
+      expect(captured[2]).toBe(`auto-check blocked reason=warmup session=01a106a8 pid=${process.pid}`);
     } finally { Diag.monitor = original; }
   });
 
-  test("untagged monitor emits unchanged lines", () => {
+  test("untagged monitor marks unknown session and process identity", () => {
     const original = Diag.monitor;
     const captured: string[] = [];
     Diag.monitor = async (msg: string) => { captured.push(msg); return Promise.resolve(); };
     try {
       const monitor = new Monitor();
       monitor.diagnostic("plain");
-      expect(captured).toEqual(["plain"]);
+      expect(captured).toEqual([`plain session=unknown pid=${process.pid}`]);
     } finally { Diag.monitor = original; }
   });
 });

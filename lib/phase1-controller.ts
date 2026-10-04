@@ -2,6 +2,7 @@ import { randomUUID } from "node:crypto";
 import type { ExtensionAPI, ExtensionContext } from "./sdk.ts";
 import type { CompactionCardDedupeHandle } from "./compaction-card-dedupe.ts";
 import { Monitor } from "./monitor.ts";
+import { Diag, diagnosticSessionLabel } from "./diag-support.ts";
 import {
   DEFAULT_PI_COMPACTION_SETTINGS, DEFAULT_DISTILL_FEATURE_SETTINGS,
   resolvePiCompactionSettings, resolveDistillFeatureSettings,
@@ -44,6 +45,11 @@ export class Phase1Controller {
   warmupTurnsRemaining = 1;
   private lastWarnTime = 0;
   private diagnosticKey: string | null = null;
+  private startupCooldownExempt = false;
+  private admissionCompactionId: string | null = null;
+  private admissionModel = "";
+  /** Pending suppressed decided-line burst: consecutive same-key decisions within 5s. */
+  private decidedBurst: { key: string; line: string; count: number; firstAt: number } | null = null;
   private settingsValid = true;
   private settingsError: string | null = null;
   private sampleStatus: SampleStatus = "unavailable";
@@ -81,7 +87,8 @@ export class Phase1Controller {
     this.generation++;
     this.contextRevision++;
     this.ownerSessionId = id;
-    this.monitor.sessionTag = id.slice(0, 8);
+    Diag.setOwnerSession(id);
+    this.monitor.sessionTag = id;
     this.ticket = null;
     this.preparing = false;
     this.preparationCancelled = false;
@@ -90,8 +97,13 @@ export class Phase1Controller {
     this.warmupTurnsRemaining = 1;
     this.lastWarnTime = 0;
     this.diagnosticKey = null;
+    this.startupCooldownExempt = false;
+    this.admissionCompactionId = null;
+    this.admissionModel = this.modelIdentity(ctx);
+    this.decidedBurst = null;
     this.sampleStatus = "unavailable";
     this.contextWindow = ctx.model?.contextWindow;
+    this.restoreAdmissionBranch(ctx, true);
     this.refreshSettings(ctx);
     this.featureSettings = DEFAULT_DISTILL_FEATURE_SETTINGS;
     try {
@@ -108,6 +120,7 @@ export class Phase1Controller {
     this.generation++;
     this.contextRevision++;
     this.ownerSessionId = null;
+    Diag.setOwnerSession(null);
     this.ticket = null;
     this.preparing = false;
     this.preparationCancelled = false;
@@ -132,6 +145,71 @@ export class Phase1Controller {
     if (!this.isOwner(ctx)) return;
     this.contextRevision++;
     this.contextWindow = ctx.model?.contextWindow;
+  }
+  /** Only lifecycle branch/model changes rebase admission, never ordinary user turns. */
+  admissionContextChanged(ctx: ExtensionContext, branchChanged = false): void {
+    if (!this.isOwner(ctx)) return;
+    const modelChanged = this.admissionModel !== this.modelIdentity(ctx);
+    this.admissionModel = this.modelIdentity(ctx);
+    if (branchChanged) this.restoreAdmissionBranch(ctx, false);
+    else if (modelChanged && (this.admissionCompactionId !== null
+      || this.monitor.state.repeatBaselineTokens !== null || this.monitor.state.awaitingPostCompactionSample)) {
+      this.monitor.state.repeatBaselineTokens = null;
+      this.monitor.state.awaitingPostCompactionSample = true;
+    }
+  }
+  private restoreAdmissionBranch(ctx: ExtensionContext, startup: boolean): void {
+    this.startupCooldownExempt = false;
+    try {
+      // One immutable startup journal snapshot; never read the append-only file.
+      const branch = ctx.sessionManager.getBranch().slice();
+      let previousId: string | null = null;
+      let latest: { id: string; timestamp: number } | null = null;
+      const ids = new Set<string>();
+      for (const entry of branch) {
+        const time = typeof entry.timestamp === "string" ? Date.parse(entry.timestamp) : NaN;
+        if (typeof entry.id !== "string" || !entry.id.trim() || ids.has(entry.id)
+          || typeof entry.type !== "string" || !Number.isFinite(time) || time < 0 || time > this.clock()
+          || (entry.parentId ?? null) !== previousId) throw new Error("Untrusted branch journal");
+        ids.add(entry.id);
+        previousId = entry.id;
+        if (entry.type === "compaction") latest = { id: entry.id, timestamp: time };
+      }
+      if (latest) {
+        if (latest.id !== this.admissionCompactionId) {
+          this.admissionCompactionId = latest.id;
+          this.monitor.restoreCompaction(latest.timestamp);
+        } else if (!startup) {
+          this.monitor.state.repeatBaselineTokens = null;
+          this.monitor.state.awaitingPostCompactionSample = true;
+        }
+      } else if (startup && branch.length > 0) {
+        this.startupCooldownExempt = true;
+      } else if (!startup) {
+        this.admissionCompactionId = null;
+        this.monitor.restoreCompaction(this.clock());
+      }
+    } catch {
+      this.admissionCompactionId = null;
+      this.monitor.restoreCompaction(this.clock());
+    }
+  }
+  /** Foreign/manual/legacy commits affect admission only, never extension success artifacts. */
+  observeHostCompaction(ctx: ExtensionContext, entry: { id?: string }): void {
+    if (!this.isOwner(ctx) || !entry.id || entry.id === this.admissionCompactionId) return;
+    try {
+      const newest = ctx.sessionManager.getBranch().filter((item) => item.type === "compaction").at(-1);
+      if (!newest || newest.id !== entry.id) return;
+      const time = Date.parse(newest.timestamp);
+      this.startupCooldownExempt = false;
+      this.admissionCompactionId = entry.id;
+      this.monitor.restoreCompaction(Number.isFinite(time) && time >= 0 && time <= this.clock() ? time : this.clock());
+    } catch {
+      // A committed journal that cannot be inspected cannot preserve a startup exemption.
+      this.startupCooldownExempt = false;
+      this.admissionCompactionId = entry.id;
+      this.monitor.restoreCompaction(this.clock());
+    }
   }
   refreshSettings(ctx: ExtensionContext): boolean {
     try {
@@ -231,7 +309,11 @@ export class Phase1Controller {
     return Object.freeze({ apiTokensBefore: state.apiTokenCount, exchangesBefore: state.exchangeCount,
       callsBefore: state.callCount, toolTokensBefore: state.toolTokens, idleS: Math.round(this.monitor.idleMs / 1000) });
   }
-  recordCommittedCompaction(tokensAfter: number): void { this.monitor.recordCompaction(tokensAfter); }
+  recordCommittedCompaction(tokensAfter: number, entryId?: string): void {
+    this.startupCooldownExempt = false;
+    this.admissionCompactionId = entryId ?? this.admissionCompactionId;
+    this.monitor.recordCompaction(tokensAfter);
+  }
 
   private observeUsage(ctx: ExtensionContext): boolean {
     try {
@@ -250,9 +332,11 @@ export class Phase1Controller {
   }
   assess(ctx: ExtensionContext): CompactEvaluation | null {
     if (!this.isOwner(ctx)) return null;
+    if (this.admissionModel !== this.modelIdentity(ctx)) this.admissionContextChanged(ctx);
     this.refreshSettings(ctx);
     const synced = this.observeUsage(ctx);
-    const options = { contextWindow: this.contextWindow, compaction: this.compactionSettings };
+    const options = { contextWindow: this.contextWindow, compaction: this.compactionSettings,
+      skipStartupCooldown: this.startupCooldownExempt && synced };
     const thresholds = resolveTriggerThresholds(options);
     const block = (reason: string): null => { this.logBlock(ctx, reason, thresholds); return null; };
     if (!this.settingsValid) return block("invalid-settings");
@@ -260,8 +344,8 @@ export class Phase1Controller {
     if (validateTriggerGeometry(options).length > 0) return block("invalid-geometry");
     if (this.inFlight) return block("in-flight");
     const tokens = this.monitor.state.tokenEstimate;
-    const emergency = Number.isFinite(tokens) && tokens >= thresholds.emergency.effective;
-    if (!emergency && this.warmupTurnsRemaining > 0) {
+    const urgent = Number.isFinite(tokens) && tokens >= thresholds.headroomFloor.effective;
+    if (!urgent && this.warmupTurnsRemaining > 0) {
       this.warmupTurnsRemaining--;
       return block("warmup");
     }
@@ -284,22 +368,49 @@ export class Phase1Controller {
     try {
       const model = ctx.model ? `${ctx.model.provider}/${ctx.model.id}` : "unknown";
       const decision = evaluation.decision;
-      this.monitor.diagnostic(["auto-check decided",
-        `tier=${decision ? Tier[decision.tier] : "unknown"}`,
-        `reason=${decision?.reason ?? "unknown"}`,
+      const tier = decision ? Tier[decision.tier] : "unknown";
+      const reason = decision?.reason ?? "unknown";
+      const line = ["auto-check decided",
+        `tier=${tier}`,
+        `reason=${reason}`,
         "source=agent_settled", `policy=v${TRIGGER_POLICY_VERSION}`, `model=${model}`,
+        `session=${diagnosticSessionLabel(this.ownerSessionId)}`, `pid=${process.pid}`,
         `tokens=${this.monitor.state.tokenEstimate}`,
-      ].join(" "));
+      ].join(" ");
+      // Burst dedup: suppress consecutive identical decided lines within 5s,
+      // then emit one (×N) summary when the burst ends (key change, window
+      // expiry, or the next blocked line). Diagnostics are best effort.
+      const key = JSON.stringify([tier, reason, model, this.contextWindow, TRIGGER_POLICY_VERSION,
+        Object.entries(evaluation.thresholds).map(([band, value]) => `${band}=${value.effective}`)]);
+      const now = this.clock();
+      if (this.decidedBurst && this.decidedBurst.key === key && now - this.decidedBurst.firstAt < 5_000) {
+        this.decidedBurst.count++;
+        return;
+      }
+      this.flushDecidedBurst();
+      this.monitor.diagnostic(line);
+      this.decidedBurst = { key, line, count: 1, firstAt: now };
     } catch { /* Diagnostics cannot interrupt policy. */ }
+  }
+  /** Emit the (×N) summary for a suppressed decided-line burst, if any. */
+  private flushDecidedBurst(): void {
+    const burst = this.decidedBurst;
+    this.decidedBurst = null;
+    if (burst && burst.count > 1) {
+      try { this.monitor.diagnostic(`${burst.line.replace(/^auto-check decided/, `auto-check decided (×${burst.count})`)}`); }
+      catch { /* Diagnostics cannot interrupt policy. */ }
+    }
   }
   private logBlock(ctx: ExtensionContext, reason: string, thresholds: CompactEvaluation["thresholds"]): void {
     try {
+    this.flushDecidedBurst();
     const model = ctx.model ? `${ctx.model.provider}/${ctx.model.id}` : "unknown";
     const key = JSON.stringify([reason, model, this.compactionSettings, this.settingsError,
       this.contextWindow, thresholds, this.sampleStatus]);
     if (key === this.diagnosticKey) return;
     this.diagnosticKey = key;
     try { this.monitor.diagnostic(["auto-check blocked", `reason=${reason}`, "source=agent_settled",
+      `session=${diagnosticSessionLabel(this.ownerSessionId)}`, `pid=${process.pid}`,
       `model=${model}`, `enabled=${this.compactionSettings.enabled}`,
       `reserveTokens=${this.compactionSettings.reserveTokens}`, `sample=${this.sampleStatus}`,
       `contextWindow=${this.contextWindow ?? "unknown"}`, `tokens=${this.monitor.state.tokenEstimate}`,

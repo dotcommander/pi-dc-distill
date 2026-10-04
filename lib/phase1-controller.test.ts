@@ -1,7 +1,12 @@
 import { describe, expect, test } from "bun:test";
-import { Phase1Controller } from "./phase1-controller.ts";
-import { createStubCtx } from "../tests/harness/fake-pi.ts";
-import { Tier } from "./types.ts";
+import { mkdtempSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+// Selected Pi profile must be isolated before loading the extension and its SDK.
+process.env.PI_CODING_AGENT_DIR = mkdtempSync(join(tmpdir(), "distill-admission-test-"));
+const { Phase1Controller } = await import("./phase1-controller.ts");
+const { createStubCtx } = await import("../tests/harness/fake-pi.ts");
+const { Tier } = await import("./types.ts");
 
 function fixture() {
   const stub = createStubCtx();
@@ -235,8 +240,8 @@ describe("Checkpoint operation ownership", () => {
   });
 });
 
-describe("Phase 1 decided diagnostics (policy v2)", () => {
-  test("decided assessments log one policy=v2 line; blocked assessments log none", () => {
+describe("Phase 1 decided diagnostics (policy v3)", () => {
+  test("decided assessments log one policy=v3 line; blocked assessments log none", () => {
     const { stub, controller, diagnostics, usage, advance } = fixture();
     controller.warmupTurnsRemaining = 0;
     advance();
@@ -248,7 +253,7 @@ describe("Phase 1 decided diagnostics (policy v2)", () => {
     expect(diagnostics[0]).toContain("auto-check decided");
     expect(diagnostics[0]).toContain("tier=Mechanical");
     expect(diagnostics[0]).toContain("reason=emergency: approaching context limit");
-    expect(diagnostics[0]).toContain("policy=v2");
+    expect(diagnostics[0]).toContain("policy=v3");
     diagnostics.length = 0;
     usage(50_000);
     controller.assess(stub.ctx);
@@ -266,7 +271,7 @@ describe("Phase 1 decided diagnostics (policy v2)", () => {
     expect(diagnostics[0]).toContain("auto-check decided");
     expect(diagnostics[0]).toContain("tier=Warn");
     expect(diagnostics[0]).toContain("finish current unit");
-    expect(diagnostics[0]).toContain("policy=v2");
+    expect(diagnostics[0]).toContain("policy=v3");
   });
   test("a headroom-floor decision logs the decided line during cooldown", () => {
     const { stub, controller, diagnostics, usage, setSettings } = fixture();
@@ -277,13 +282,114 @@ describe("Phase 1 decided diagnostics (policy v2)", () => {
     expect(evaluation?.decision?.reason).toBe("headroom-floor: answer headroom exhausted — compact now");
     expect(diagnostics).toHaveLength(1);
     expect(diagnostics[0]).toContain("auto-check decided");
-    expect(diagnostics[0]).toContain("policy=v2");
+    expect(diagnostics[0]).toContain("policy=v3");
   });
 });
 
 describe("Phase 1 diagnostic session attribution", () => {
-  test("start tags the monitor with the first 8 characters of the owner session id", () => {
+  test("start tags the monitor with the full owner session id", () => {
     const { controller } = fixture();
-    expect(controller.monitor.sessionTag).toBe("stub-ses");
+    expect(controller.monitor.sessionTag).toBe("stub-session-id");
+  });
+});
+
+describe("policy v3 restored admission", () => {
+  const journal = (compactedAt?: number) => [{ id: "root", parentId: null, type: "message",
+    timestamp: new Date(100_000).toISOString() }, ...(compactedAt === undefined ? [] : [{
+    id: "prior", parentId: "root", type: "compaction", timestamp: new Date(compactedAt).toISOString(),
+    details: { compactor: "foreign", version: 8, tokensAfter: 1 },
+  }])];
+  function restored(compactedAt?: number) {
+    const f = fixture();
+    f.stub.ctx.sessionManager.getBranch = () => journal(compactedAt) as any;
+    f.controller.start(f.stub.ctx);
+    return f;
+  }
+  for (const tokens of [179_519, 179_520, 200_000]) test(`first-settled boundary ${tokens}`, () => {
+    const { stub, controller, usage, setSettings } = restored(999_999);
+    setSettings({ compaction: { enabled: true, reserveTokens: 50_000 } });
+    usage(tokens);
+    const result = controller.assess(stub.ctx);
+    if (tokens === 179_519) expect(result).toBeNull();
+    else {
+      expect(result?.decision?.tier).toBe(Tier.Mechanical);
+      expect(controller.warmupTurnsRemaining).toBe(1);
+    }
+  });
+  test("nonempty restored journal without compaction retains warmup but skips synthetic cooldown", () => {
+    const { stub, controller, usage } = restored();
+    usage(130_000);
+    expect(controller.assess(stub.ctx)).toBeNull();
+    expect(controller.assess(stub.ctx)?.decision?.tier).toBe(Tier.Mechanical);
+  });
+  test("startup journal is snapshotted once and unavailable current usage cannot authorize it", () => {
+    const f = fixture();
+    let reads = 0;
+    f.stub.ctx.sessionManager.getBranch = () => { reads++; return journal() as any; };
+    f.controller.start(f.stub.ctx);
+    f.usage(130_000);
+    f.controller.assess(f.stub.ctx);
+    f.usage(null);
+    expect(f.controller.assess(f.stub.ctx)?.blockedBy).toBe("missing-pi-sync");
+    expect(reads).toBe(1);
+  });
+  test("prior compaction uses real timestamp and a new host baseline, never details.tokensAfter", () => {
+    const { stub, controller, usage } = restored(500_000);
+    expect(controller.monitor.state.lastCompactionTime).toBe(500_000);
+    usage(130_000);
+    expect(controller.assess(stub.ctx)).toBeNull();
+    expect(controller.assess(stub.ctx)?.blockedBy).toBe("post-compaction-sample");
+    expect(controller.monitor.state.repeatBaselineTokens).toBe(130_000);
+    expect(controller.assess(stub.ctx)?.blockedBy).toBe("repeat-growth");
+    usage(133_999);
+    expect(controller.assess(stub.ctx)?.blockedBy).toBe("repeat-growth");
+    usage(134_000);
+    expect(controller.assess(stub.ctx)?.decision?.tier).toBe(Tier.Mechanical);
+  });
+  test("recent compaction preserves actual cooldown after fresh sampling", () => {
+    const { stub, controller, usage, advance } = restored(990_000);
+    usage(130_000); controller.assess(stub.ctx); controller.assess(stub.ctx);
+    usage(134_000);
+    expect(controller.assess(stub.ctx)?.blockedBy).toBe("cooldown");
+    advance();
+    expect(controller.assess(stub.ctx)?.decision?.tier).toBe(Tier.Mechanical);
+  });
+  for (const bad of [[], [{ id: "bad", type: "message", timestamp: "bad" }], journal(1_000_001)]) {
+    test(`untrusted journal retains startup delay ${JSON.stringify(bad)}`, () => {
+      const { stub, controller, usage } = fixture();
+      stub.ctx.sessionManager.getBranch = () => bad as any;
+      controller.start(stub.ctx);
+      usage(130_000); controller.assess(stub.ctx);
+      expect(controller.assess(stub.ctx)?.decision).toBeNull();
+    });
+  }
+  test("inaccessible journal fails conservatively", () => {
+    const { stub, controller, usage } = fixture();
+    stub.ctx.sessionManager.getBranch = () => { throw new Error("journal unavailable"); };
+    controller.start(stub.ctx);
+    usage(130_000); controller.assess(stub.ctx);
+    expect(controller.assess(stub.ctx)?.decision).toBeNull();
+  });
+  test("model and branch changes require a new host baseline without inventing a new cooldown", () => {
+    const { stub, controller, usage } = restored(500_000);
+    usage(130_000); controller.assess(stub.ctx); controller.assess(stub.ctx);
+    stub.ctx.model = { provider: "fake", id: "two", contextWindow: 200_000 } as any;
+    usage(134_000);
+    expect(controller.assess(stub.ctx)?.blockedBy).toBe("post-compaction-sample");
+    expect(controller.monitor.state.repeatBaselineTokens).toBe(134_000);
+    controller.admissionContextChanged(stub.ctx, true);
+    usage(138_000);
+    expect(controller.assess(stub.ctx)?.blockedBy).toBe("post-compaction-sample");
+    expect(controller.monitor.state.lastCompactionTime).toBe(500_000);
+  });
+  test("duplicate foreign commits preserve baseline and cooldown", () => {
+    const { stub, controller, usage } = restored();
+    stub.ctx.sessionManager.getBranch = () => journal(500_000) as any;
+    controller.observeHostCompaction(stub.ctx, { id: "prior" });
+    usage(130_000); controller.assess(stub.ctx); controller.assess(stub.ctx);
+    controller.observeHostCompaction(stub.ctx, { id: "prior" });
+    expect(controller.monitor.state.awaitingPostCompactionSample).toBe(false);
+    expect(controller.monitor.state.repeatBaselineTokens).toBe(130_000);
+    expect(controller.monitor.state.lastCompactionTime).toBe(500_000);
   });
 });

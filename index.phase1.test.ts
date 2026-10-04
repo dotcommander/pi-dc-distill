@@ -1,13 +1,19 @@
 import { describe, expect, spyOn, test } from "bun:test";
-import { createDistillExtension } from "./index.ts";
-import { createStubCtx, simulate as rawSimulate } from "./tests/harness/fake-pi.ts";
-import { withPreparationBranch } from "./tests/harness/preparation-fixture.ts";
+import { mkdtempSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+// Selected Pi profile must be isolated before loading the extension and its SDK.
+process.env.PI_CODING_AGENT_DIR = mkdtempSync(join(tmpdir(), "distill-admission-test-"));
+const { createDistillExtension } = await import("./index.ts");
+const { createStubCtx, simulate: rawSimulate } = await import("./tests/harness/fake-pi.ts");
+const { withPreparationBranch } = await import("./tests/harness/preparation-fixture.ts");
 const simulate = { ...rawSimulate, hook: (stub: Parameters<typeof rawSimulate.hook>[0], name: string, event: any) =>
   rawSimulate.hook(stub, name, name === "session_before_compact" ? withPreparationBranch(event, stub.sessionBranch) : event) };
 
-import { DistillStore } from "./lib/store.ts";
-import { DISTILL_CONTINUATION_MESSAGE_TYPE } from "./lib/continuation.ts";
-import { Monitor } from "./lib/monitor.ts";
+import type { DistillStore as DistillStoreType } from "./lib/store.ts";
+const { DistillStore } = await import("./lib/store.ts");
+const { DISTILL_CONTINUATION_MESSAGE_TYPE } = await import("./lib/continuation.ts");
+const { Monitor } = await import("./lib/monitor.ts");
 
 function deferred<T>() {
   let resolve!: (value: T) => void;
@@ -24,7 +30,7 @@ function fixture(options: Parameters<typeof createDistillExtension>[0] = {}) {
   const stub = createStubCtx();
   const logs: unknown[] = [];
   const dumps: unknown[] = [];
-  const store = Object.create(DistillStore.prototype) as DistillStore;
+  const store = Object.create(DistillStore.prototype) as DistillStoreType;
   store.initialize = async () => ({ status: "skipped", errors: [] } as any);
   store.appendLog = async (entry) => { logs.push(entry); };
   store.writeDump = async (...args) => { dumps.push(args); return null; };
@@ -231,9 +237,12 @@ test("postcommit artifacts and their failure diagnostics cannot undo a commit or
   const [prepared] = await simulate.hook(stub, "session_before_compact", event());
   const committed = { fromExtension: true, compactionEntry: { type: "compaction", ...(prepared as any).compaction } };
   await simulate.hook(stub, "session_compact", committed);
+  // Independent artifacts retry once on failure; the duplicate event adds no attempts.
+  expect(logAttempts).toBe(2);
+  expect(dumpAttempts).toBe(2);
   await simulate.hook(stub, "session_compact", committed);
-  expect(logAttempts).toBe(1);
-  expect(dumpAttempts).toBe(1);
+  expect(logAttempts).toBe(2);
+  expect(dumpAttempts).toBe(2);
   expect(compactCalls(stub)).toHaveLength(0);
   expect((await simulate.hook(stub, "session_before_compact", event()))[0]).toHaveProperty("compaction.details.version", 13);
 });
@@ -383,4 +392,53 @@ test("ambiguous failure cannot block the originating callback even when diagnost
     callbacks.onError(new Error("originating failure"));
     expect((await simulate.hook(stub, "session_before_compact", event()))[0]).toHaveProperty("compaction.details.version", 13);
   } finally { diagnostic.mockRestore(); }
+});
+
+describe("policy v3 host admission wiring", () => {
+  const restoredBranch = (compaction = false) => [{ type: "message", id: "restored", parentId: null,
+    timestamp: new Date(100_000).toISOString(), message: { role: "user", content: "Continue" } },
+    ...(compaction ? [{ type: "compaction", id: "foreign", parentId: "restored",
+      timestamp: new Date(500_000).toISOString(), firstKeptEntryId: "restored", summary: "Foreign summary",
+      tokensBefore: 140_000, details: { compactor: "other", version: 8, tokensAfter: 1 } }] : [])];
+  test("headroom floor bypasses startup warmup and retains concurrency", async () => {
+    const { stub } = fixture({ clock: () => 1_000_000,
+      loadCompactionSettings: () => ({ enabled: true, reserveTokens: 50_000 }) });
+    await simulate.hook(stub, "session_start", {});
+    stub.ctx.getContextUsage = () => ({ tokens: 179_520, contextWindow: 200_000, percent: 90 });
+    await simulate.hook(stub, "agent_settled", {});
+    await simulate.hook(stub, "agent_settled", {});
+    expect(compactCalls(stub)).toHaveLength(1);
+  });
+  test("trusted restored startup can compact after warmup before synthetic cooldown", async () => {
+    const { stub } = fixture({ clock: () => 1_000_000 });
+    stub.ctx.sessionManager.getBranch = () => restoredBranch() as any;
+    await simulate.hook(stub, "session_start", {});
+    stub.ctx.getContextUsage = () => ({ tokens: 130_000, contextWindow: 200_000, percent: 65 });
+    await simulate.hook(stub, "agent_settled", {});
+    expect(compactCalls(stub)).toHaveLength(0);
+    await simulate.hook(stub, "agent_settled", {});
+    expect(compactCalls(stub)).toHaveLength(1);
+  });
+  test("foreign journal commit updates repeat admission without durable success artifacts or duplicate resets", async () => {
+    const { stub, logs, dumps } = fixture({ clock: () => 1_000_000 });
+    let branch = restoredBranch();
+    stub.ctx.sessionManager.getBranch = () => branch as any;
+    await simulate.hook(stub, "session_start", {});
+    branch = restoredBranch(true);
+    const commit = { fromExtension: false, compactionEntry: branch.at(-1) };
+    await simulate.hook(stub, "session_compact", commit);
+    stub.ctx.getContextUsage = () => ({ tokens: 130_000, contextWindow: 200_000, percent: 65 });
+    await simulate.hook(stub, "agent_settled", {});
+    await simulate.hook(stub, "agent_settled", {});
+    await simulate.hook(stub, "session_compact", commit);
+    stub.ctx.getContextUsage = () => ({ tokens: 133_999, contextWindow: 200_000, percent: 67 });
+    await simulate.hook(stub, "agent_settled", {});
+    expect(compactCalls(stub)).toHaveLength(0);
+    stub.ctx.getContextUsage = () => ({ tokens: 134_000, contextWindow: 200_000, percent: 67 });
+    await simulate.hook(stub, "agent_settled", {});
+    expect(compactCalls(stub)).toHaveLength(1);
+    expect(logs).toHaveLength(0);
+    expect(dumps).toHaveLength(0);
+    expect(continuationCalls(stub)).toHaveLength(0);
+  });
 });
