@@ -12,7 +12,7 @@ function normalizedUser(text: string) {
 
 test("mixed continuation filler preserves human instructions and quoted examples", () => {
   for (const text of [instruction, `No response requested. First inspect src/parser.ts.`, `Quote: "Continue from where you left off."`, "The output says skill matches; inspect it."]) {
-    expect(normalizedUser(text)).toEqual([{ kind: KIND_USER, text, origin: "human", sourceKind: "user", sourceReference: undefined }]);
+    expect(normalizedUser(text)).toEqual([{ kind: KIND_USER, text, requestText: text, nativeUserText: true, origin: "human", sourceKind: "user", sourceReference: undefined }]);
   }
   expect(normalizedUser("Continue from where you left off.")).toEqual([]);
   expect(normalizedUser("No response requested.")).toEqual([]);
@@ -20,7 +20,7 @@ test("mixed continuation filler preserves human instructions and quoted examples
 
 test("recognized XML wrappers keep enclosed instructions", () => {
   for (const tag of ["system-reminder", "ide_opened_file", "command-message", "context-window-usage"]) {
-    expect(normalizedUser(`<${tag} source="human">${instruction}</${tag}>`)).toEqual([{ kind: KIND_USER, text: instruction, origin: "human", sourceKind: "user", sourceReference: undefined }]);
+    expect(normalizedUser(`<${tag} source="human">${instruction}</${tag}>`)).toEqual([{ kind: KIND_USER, text: instruction, requestText: `<${tag} source="human">${instruction}</${tag}>`, nativeUserText: true, origin: "human", sourceKind: "user", sourceReference: undefined }]);
     expect(normalizedUser(`<${tag}>Continue from where you left off.</${tag}>`)).toEqual([]);
   }
 });

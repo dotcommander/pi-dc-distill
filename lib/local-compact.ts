@@ -13,6 +13,8 @@ import { formatSummary, enforceOperatingBudget, readRetainedContext } from "./co
 import { DisplayProjectionBudget } from "./compiler/display-projection.ts";
 import { choosePathRoot } from "./compiler/path-roots.ts";
 import { canonicalJson, buildCheckpoint, validateCheckpoint, checkpointDigest } from "./compiler/checkpoint.ts";
+import { captureRequestCandidate } from "./compiler/request-candidate.ts";
+import { prioritizeVerificationDisplay } from "./compiler/verification-display.ts";
 import { codePointLength } from "./unicode.ts";
 
 export { CompactionInputError } from "./compiler/errors.ts";
@@ -212,7 +214,7 @@ function extractConversation(blocks: NormalizedBlock[], sessionCwd?: string, pre
     const sourceText = turn.text;
     const age = turn.protectedRequest ? 0 : turns.length - index - 1;
     const previewLimit = turnPreviewLimit(sourceText, age);
-    const displayText = displayBudget.project(sourceText, turn.origin === "custom" || protectedText.some(text => text && sourceText.includes(text)));
+    const displayText = displayBudget.project(sourceText, turn.origin === "custom" || protectedText.some(text => text && sourceText.includes(text)), previewLimit ?? undefined);
     turn.text = trimTurnWithLimit(sourceText, previewLimit);
     if (displayText !== sourceText) turn.displayText = trimTurnWithLimit(displayText, previewLimit);
   }
@@ -426,6 +428,7 @@ export function compileSessionJsonl(content: string, userFocus?: string, signal?
     previous = validateCheckpoint(update.checkpoint, update.checkpointDigest);
     previous.updateEntryId = update.entryId;
   }
+  const requestCandidate = captureRequestCandidate(normalized.blocks, normalized.meta.authenticatedPriorSummary);
   const filteredBlocks = filterNoise(normalized.blocks);
   const displayBlocks = compressToolResults(filteredBlocks);
   const conv = extractConversation(
@@ -445,6 +448,8 @@ export function compileSessionJsonl(content: string, userFocus?: string, signal?
     conv.observationSnapshot!, normalized.meta.predecessorEntryId, conv.observedFiles, declarations.map(item => item.source), conv.resumeRisks,
     outcomes.failures, outcomes.succeeded);
   conv.observationSnapshot = conv.checkpoint.evidence;
+  conv.requestCandidate = requestCandidate;
+  conv.verification = prioritizeVerificationDisplay(conv.checkpoint);
   conv.retainedContext = readRetainedContext(normalized.meta.priorSummaries);
   if (!recallEnabled) {
     conv.resumeIndex.recallQueries = [];

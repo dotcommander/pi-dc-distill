@@ -1,6 +1,17 @@
-import { expect, test } from 'bun:test';
+import { afterEach, beforeEach, expect, test } from 'bun:test';
 import { CHECKPOINT_CORPUS } from './checkpoint-corpus.ts';
-import { checkpointQualitySeal, evaluateCheckpointQuality, inspectCheckpointOracle } from './checkpoint-evaluator.ts';
+import { mkdtempSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+const scratch = mkdtempSync(join(tmpdir(), 'dc-distill-checkpoint-oracle-'));
+const previousPiDirectory = process.env.PI_CODING_AGENT_DIR;
+process.env.PI_CODING_AGENT_DIR = join(scratch, 'agent');
+const { checkpointQualitySeal, evaluateCheckpointQuality, inspectCheckpointOracle } = await import('./checkpoint-evaluator.ts');
+if (previousPiDirectory === undefined) delete process.env.PI_CODING_AGENT_DIR;
+else process.env.PI_CODING_AGENT_DIR = previousPiDirectory;
+let activePiDirectory: string | undefined;
+beforeEach(() => { activePiDirectory = process.env.PI_CODING_AGENT_DIR; process.env.PI_CODING_AGENT_DIR = join(scratch, 'agent'); });
+afterEach(() => { if (activePiDirectory === undefined) delete process.env.PI_CODING_AGENT_DIR; else process.env.PI_CODING_AGENT_DIR = activePiDirectory; });
 test('checkpoint oracle detects missing declared work, pins, decisions and exact evidence independently', () => {
   const fixture = CHECKPOINT_CORPUS.find(value => value.id === "unresolved-work-and-old-user-pin")!;
   const damaged = JSON.parse(JSON.stringify(fixture.initial));
@@ -16,8 +27,17 @@ test('protected carry retains declared work and old pins while mutation makes pr
   const seal = checkpointQualitySeal();
   const report = evaluateCheckpointQuality();
   expect(report.failures).toEqual([]);
-  expect(report.comparisons).toHaveLength(27);
+  expect(report.comparisons).toHaveLength(seal.comparisons);
   expect(report.comparisons.filter(value => value.selection === 'checkpoint-protected').every(value => value.problems.length === 0)).toBe(true);
   expect(report.comparisons.some(value => value.selection === 'recent-only' && value.problems.length > 0)).toBe(true);
   expect(checkpointQualitySeal()).toEqual(seal);
 }, 30_000);
+test('request oracle rejects checkpoint authority and independently checks source attribution', () => {
+  const fixture = CHECKPOINT_CORPUS.find(value => value.id === 'undeclared-long-request-late-qualifiers-five-generations')!;
+  const damaged = JSON.parse(JSON.stringify(fixture.initial));
+  damaged.tasks.push({ id: 'invented', action: 'FORGED_PROVIDER_AUTHORITY', status: 'pending', 'depends-on': [], blocker: '', requires: [] });
+  const problems = inspectCheckpointOracle(damaged, '', fixture.cycles[0]!.oracle);
+  expect(problems).toContain('undeclared request promoted into task authority');
+  expect(problems).toContain('context promoted into checkpoint authority');
+  expect(problems).toContain('request candidate missing or malformed');
+});

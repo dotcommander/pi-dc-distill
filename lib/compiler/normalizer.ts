@@ -1,7 +1,7 @@
 import { CompactionInputError } from "./errors.ts";
 import { assertStructuralBounds, validateCheckpoint } from "./checkpoint.ts";
 import { outsideExampleLines } from "./section-scanner.ts";
-import { sanitize, sliceU16, isRecord, checkAbort } from "./helpers.ts";
+import { sanitize, sliceU16, isRecord, checkAbort, digest } from "./helpers.ts";
 import { KIND_USER, KIND_ASSISTANT, KIND_TOOL_CALL, KIND_TOOL_RESULT, KIND_THINKING, KIND_COMPACTION, type NormalizedBlock, type SessionMeta } from "./types.ts";
 import { isDistillHandoffType, LEGACY_CONTINUATION_MESSAGE_TYPE } from "../legacy.ts";
 import { handoffTextFromEntryData } from "../handoff.ts";
@@ -93,9 +93,9 @@ function normalizeUser(blocks: Array<Record<string, unknown>>): NormalizedBlock[
     // remain authoritative, including repeated text and interleaved images.
     if (block.type === "text") {
       const text = sanitize(typeof block.text === "string" ? block.text : "").trim();
-      if (text) out.push({ kind: KIND_USER, text, origin: "human" });
+      if (text) out.push({ kind: KIND_USER, text, requestText: String(block.text), nativeUserText: true, origin: "human" });
     } else if (block.type === "image") {
-      out.push({ kind: KIND_USER, text: `[image: ${String(block.mimeType ?? "")}]`, origin: "human" });
+      out.push({ kind: KIND_USER, text: `[image: ${String(block.mimeType ?? "")}]`, nativeUserText: false, origin: "human" });
     }
   }
   return out.length > 0 ? out : [{ kind: KIND_USER, text: "", origin: "human" }];
@@ -222,9 +222,13 @@ function normalizeSessionEntry(entry: Record<string, unknown>, meta: SessionMeta
     case "message":
       return normalizeMessageEntry(entry, meta);
     case "compaction":
+      meta.authenticatedPriorSummary = undefined;
       if (isRecord(entry.details) && entry.details.compactor === "dc-distill" && entry.details.version === 13) {
         if (typeof entry.details.checkpointDigest !== "string") throw new CompactionInputError("missing v13 checkpoint digest", "invalid_checkpoint");
         meta.checkpoint = validateCheckpoint(entry.details.checkpoint, entry.details.checkpointDigest);
+        if (typeof entry.summary === "string" && typeof entry.id === "string" &&
+            typeof entry.details.summaryDigest === "string" && digest(entry.summary) === entry.details.summaryDigest)
+          meta.authenticatedPriorSummary = entry.summary;
         meta.checkpointDigest = entry.details.checkpointDigest;
         meta.predecessorEntryId = typeof entry.id === "string" ? entry.id : undefined;
       }
@@ -380,7 +384,18 @@ export function normalizeSessionJsonl(content: string, signal?: AbortSignal): { 
     const userIndices = hasBlockReferences && message.role === "user"
       ? original.flatMap((block,index) => block.type === "image" || (block.type === "text" && typeof block.text === "string" && sanitize(block.text).trim()) ? [index] : []) : [];
     const referenceFor = (index: number) => {
-      if (!Array.isArray(entry.sourceReferences)) return isRecord(entry.sourceReference) ? entry.sourceReference as unknown as NormalizedBlock["sourceReference"] : undefined;
+      if (!Array.isArray(entry.sourceReferences)) {
+        if (isRecord(entry.sourceReference)) return entry.sourceReference as unknown as NormalizedBlock["sourceReference"];
+        if (entry.type === "message" && typeof entry.id === "string" && message.role === "user") {
+          const content = contentBlocks(message.content);
+          const eligible = content.flatMap((part, blockIndex) => part.type === "image" || (part.type === "text" && typeof part.text === "string" && sanitize(part.text).trim()) ? [blockIndex] : []);
+          const blockIndex = eligible[index];
+          const source = content[blockIndex];
+          if (source?.type === "text" && typeof source.text === "string") return { sessionId: meta.id, entryId: entry.id,
+            blockIndex, contentDigest: digest(source.text), sourceKind: "user" as const };
+        }
+        return undefined;
+      }
       const blockIndex = message.role === "assistant" ? assistantIndices[index] : message.role === "user" ? userIndices[index] : original.length === 1 ? 0 : undefined;
       const references = entry.sourceReferences.filter(ref => isRecord(ref) && ref.blockIndex === blockIndex);
       return blockIndex !== undefined && references.length === 1 ? references[0] as NormalizedBlock["sourceReference"] : undefined;

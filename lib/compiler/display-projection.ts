@@ -1,3 +1,4 @@
+import { edgeExcerpt } from "./request-candidate.ts";
 import { codePointLength } from "../unicode.ts";
 import type { ConversationTurn, ResumeIndex } from "./types.ts";
 
@@ -9,7 +10,9 @@ export class DisplayProjectionBudget {
   private tokens = 0;
   private exhausted = false;
 
-  project(text: string, protectedText = false): string {
+  project(text: string, protectedText = false, excerptLimit?: number): string {
+    if (!protectedText && excerptLimit !== undefined && plainProse(text) && codePointLength(text) > excerptLimit)
+      return edgeExcerpt(text, excerptLimit);
     if (this.exhausted || protectedText) return text;
     // UTF-16 length upper-bounds code points. Proven small records cannot reach
     // phrase admission or either boundary; keep their exact Unicode accounting.

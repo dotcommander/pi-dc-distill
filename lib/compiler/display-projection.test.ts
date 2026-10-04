@@ -6,10 +6,39 @@ import { trimTurn, turnPreviewLimit, trimTurnWithLimit } from "./conversation-re
 import { compileSessionJsonl } from "../local-compact.ts";
 import { emptyCheckpoint, buildCheckpoint, checkpointDigest, checkpointReadyTasks } from "./checkpoint.ts";
 import { digest } from "./helpers.ts";
+import { codePointLength } from "../unicode.ts";
 import type { ConversationResult, ConversationTurn } from "./types.ts";
 
 const noise = "context material ".repeat(2000);
-const user = (text: string) => JSON.stringify({ type: "message", message: { role: "user", content: text } });
+const user = (text: string, id = "native-request") => JSON.stringify({ type: "message", id, message: { role: "user", content: text } });
+function assertSourceExcerpt(source: string, excerpt: string, limit: number) {
+  expect(codePointLength(excerpt)).toBeLessThanOrEqual(limit);
+  const notice = excerpt.match(/\n\[omitted source code points (\d+)\.\.(\d+)\]\n/);
+  if (!notice) { expect(excerpt).toBe(source); return; }
+  const left = Number(notice[1]), right = Number(notice[2]);
+  const points = Array.from(source);
+  expect(left).toBeGreaterThan(0);
+  expect(right).toBeGreaterThan(left);
+  expect(right).toBeLessThan(points.length);
+  const [leading, trailing] = excerpt.split(notice[0]);
+  expect(leading).toBe(points.slice(0, left).join(""));
+  expect(trailing).toBe(points.slice(right).join(""));
+}
+function conversationTail(summary: string): string {
+  return (summary.split("## Conversation\n")[1]?.split(/\n\n</)[0] ?? "")
+    .split(/\n\[User\] /).at(-1)!.replace(/^\[User\] /, "");
+}
+function assertAttributedRequest(summary: string, source: string, entryId = "native-request") {
+  const markers = [...summary.matchAll(/<request-candidate-v1>\n([\s\S]*?)\n<\/request-candidate-v1>/g)];
+  expect(markers).toHaveLength(1);
+  expect(codePointLength(markers[0][0])).toBeLessThanOrEqual(4096);
+  const candidate = JSON.parse(markers[0][1].replace(/&lt;/g, "<").replace(/&gt;/g, ">").replace(/&amp;/g, "&"));
+  expect(candidate.source).toMatchObject({ entryId, blockIndex: 0, sourceKind: "user", contentDigest: digest(source) });
+  expect(candidate.originalDigest).toBe(digest(source));
+  expect(candidate.attribution).toBe("native user source; context only, not declared work or authorization");
+  assertSourceExcerpt(source, candidate.request, 2048);
+  return candidate;
+}
 function conversation(turns: ConversationTurn[]): ConversationResult {
   return { turns, readFiles: [], modifiedFiles: [], omittedReadFiles: 0, omittedModifiedFiles: 0,
     recentToolCalls: [], recentToolResults: [], verification: [], workingTree: [], sourceAnchors: [], literalAnchors: [],
@@ -24,9 +53,14 @@ describe("bounded plain prose display", () => {
     expect(trimTurn(projected)).toBe(projected);
     expect(trimTurn(source)).not.toContain("unique suffix");
     const result = compileSessionJsonl(user(source), undefined, undefined, false);
-    expect(result.summary).toContain(projected);
-    const conversationText = result.summary.match(/## Conversation\n([\s\S]*?)(?=\n<(?:[a-z][a-z-]*)[>\s]|$)/)?.[1] ?? "";
-    expect(conversationText).not.toContain("context material context material");
+    assertSourceExcerpt(source, conversationTail(result.summary), turnPreviewLimit(source) ?? codePointLength(source));
+    assertAttributedRequest(result.summary, source);
+    expect(result.summary).toContain("Keep the unique suffix 42; do not retire unfinished work.");
+    expect(result.checkpoint.objective).toBe("");
+    expect(result.checkpoint.tasks).toEqual([]);
+    expect(result.checkpoint.decisions).toEqual([]);
+    expect(result.checkpoint.pins).toEqual([]);
+    expect(result.checkpoint.constraints).toEqual([]);
   });
   test("compression keeps a unique tail within the original long-form preview cap", () => {
     const source = `DEMO-ANCHOR must survive compaction. ${Array.from({ length: 62 }, (_, i) => `detail${i}`).join(" ")} ${"context material ".repeat(14)}Unique suffix 42; do not retire unfinished work.`;
@@ -67,7 +101,10 @@ describe("bounded plain prose display", () => {
       "bun test " + noise, "PASS [bash cwd=/repo]: " + noise, "checkpointDigest: " + noise,
       "Decision: " + noise, "`exact literal` " + noise,
       "echo " + noise, "printf " + noise, "const value = 1; ".repeat(30), "value=plain ".repeat(30),
-    ]) expect(new DisplayProjectionBudget().project(source)).toBe(source);
+    ]) {
+      expect(new DisplayProjectionBudget().project(source)).toBe(source);
+      expect(new DisplayProjectionBudget().project(source, false, 512)).toBe(source);
+    }
     expect(new DisplayProjectionBudget().project(noise, true)).toBe(noise);
     for (const source of ["echo " + noise, "printf " + noise, "const value = 1; ".repeat(30), "value=plain ".repeat(30)]) {
       expect(compileSessionJsonl(user(source), undefined, undefined, false).summary).toContain(trimTurn(source.trim()));
@@ -90,10 +127,12 @@ describe("bounded plain prose display", () => {
     expect(pointBudget.project(noise)).toBe(noise);
     expect(trimTurn(pointBudget.project(noise))).toBe(trimTurn(noise));
   });
-  test("production exhaustion retains the existing preview without partially compressing a record", () => {
+  test("production plain prose keeps source edges independently of phrase-token exhaustion", () => {
     const source = "a ".repeat(32_769) + "UNSEEN-SUFFIX";
     const result = compileSessionJsonl(user(source), undefined, undefined, false);
-    expect(result.summary).toContain(trimTurn(source));
+    assertSourceExcerpt(source, conversationTail(result.summary), turnPreviewLimit(source) ?? codePointLength(source));
+    assertAttributedRequest(result.summary, source);
+    expect(result.summary).toContain("UNSEEN-SUFFIX");
     expect(result.summary).not.toContain("[repeated");
   });
   test("small-record fast path preserves Unicode boundary accounting and does not spend phrase tokens", () => {
@@ -174,11 +213,14 @@ test("populated checkpoint identity and stale exact evidence survive repeated no
   expect(checkpointReadyTasks(passed)).toContain("unfinished");
   const checkpoint = buildCheckpoint(passed, undefined, { ...observed, verification: [], mutationEpoch: 2, modifiedPaths: ["/repo/parser"] }, "prior");
   expect(checkpointReadyTasks(checkpoint)).not.toContain("unfinished");
+  const noisySource = `DEMO-ANCHOR must survive compaction. ${noise}Unique suffix.`;
   const compile = (state: typeof checkpoint, focus?: string) => compileSessionJsonl([
     JSON.stringify({ type: "session", id: "noise", cwd: "/repo", checkpoint: state, checkpointDigest: checkpointDigest(state), predecessorEntryId: "prior" }),
-    user(protectedText), user(`DEMO-ANCHOR must survive compaction. ${noise}Unique suffix.`),
+    user(protectedText, "protected-native"), user(noisySource, "latest-native"),
   ].join("\n"), focus, undefined, false);
   const first = compile(checkpoint), second = compile(first.checkpoint);
+  const generations = [first, second];
+  while (generations.length < 5) generations.push(compile(generations.at(-1)!.checkpoint));
   const focused = compile(checkpoint, "DEMO-ANCHOR");
   expect(focused.summary).not.toBe(first.summary);
   expect(focused.checkpoint).toEqual(first.checkpoint);
@@ -188,15 +230,19 @@ test("populated checkpoint identity and stale exact evidence survive repeated no
   expect(second.checkpoint.predecessor).toEqual({ checkpointDigest: first.checkpointDigest, entryId: "prior" });
   const { predecessor: _predecessor, ...protectedState } = checkpoint;
   const expectedState = { ...protectedState, evidence: { ...checkpoint.evidence, pendingMutations: [] } };
-  for (const result of [first, second]) {
+  for (const result of generations) {
     const { predecessor: _advancedPredecessor, ...actualState } = result.checkpoint;
     expect(actualState).toEqual(expectedState);
     expect(result.checkpointDigest).toBe(checkpointDigest(result.checkpoint));
+    assertSourceExcerpt(noisySource, conversationTail(result.summary), turnPreviewLimit(noisySource) ?? codePointLength(noisySource));
+    expect(assertAttributedRequest(result.summary, noisySource, "latest-native").source.sessionId).toBe("noise");
+    expect(result.summary).toContain(protectedText);
+    expect(result.summary).toContain("Unique suffix.");
+    expect(checkpointReadyTasks(result.checkpoint)).not.toContain("unfinished");
   }
   expect(second.checkpoint.tasks[0].status).toBe("pending");
   expect(second.checkpoint.evidence.verification[0]).toEqual(checkpoint.evidence.verification[0]);
   expect(checkpointReadyTasks(second.checkpoint)).not.toContain("unfinished");
   expect(second.summary).toContain(protectedText);
-  expect(second.summary).toContain("context material [repeated 2000 times] Unique suffix.");
   expect(JSON.stringify(second.checkpoint)).not.toMatch(/displayText|intentOccurrences|displayIntents/);
 });

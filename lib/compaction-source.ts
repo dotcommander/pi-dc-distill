@@ -17,6 +17,7 @@ export interface CompactionSource {
   handoff?: string;
   previousCheckpoint?: ResumeCheckpointV1;
   previousCheckpointDigest?: string;
+  previousSummaryDigest?: string;
   predecessorEntryId?: string;
   checkpointUpdates?: { checkpoint: ResumeCheckpointV1; checkpointDigest: string; entryId: string }[];
   occurrences?: SourceOccurrence[];
@@ -164,6 +165,7 @@ export function buildCompactionSource(input: {
         createHash("sha256").update(prior.summary, "utf8").digest("hex") !== details.summaryDigest)
       throw new CompactionInputError("invalid_checkpoint: prior wire summary digest mismatch", "invalid_checkpoint");
     if (typeof details.checkpointDigest !== "string") throw new CompactionInputError("invalid_checkpoint: missing checkpoint digest", "invalid_checkpoint");
+    source.previousSummaryDigest = details.summaryDigest;
     source.previousCheckpoint = validateCheckpoint(details.checkpoint, details.checkpointDigest as string);
     source.previousCheckpointDigest = details.checkpointDigest as string;
     source.predecessorEntryId = prior!.id;
@@ -404,7 +406,9 @@ export function canonicalizeCompactionSource(
   required.raw("\n");
   let recordCount = 0;
   if (source.previousSummary) {
-    required.value({ type: "compaction", summary: source.previousSummary });
+    required.value({ type: "compaction", id: source.predecessorEntryId, summary: source.previousSummary,
+      ...(source.previousSummaryDigest ? { details: { compactor: "dc-distill", version: 13, summaryDigest: source.previousSummaryDigest,
+        checkpoint: source.previousCheckpoint, checkpointDigest: source.previousCheckpointDigest } } : {}) });
     required.raw("\n");
     recordCount++;
   }

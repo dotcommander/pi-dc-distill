@@ -27,6 +27,8 @@ export interface VerificationObservation {
 
 export interface NormalizedBlock {
   sourceSequence?: number;
+  nativeUserText?: boolean;
+  requestText?: string;
   kind: BlockKind;
   sourceReference?: CheckpointSourceReference;
   sourceKind?: "user" | "bash" | "agent-declaration" | "tool-observation" | "legacy";
@@ -91,6 +93,7 @@ export interface SessionMeta {
   checkpointDigest?: string;
   predecessorEntryId?: string;
   checkpointUpdates?: CheckpointUpdate[];
+  authenticatedPriorSummary?: string;
   priorSummaries: string[];
 }
 
@@ -107,6 +110,7 @@ export interface ResumeIndex {
 }
 
 export interface ConversationResult {
+  requestCandidate?: import("./request-candidate.ts").RequestCandidate;
   lexical?: LexicalBudget;
   checkpoint?: ResumeCheckpointV1;
   observedFiles?: { read: string[]; modified: string[] };

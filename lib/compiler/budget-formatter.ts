@@ -1,3 +1,5 @@
+import { renderRequestCandidate } from "./request-candidate.ts";
+import { verificationEvictionIndex } from "./verification-display.ts";
 import { renderCheckpoint, checkpointReadyTasks } from "./checkpoint.ts";
 import { scanSections } from "./section-scanner.ts";
 import { formatInteger } from "../wire-format.ts";
@@ -506,6 +508,11 @@ export function formatSummary(meta: SessionMeta, conv: ConversationResult, userF
   const parts: RenderedSection[] = [];
   if (conv.checkpoint) { const text = renderCheckpoint(conv.checkpoint); if (text) parts.push(projection?.measureOnly ? codePointLength(text) : text, ""); }
   const measure = projection?.measureOnly ?? false;
+  if (conv.requestCandidate) {
+    const candidate = renderRequestCandidate(conv.requestCandidate);
+    parts.push(measure ? codePointLength(candidate) : candidate, "");
+    if (!conv.checkpoint?.objective && !meta.goalObjective) parts.push("No declared objective; attributed request is context only.", "");
+  }
   const identity = (value: object) => {
     if (!projection) return 0;
     projection.identities ??= new WeakMap();
@@ -693,8 +700,8 @@ export function enforceOperatingBudget(
     } else if (conv.recentToolCalls.length > 0) {
       conv.recentToolCalls.shift();
       note("recent tool calls");
-    } else if (conv.verification.some((line) => line.includes("[freshness: not established"))) {
-      const stale = conv.verification.findIndex((line) => line.includes("[freshness: not established"));
+    } else if (conv.verification.some((line) => line.startsWith("PASS ") && line.includes("[freshness: not established"))) {
+      const stale = conv.verification.findIndex((line) => line.startsWith("PASS ") && line.includes("[freshness: not established"));
       conv.verification.splice(stale, 1);
       note("stale verification receipts");
     } else if (conv.workingTree.length > 0) {
@@ -710,7 +717,7 @@ export function enforceOperatingBudget(
       conv.modifiedFiles.shift();
       conv.omittedModifiedFiles += 1;
     } else if (conv.verification.length > 1) {
-      conv.verification.shift();
+      conv.verification.splice(verificationEvictionIndex(conv.verification, conv.checkpoint), 1);
       note("verification receipts");
     } else if (conv.turns.length > 1) {
       const frontierQuery = userFocus?.trim() || meta.handoff?.trim() || undefined;
@@ -719,11 +726,11 @@ export function enforceOperatingBudget(
         conv.turns.splice(candidates[0].index, 1);
         note("conversation turns");
       } else {
-        if (!evictRetainedContext(conv)) break;
+        if (!evictRetainedContext(conv) && !evictRequestCandidate(conv)) break;
         note("retained context excerpts");
       }
     } else {
-      if (!evictRetainedContext(conv)) break;
+      if (!evictRetainedContext(conv) && !evictRequestCandidate(conv)) break;
       note("retained context excerpts");
     }
     refreshResume();
@@ -739,6 +746,13 @@ export function enforceOperatingBudget(
   // Retire controls only after selection: savings must not re-admit old scaffolding.
   // The next rendering is the canonical summary used by metrics and hashing.
   retireHistoricalControls(conv.turns, conv.terminalComplete);
+}
+
+function evictRequestCandidate(conv: ConversationResult): boolean {
+  if (!conv.requestCandidate) return false;
+  if (conv.requestCandidate.proposal) conv.requestCandidate = { ...conv.requestCandidate, proposal: undefined };
+  else conv.requestCandidate = undefined;
+  return true;
 }
 
 function evictRetainedContext(conv: ConversationResult): boolean {

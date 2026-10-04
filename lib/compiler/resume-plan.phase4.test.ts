@@ -27,7 +27,8 @@ test("resume obligations survive eviction of all supporting display records", ()
   const conv = conversation(resumePlan);
   enforceOperatingBudget({ priorSummaries: [] }, conv, undefined, false);
   expect(conv.activeTasks).toEqual([]);
-  expect(conv.verification).toEqual([]);
+  // The unresolved failure stays visible even when every other support row goes.
+  expect(conv.verification).toEqual(["FAIL [bash cwd=/tmp/project]: bun test — 1 fail [freshness: not established after later potentially modifying work]"]);
   expect(conv.workingTree).toEqual([]);
   expect(conv.resumeTasks).toEqual([
     "Await/check existing delegated task; do not launch a duplicate: Task parser; running at snapshot",
