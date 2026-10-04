@@ -643,8 +643,27 @@ function createExtension(pi: ExtensionAPI, options: DistillExtensionOptions = {}
         } catch { /* Invalid expected v13 state never downgrades to legacy prose. */ }
         let branchMatches = false;
         try {
-          const leafId = ctx.sessionManager.getBranch().at(-1)?.id ?? null;
-          branchMatches = leafId === ticket.branchAnchor || leafId === entry.id;
+          const branch = ctx.sessionManager.getBranch();
+          const leafId = branch.at(-1)?.id ?? null;
+          // The host appends the compaction entry after `session_before_compact`,
+          // and sibling extensions may append further entries (for example
+          // compaction-reactive markers) before this event runs. Ownership
+          // therefore also accepts the entry while it remains the active
+          // branch's newest compaction; a superseding compaction or a
+          // navigation that abandons the entry cannot commit.
+          let lastCompactionId: string | undefined;
+          let entryIsNewestCompaction = false;
+          for (let i = branch.length - 1; i >= 0; i--) {
+            const e = branch[i] as { id?: string; type?: string } | undefined;
+            if (!e) continue;
+            if (e.type === "compaction" && lastCompactionId === undefined) lastCompactionId = e.id;
+            if (e.id !== undefined && e.id === entry.id) {
+              entryIsNewestCompaction = e.type === "compaction" && lastCompactionId === entry.id;
+              break;
+            }
+          }
+          branchMatches = leafId === ticket.branchAnchor || leafId === entry.id
+            || (entry.id !== undefined && entryIsNewestCompaction);
           if (ticket.branchAnchor !== null && entry.parentId !== ticket.branchAnchor) branchMatches = false;
         } catch { /* Unknown ownership cannot authorize a commit. */ }
         const matches = branchMatches && checkpointMatches && details.compactor === "dc-distill"
@@ -654,7 +673,14 @@ function createExtension(pi: ExtensionAPI, options: DistillExtensionOptions = {}
           && sha256Hex(entry.summary) === pending.summaryDigest
           && details.summaryDigest === pending.summaryDigest;
         // An unowned or stale event cannot clear the current reservation.
-        if (!matches) return;
+        if (!matches) {
+          try {
+            runtime.monitor.diagnostic(
+              `compaction commit ignored reason=identity-mismatch branch=${branchMatches} checkpoint=${checkpointMatches}`
+              + ` version=${String(details.version)} attempt=${String(details.attemptId ?? "none")}`);
+          } catch { /* Diagnostics cannot prevent scoped terminal cleanup. */ }
+          return;
+        }
 
         let releaseReservation = false;
         try {

@@ -158,7 +158,13 @@ metrics, freezes a `PendingCompaction`, and returns it. It does not emit durable
 success artifacts or reset the monitor.
 
 `session_compact` commits only when the owner session, extension identity,
-details version 13, owning attempt/lease, settings/model snapshot, first-kept ID, exact summary digest, and validated checkpoint digest match. Commit
+details version 13, owning attempt/lease, settings/model snapshot, first-kept ID, exact summary digest, and validated checkpoint digest match. Branch
+ownership requires the compaction entry to remain the active branch's newest
+compaction; entries that sibling extensions append after it (for example
+compaction-reactive markers) are tolerated, while superseding or abandoned
+compactions cannot commit. Identity mismatches are ignored silently except
+for a best-effort `compaction commit ignored reason=identity-mismatch`
+diagnostic. Commit
 then resets the monitor from Pi's post-rebuild full-context usage when available,
 writes log/dump/recall, clears failure state, notifies only in a UI, and queues
 continuation only for an autonomous attempt. Continuation delivery is durable: the attempt id is journalled in the compaction details and the delivered message, and on `session_start` or tree changes a pure reducer over the active branch recovers an unanswered autonomous continuation subject to process submission fences and journal acknowledgement. Pending state and the latch are

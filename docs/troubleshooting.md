@@ -21,6 +21,7 @@ the [logs](#logs). A missing log file can simply mean no attempt has been record
 | Summary lacks abandoned-fork content | Only the active branch is authoritative. | Return to the relevant branch before compacting if that content is needed. |
 | Summary misses subjective context | The deterministic extraction rules did not retain it. | Provide a focus hint when compacting, save an explicit handoff beforehand, or recall a retained summary. Lost content is not recreated by recall. |
 | No success log, dump, or recall after a card was prepared | Pi did not append a matching extension-owned compaction. | Inspect Pi's failure message and logs before retrying; pre-append pending state is intentionally ephemeral. |
+| Success log appears only with certain extensions enabled | A sibling extension appended an entry after the compaction entry, so pre-fix builds (≤ 0.1.5) rejected the commit because the entry was no longer the branch leaf. | Upgrade past 0.1.5; a `compaction commit ignored reason=identity-mismatch` diagnostic in `diag.log` marks the fixed visibility path. |
 | No continuation after manual `/compact` | Manual attempts do not nudge. | Continue manually. |
 | No continuation after autonomous compaction | The committed attempt was not autonomous or the session was not idle. | Continue from visible context or use recall. |
 | No diagnostic dumps | Dumps default off. | Start Pi with `DC_DISTILL_DUMPS=1`; dc-distill retains 20 pairs. |

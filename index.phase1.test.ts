@@ -110,6 +110,39 @@ describe("Phase 1 host adapter regression boundaries", () => {
     await simulate.hook(stub, "session_compact", { fromExtension: true, compactionEntry: { type: "compaction", ...(fresh as any).compaction } });
     expect(logs).toHaveLength(1);
   });
+  test("sibling appends after the compaction entry cannot block the commit", async () => {
+    const { stub, logs } = fixture();
+    let branch: any[] = [{ type: "message", id: "anchor", message: { role: "user", content: "work" } }];
+    stub.ctx.sessionManager.getBranch = () => branch;
+    await simulate.hook(stub, "session_start", {});
+    const [prepared] = await simulate.hook(stub, "session_before_compact", event());
+    const compactionEntry = { type: "compaction", id: "c1", parentId: "anchor", ...(prepared as any).compaction };
+    branch = [
+      ...branch,
+      compactionEntry,
+      { type: "custom", id: "x1", customType: "library-loader-residency", data: { clear: true } },
+      { type: "message", id: "x2", message: { role: "assistant", content: "reacted" } },
+    ];
+    await simulate.hook(stub, "session_compact", { fromExtension: true, compactionEntry });
+    expect(logs).toHaveLength(1);
+  });
+  test("a superseding compaction or an abandoned entry cannot commit", async () => {
+    const { stub, logs } = fixture();
+    let branch: any[] = [{ type: "message", id: "anchor", message: { role: "user", content: "work" } }];
+    stub.ctx.sessionManager.getBranch = () => branch;
+    await simulate.hook(stub, "session_start", {});
+    const [prepared] = await simulate.hook(stub, "session_before_compact", event());
+    const compactionEntry = { type: "compaction", id: "c1", parentId: "anchor", ...(prepared as any).compaction };
+    branch = [...branch, compactionEntry, { type: "compaction", id: "c2", parentId: "c1" }];
+    await simulate.hook(stub, "session_compact", { fromExtension: true, compactionEntry });
+    expect(logs).toHaveLength(0);
+    branch = [
+      { type: "message", id: "anchor", message: { role: "user", content: "work" } },
+      { type: "message", id: "x9", message: { role: "user", content: "other branch" } },
+    ];
+    await simulate.hook(stub, "session_compact", { fromExtension: true, compactionEntry });
+    expect(logs).toHaveLength(0);
+  });
   test("duplicate commits while a store write awaits cannot duplicate effects", async () => {
     const { stub, store, logs, dumps } = fixture();
     await simulate.hook(stub, "session_start", {});
