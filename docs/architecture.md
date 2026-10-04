@@ -352,13 +352,13 @@ message, bounds the echo, and suppresses duplicates.
 ## Compatibility
 
 The development SDK baseline is Pi 0.99.2; the reviewed installed runtime is
-Pi 1.0.0. All four Pi development dependencies remain pinned to 0.99.2, and
+Pi 1.0.0 and 1.0.2. All four Pi development dependencies remain pinned to 0.99.2, and
 `bun.lock` records that graph. Peer ranges are `"*"` for every host-provided
 package, as Pi's packaging contract requires; the reviewed-host boundary
-(0.99.2 patch releases and exact 1.0.0) is carried by the development pins
+(0.99.2 patch releases, exact 1.0.0, and 1.0.2) is carried by the development pins
 and review, not by the peer ranges.
 
-Pi 0.99.2 and 1.0.0 render the latest compaction once with its native summary component.
+Pi 0.99.2, 1.0.0, and 1.0.2 render the latest compaction once with its native summary component.
 The extension leaves its InteractiveMode prototype unchanged. Tests drive the
 installed host's compaction handler and render its expanded native component
 to verify deterministic metrics. Reviewed 0.99.0 remains in the native-card

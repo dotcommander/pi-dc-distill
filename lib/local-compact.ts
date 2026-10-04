@@ -372,7 +372,7 @@ function invocationOutcomes(blocks: NormalizedBlock[], previous: import("./compi
       if (block.isError === false) succeeded.add(identity);
       else succeeded.delete(identity);
     }
-    if (block.isError !== true || /^(?:File unchanged since last read|No changes to apply|Nothing to replace|No changes were made)\b/i.test(block.text ?? "")) continue;
+    if (block.isError !== true || /^(?:File unchanged since last read|No changes to apply|Nothing to replace|No changes were made|Tool call .* was not executed|Operation aborted)\b/i.test(block.text ?? "")) continue;
     // Suppress a generic failure only when an authoritative verification receipt owns this result.
     if (verificationOwners.has(block)) continue;
     const attemptedFix = identity ?? "unpaired tool result; attempted fix unknown";

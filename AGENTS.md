@@ -247,16 +247,16 @@ synthetic assistant/content assumption.
 ## Compatibility
 
 The development SDK baseline is Pi 0.99.2; the reviewed installed runtime is
-Pi 1.0.0. The root package pins the four
+Pi 1.0.0 and 1.0.2. The root package pins the four
 `@earendil-works/pi-*` development dependencies to 0.99.2 and records
 the graph in `bun.lock`. Install project-local dependencies with
 `bun install --frozen-lockfile`; do not use or mutate another project's shared
 `node_modules`. Peer ranges are `"*"` for every host-provided package, as
 Pi's packaging contract requires; the reviewed-host boundary (0.99.2 patch
-releases and exact 1.0.0) is carried by the development pins and the review
+releases, exact 1.0.0, and 1.0.2) is carried by the development pins and the review
 process, not by the peer ranges.
 
-Reviewed Pi 0.99.0, 0.99.2, and 1.0.0 use their native compaction card without patching
+Reviewed Pi 0.99.0, 0.99.2, 1.0.0, and 1.0.2 use their native compaction card without patching
 the InteractiveMode prototype. Older reviewed hosts retain historical shim
 fixtures. Add a host version only after inspecting its handler and verifying
 the installed rendering path; fixture-only tests do not prove rendering.

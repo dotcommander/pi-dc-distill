@@ -186,3 +186,15 @@ test("unavailable host bytes cannot prove a pass but do not conceal failure", ()
   }
   expect(observeVerification("PASS handles output truncated notices", false).status).toBe("PASS");
 });
+
+test("synthetic unexecuted host notices return INCOMPLETE status", () => {
+  const notice = 'Tool call "bash" was not executed: the response hit the output token limit, so its arguments may be truncated and cannot be parsed safely';
+  expect(observeVerification(notice, true)).toEqual({
+    status: "INCOMPLETE",
+    evidence: notice,
+  });
+  expect(observeVerification("Operation aborted", true)).toEqual({
+    status: "INCOMPLETE",
+    evidence: "Operation aborted",
+  });
+});

@@ -1942,6 +1942,15 @@ describe("failure ownership and exact invocation retries", () => {
     expect(retry.checkpoint.failures[0].signature).toBe(old.failures[0].signature);
     expect(retry.checkpoint.failures[0].resolution).toBe("resolved: later success with same invocation");
   });
+  test("synthetic unexecuted tool calls from token limit or abortion are ignored and do not create checkpoint failures", () => {
+    const unexecuted = compile([
+      toolCall("bash", { command: "bun test" }, "c1"),
+      toolResult("bash", 'Tool call "bash" was not executed: the response hit the output token limit, so its arguments may be truncated and cannot be parsed safely', true, "c1"),
+      toolCall("custom", { arg: 1 }, "c2"),
+      toolResult("custom", "Operation aborted", true, "c2"),
+    ]);
+    expect(unexecuted.checkpoint.failures).toHaveLength(0);
+  });
 });
 
 test("hard summary fallback exhausts whole file markers before protected overflow", () => {

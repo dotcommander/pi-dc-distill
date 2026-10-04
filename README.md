@@ -57,7 +57,7 @@ only if you want the extra local storage and context behavior they add.
 Requirements:
 
 - Node.js 22.19.0 or newer
-- Pi 1.0.0, the runtime this package was reviewed against
+- Pi 1.0.0 or 1.0.2, the runtimes this package was reviewed against
 - Bun 1.4.0, needed only for the packaged `dc-distill-session` replay CLI
   and the development commands below
 
@@ -197,7 +197,7 @@ for storage, retention, triggers, and
 ## Development and documentation
 
 Direct dependencies are pinned and resolved in `bun.lock`: the development
-SDK baseline is Pi 0.99.2, while the reviewed installed runtime is Pi 1.0.0.
+SDK baseline is Pi 0.99.2, while the reviewed installed runtime is Pi 1.0.0 and 1.0.2.
 Checks run offline after installation:
 
 ```bash

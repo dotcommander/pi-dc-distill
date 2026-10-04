@@ -223,6 +223,7 @@ describe("compaction card dedupe", () => {
       "0.99.0",
       "0.99.2",
       "1.0.0",
+      "1.0.2",
     ]).toContain(
       activePi.packageVersion,
     );
@@ -256,7 +257,7 @@ describe("compaction card dedupe", () => {
     // Session rendering is stubbed here; this is not an installed-renderer proof.
     try {
       await activePi.prototype.handleEvent.call(fakeMode, EVENT);
-      if (["0.99.0", "0.99.2", "1.0.0"].includes(activePi.packageVersion)) {
+      if (["0.99.0", "0.99.2", "1.0.0", "1.0.2"].includes(activePi.packageVersion)) {
         expect(installation).toBeNull();
         expect(activePi.prototype.handleEvent).toBe(originalHandler);
         expect(rendered).toHaveLength(1);
@@ -271,7 +272,7 @@ describe("compaction card dedupe", () => {
 
   test("the installed native handler and renderer produce one expanded card with deterministic metrics", async () => {
     const activePi = await Runtime.loadActivePiInteractiveMode();
-    if (!["0.99.0", "0.99.2", "1.0.0"].includes(activePi.packageVersion)) return;
+    if (!["0.99.0", "0.99.2", "1.0.0", "1.0.2"].includes(activePi.packageVersion)) return;
     const { CompactionSummaryMessageComponent } = await import(
       new URL("./modes/interactive/components/compaction-summary-message.js", activePi.moduleUrl).href
     );

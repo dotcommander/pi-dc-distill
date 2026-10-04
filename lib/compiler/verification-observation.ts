@@ -89,6 +89,9 @@ function decisiveEvidence(found: DecisiveLine, oversized: boolean, totalLines: n
  * Pairing, runner command identity, cwd and mutation chronology belong to the receipt collector.
  */
 export function observeVerification(result: string, isError: boolean | undefined): VerificationObservation {
+  if (/^(?:Tool call .* was not executed|Operation aborted)\b/i.test(result)) {
+    return { status: "INCOMPLETE", evidence: boundedEvidence(result) };
+  }
   let failure: DecisiveLine | undefined;
   let skip: DecisiveLine | undefined;
   let first = "";
