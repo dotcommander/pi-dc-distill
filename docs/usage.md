@@ -41,8 +41,11 @@ At the native trigger it issues a cooperative warning until the headroom floor
 reached; at or above the floor, and at the reported context limit, mechanical
 compaction bypasses cooldown and sync guards. A missed auto window blocked by
 ordinary guards is pursued mechanically at the next unblocked warn-band check.
-
-Pi's `compaction.enabled: false` disables the autonomous monitor. See
+After a restart, admission guards are restored once from the active branch
+journal: a branch with a prior compaction waits for a fresh host usage baseline
+before another ordinary compaction (still requiring 4,000 tokens of growth),
+while a trustworthy branch without any compaction can skip the synthetic
+startup cooldown after warmup. See
 [trigger policy](settings.md#trigger-policy) for exact geometry and small-window
 fallbacks. Above the auto boundary, blocked attempts are recorded in `diag.log`.
 

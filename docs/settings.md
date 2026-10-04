@@ -95,7 +95,7 @@ and concurrency guards still apply. Very small windows use fixed internal floors
 keep auto, warn, and emergency ordered. If an older Pi cannot report a context
 window, dc-distill falls back to 100,000 / 140,000 / 160,000 tokens.
 
-Trigger policy version 2 adds a headroom floor at
+Trigger policy version 3 adds a headroom floor at
 `max(warn, contextWindow - 20,480)` (a 16,384-token answer budget plus pi-ai's
 4,096-token request-clamp margin): at or above the floor the monitor compacts
 mechanically with emergency-grade guard bypass instead of steering, because
@@ -105,11 +105,24 @@ post-compaction guards) is pursued mechanically at the next unblocked
 warn-band observation instead of being answered with steering. The fallback
 floor clamps to the 140,000 fallback warn line.
 
+Version 3 also restores admission guards after a restart, once, from the
+immutable active-branch journal. A trustworthy nonempty branch without any
+compaction may skip the synthetic 120-second startup cooldown once warmup and a
+current synchronized host count are satisfied. A prior compaction restores its
+real journal timestamp and waits for a fresh host-count baseline; the persisted
+`details.tokensAfter` value is a heuristic and never supplies that baseline, and
+ordinary admission above auto still requires 4,000 tokens of growth. Missing,
+malformed, future-dated, or untrusted journal data keeps the conservative
+guards; model and branch changes require a fresh sample; duplicate commit events
+cannot reset guards, and manual, foreign, or historical compaction commits
+update admission without extension success artifacts.
+
 The monitor retains a fixed 120-second cooldown and post-compaction growth
 guard. These are loop-safety mechanics, not user settings. `auto-check blocked`
 lines in `~/.pi/agent/data/dc-distill/diag.log` record the resolved geometry and its
-Pi inputs. Monitor lines also carry `session=<first 8 characters>` of the owning
-session, so records from interleaved sessions sharing the log stay attributable.
+Pi inputs. Monitor lines also carry the owning session identity (control
+characters escaped) and process id, so records from interleaved sessions and
+processes sharing the log stay attributable.
 
 ## Diagnostic Dumps
 

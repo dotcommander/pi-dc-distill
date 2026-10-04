@@ -32,6 +32,14 @@ and known verification-evidence risks.
 
 Version 13 carries validated declarations, explicit user-source pins, evidence, and failure history in a durable checkpoint. Their retention is protected across compactions; terminal prose cannot clear unresolved work. Other context remains lossy. Checkpoint updates use exact sources and stale-base rejection; invalid expected state or protected overflow cancels compaction.
 
+Summaries also carry a digest-authenticated `<request-candidate-v1>` marker:
+the latest native user request restated as attributed context only — it never
+becomes declared work, pins, or authorization. It is bounded with its optional
+proposal inside a 4,096-code-point envelope and survives repeated compaction
+through authenticated carry. See
+[summary organization](docs/algorithm.md#summary-organization) for placement and
+budget-eviction order.
+
 Optional conversation previews shorten exact adjacent repetitions in eligible
 background prose before clipping, retaining one phrase and an explicit repetition
 count. This display cleanup preserves the original semantic preview used for
@@ -181,6 +189,20 @@ to `diag.log` and `diag.ndjson` in that same directory; each rotates once
 it exceeds 5 MiB, and rotated history is kept. See
 [architecture](docs/architecture.md#shared-recall-and-diagnostics) for
 diagnostic path details and the removed legacy recall deep imports.
+
+Trigger policy v3 lets the headroom floor and emergency bypass startup warmup,
+cooldown, synchronization, and repeat-growth guards. Ownership, enabled valid Pi
+settings, safe geometry, a finite count, and the concurrency latch still apply.
+Ordinary checks retain warmup and require a current positive host usage sample.
+A trustworthy nonempty restored branch with no compaction can skip the synthetic
+120-second startup cooldown after warmup. A restored compaction uses its real
+journal timestamp and a fresh host-count baseline; if still above auto, another
+ordinary compaction needs 4,000 tokens of growth. Persisted `details.tokensAfter`
+is a heuristic and never supplies that restart baseline. Missing or invalid
+journal data keeps conservative guards. Model and branch changes require a fresh
+sample, and duplicate commits do not reset admission guards. Manual, foreign,
+and historical compaction commits update admission without extension success
+artifacts. Diagnostics include session and process provenance. Details remain v13.
 
 The compiler is rule-based and lossy. It can miss subjective context and
 low-signal details, so a handoff or focus hint helps mark what matters.

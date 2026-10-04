@@ -174,7 +174,9 @@ prose instructions; this is not a guarantee of preserving every implied obligati
 The preview cap and recency policy are derived once from the original source
 and applied unchanged to both its semantic preview and compressed display.
 Shortening repeated background does not reclassify the display under a smaller
-preview cap. Existing completion-report treatment is retained. Display clipping
+preview cap. Existing completion-report treatment is retained. Plain-prose
+display text over an explicit preview cap is shown as a two-edge excerpt with a
+code-point omission notice instead of a head-only clip. Other display clipping
 prefers a natural whitespace boundary and an ellipsis, with a
 complete-code-point fallback for unbroken text. It cannot guarantee complete sentences or preserve everything
 beyond the cap. Other budget eviction still removes complete optional records.
@@ -264,7 +266,13 @@ resume index; recovery and omissions; change-impact advice and verification;
 the complete handoff projection; resume risks; resume tasks. Version 13 omits
 the model-facing metric line; telemetry stays in details and committed notifications. Only exact compatible records are deduplicated; a
 generated task is suppressed only for the same explicit structured task ID.
-Offline section-position checks cover this organization. Pi retains messages
+A digest-authenticated `<request-candidate-v1>` marker follows the checkpoint
+projection: the latest native user request restated as attributed context
+only — never declared work, pins, or authorization — with source identity, a
+request of at most 2,048 code points, an optional proposal of at most 512, and
+the whole marker, framing and escaping included, within 4,096 code points.
+Offline
+section-position checks cover this organization. Pi retains messages
 after the summary, so risks are not the absolute end of the model prompt. This
 ordering establishes neither improved attention nor prompt-cache gains.
 
@@ -279,9 +287,11 @@ fidelity.
 code points of headroom and drops complete records in this order:
 
 1. Recent tool results, source anchors, literal anchors, and recent tool calls.
-2. Stale verification receipts.
+2. Stale verification receipts, meaning passes whose freshness is not established.
 3. Conversation turns, read files, and modified files.
-4. Older working-tree and verification receipts, retaining at least one of each.
+4. Older working-tree rows and unprotected verification receipts, retaining
+   required, failed, and pending receipts and at least one row.
+5. Retained-context excerpts, then the request-candidate proposal and marker.
 
 When multiple conversation turns remain but all are protected, excess active
 tasks can also be removed after the other evidence lists are exhausted.

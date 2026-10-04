@@ -101,3 +101,61 @@ receipt and margin reported; it does not establish a durable performance margin
 or installed interactive-host behavior. These synthetic measurements do not
 prove ordinary version-12-to-version-13 cost unless that exact baseline was
 available and measured under the matching geometry.
+
+Caching adoption uses a separate matched pair after feature changes are complete.
+Freeze the feature-complete **uncached** compiler tree before applying caching;
+compare it with the cached tree using the current harness. The original frozen
+pre-feature baseline remains the ordinary latency/RSS reference for feature cost.
+Do not require output parity across intentional feature changes.
+
+The 2026-10-04 candidate resume-render cache was rejected and is not adopted;
+production remains uncached. All seven workload parity comparisons and the
+ordinary gate passed, but budgetPressureV2 p50 improved only 2.74%, below the
+required 10%. Absolute lifetime RSS also exceeded the baseline +8 MiB limits
+for manyRecords (1,591,476,224 bytes versus a 1,463,992,320-byte limit) and
+oversizedRecord (693,043,200 bytes versus a 581,566,464-byte limit). The retained
+gate receipt is `/private/tmp/dc-distill-verify-d3g1_y6z/final/cache-gate.json`;
+its paired worker receipts and source manifests identify the compared trees.
+The comparison tooling below remains available for future candidates.
+
+```sh
+# Seal only: no compiler imports or measurements, preserves existing input bytes.
+bun scripts/benchmark-compiler.ts --seal /private/tmp/distill-bench seal
+# Optional final argument selects compiler source independently of harness/SDK.
+bun scripts/benchmark-compiler.ts --checkpoint /private/tmp/distill-bench uncached /private/tmp/original.checkpoint.json /private/tmp/feature-uncached-tree
+bun scripts/benchmark-compiler.ts --checkpoint /private/tmp/distill-bench cached /private/tmp/original.checkpoint.json /path/to/candidate
+bun scripts/benchmark-compiler.ts --cache-gate /private/tmp/distill-bench/uncached.checkpoint.json /private/tmp/distill-bench/cached.checkpoint.json
+```
+
+For one added workload, reuse the seal and invoke
+`--checkpoint-worker <sealed-input-path> baseline <compiler-root>` directly;
+this avoids repeating unchanged ordinary measurements. Worker stdout is a JSON
+receipt; preserve it with exclusive file creation. Assemble `ordinary` and
+`nearLimit` only from matching worker receipts. The caching gate requires 10
+warmups and 30 samples per worker, at least 10% budgetPressureV2 p50 improvement,
+ordinary p50/p95 within `max(baseline * 1.10, baseline + 1 ms)`, and absolute
+lifetime RSS no more than baseline +8 MiB for each workload. It compares complete
+canonical identities, result objects (including Unicode summary, readiness,
+omission order and checkpoint), and typed protected-overflow rejections. The
+pressure workload combines verification invalidated by later edits with historical
+optional milestones. unicodeLexical, readinessIdentity and protectedOverflow are
+required separate parity workloads; their omission fails the caching gate. Independent checkpoint
+quality fixtures also preserve readiness requirements and repeated carry.
+
+Receipts record the absolute compiler source root and diagnostic scratch Pi
+profile. Before imports, scripts reserve private temporary agent/session dirs,
+so diagnostic writes do not target an active Pi profile. Retain a source manifest
+hash and revision alongside every frozen tree: a path alone is not immutable
+source identity. Both workers preload the same project-local SDK through the
+current harness, even when the compiler comes from another tree; do not compare
+workers launched with different harnesses or SDK installations. Source manifests
+must include pre-existing dirty files that affect the compiler.
+
+The checkpoint quality corpus separates mandatory declared-state fidelity from
+undeclared request context. Its independently authored oracle checks long and
+multilingual requests, leading references, late restrictions, explicit corrections,
+source identities, forged marker text, and five-generation authenticated carry.
+Request context must never become checkpoint tasks, pins, or authorization.
+These checks prove bounded synthetic retention and parity; they do not establish
+model attention, installed-host behavior, production throughput, or provider
+acceptance. Pressure speedup alone does not establish a dominant production cost.

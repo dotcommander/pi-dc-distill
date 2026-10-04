@@ -297,23 +297,36 @@ settings merge.
 A blocked at-or-above-auto observation sets a `missedAuto` marker; the next
 unblocked warn-band observation then compacts mechanically
 (`missed-auto-pursuit`) instead of steering. Decided checks log
-`auto-check decided tier=… reason=… policy=v2` in diag.log.
+`auto-check decided tier=… reason=… policy=v3` in diag.log.
+
+Restart admission restores guard history once at startup from the
+active-branch journal snapshot: a trustworthy nonempty branch without a
+compaction may skip the synthetic 120-second cooldown (warmup and a current
+synchronized host count still apply); a prior compaction restores its real
+timestamp and waits for a fresh host-count baseline, never the persisted
+heuristic `details.tokensAfter`; ordinary admission above auto still requires
+4,000 tokens of growth. Untrusted, malformed, future-dated, or missing journal
+data preserves conservative guards; model and branch changes require fresh
+samples; duplicate commit events cannot reset guards; manual, foreign, and
+legacy commits update admission without extension success artifacts.
 
 `compaction.enabled: false` makes the autonomous monitor a no-op; manual
 `/compact` still enters the deterministic `session_before_compact` hook. Fixed
 small-window floors preserve ordered bands and can reduce the 20K lead. Invalid
 settings block autonomous checks while manual deterministic interception remains
 available. If Pi cannot report a context window, legacy 100K/140K/160K fallbacks
-apply. Emergency may use a finite local estimate and bypasses warmup, cooldown,
-sync, and growth guards; ownership, valid enabled settings, and the attempt latch
-still apply. Ordinary auto/warn decisions require the current finite positive host
+apply. The headroom floor and emergency may use a finite local estimate and
+bypass warmup, cooldown, sync, and growth guards; ownership, valid enabled
+settings, and the attempt latch still apply. Ordinary auto/warn decisions require the current finite positive host
 count; unavailable, thrown, or invalid samples cannot reuse an earlier sync.
 Nonfinite local estimates cannot trigger compaction.
 
 Blocked diagnostics deduplicate by reason, model, effective settings, geometry,
 and sample status, excluding changing token counts and countdowns. They include
 reserve tokens and threshold sources from Pi's effective snapshot, without
-inventing global/project provenance.
+inventing global/project provenance. Monitor and blocked lines carry the owning
+session identity (control characters escaped) and process id so interleaved
+sessions and processes stay attributable in the shared log.
 
 ## Continuation and Focus Echo
 

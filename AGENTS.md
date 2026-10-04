@@ -148,7 +148,7 @@ advisory only, with no filesystem enrichment or dependency-based pass preservati
 Version 12 uses the baseline production selector after the coverage candidate
 failed its ordinary-workload performance gate. Coverage remains available offline;
 production keeps one deterministic strategy.
-Move complete handoff projection late, followed by resume risks/tasks, with metrics confined to details and committed notifications. Organization makes no attention or prompt-cache guarantee.
+Move complete handoff projection late, followed by resume risks/tasks, with metrics confined to details and committed notifications. A digest-authenticated `<request-candidate-v1>` marker restates the latest native user request as attributed context only — never declared work, pins, or authorization — bounded to a 4,096-code-point envelope with an optional 512-code-point proposal, evicted only after retained-context excerpts, and carried across compactions only through digest-authenticated predecessor summaries. Verification display prioritizes required, failed, and pending receipts and protects them from budget eviction without changing checkpoint observations. Organization makes no attention or prompt-cache guarantee.
 Invalid envelopes stay bounded legacy text.
 
 ## Transactional Lifecycle
@@ -194,12 +194,12 @@ autonomous checks without disabling manual deterministic interception:
 and 100K/140K/160K are legacy fallbacks only when Pi cannot report a context
 window; small-window floors can reduce the 20K lead. Ordinary checks require a
 current finite positive host count and apply cooldown, post-compaction growth,
-Pi-sync, and warmup guards. Emergency bypasses those guards; ownership, valid
+Pi-sync, and warmup guards. Headroom floor and emergency bypass those guards; ownership, valid
 enabled Pi settings, and the concurrency latch still apply. The 120,000-token target is fixed
 policy, not extension configuration; smaller contexts are capped by Pi's safe
 geometry. `auto-check blocked` records in `~/.pi/agent/data/dc-distill/diag.log` carry Pi's inputs and the resolved boundaries.
 
-Trigger policy version 2 adds two decisions on top of those bands. The
+Trigger policy version 3 retains two decisions on top of those bands. The
 **headroom floor** is `contextWindow - 16,384 - 4,096` (answer budget plus
 pi-ai's request-clamp safety margin), clamped into
 [warn, emergency]: at or above it, pi-ai's clamp
@@ -209,8 +209,20 @@ with the same guard bypass as emergency. A **missed auto window is pursued**: a
 blocked at-or-above-auto observation sets a `missedAuto` marker, and the next
 unblocked warn-band observation compacts mechanically (`missed-auto-pursuit`)
 instead of steering; the marker never bypasses guards and is reset on
-compaction. Decided checks log `auto-check decided tier=… reason=… policy=v2`
+compaction. Decided checks log `auto-check decided tier=… reason=… policy=v3`
 alongside the existing `auto-check blocked` records.
+
+At startup, capture the owner session identity and active branch journal once.
+A trustworthy nonempty branch without a compaction may skip the synthetic
+120-second cooldown only after ordinary warmup and a current synchronized host
+count. A prior compaction restores its real timestamp and waits for a fresh host
+usage baseline; ordinary admission above auto still requires 4,000-token growth.
+Never restore that baseline from heuristic `details.tokensAfter`. Missing,
+malformed, future-dated, or inaccessible journal data preserves conservative
+guards. Model and branch changes require fresh samples. Duplicate commit events
+cannot reset guards; manual, foreign, and legacy commits update admission without
+extension success artifacts. Diagnostics include session/process provenance.
+Trigger policy is v3; compaction details remain version 13.
 
 ## Optional Feature Gates
 
@@ -329,7 +341,7 @@ first. Invalid expected v13 state cancels instead of reconstructing from prose.
 Rollback requires a v13-aware reader or must refuse lossy carry-forward.
 
 The `agent_settled` observer requests `ctx.compact()` as a separate operation;
-migration to `agent_before_settle` is deferred. Trigger policy version 2 names
+migration to `agent_before_settle` is deferred. Trigger policy version 3 names
 the 120,000 cap, 20,000 lead, headroom floor, and missed-auto pursuit.
 Positive ordered boundaries are required;
 effective windows below three tokens disable automatic admission.
