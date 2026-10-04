@@ -358,13 +358,13 @@ package, as Pi's packaging contract requires; the reviewed-host boundary
 (0.99.2 patch releases, exact 1.0.0, and 1.0.2) is carried by the development pins
 and review, not by the peer ranges.
 
-Pi 0.99.2, 1.0.0, and 1.0.2 render the latest compaction once with its native summary component.
-The extension leaves its InteractiveMode prototype unchanged. Tests drive the
-installed host's compaction handler and render its expanded native component
-to verify deterministic metrics. Reviewed 0.99.0 remains in the native-card
-allowlist; earlier presentation shims remain as historical compatibility code,
-not a claim of support for those SDK versions. Unknown host versions do not
-receive a private presentation patch.
+Pi 0.99.0+ and 1.x (including 1.0.0, 1.0.2, 1.0.3, and subsequent releases) render
+compaction natively with their built-in summary component. The extension leaves
+their InteractiveMode prototype unchanged. Tests drive the installed host's
+compaction handler and render its expanded native component to verify deterministic
+metrics. Earlier presentation shims remain as historical compatibility code, not a
+claim of support for those SDK versions. Unreviewed older host versions (< 0.99)
+do not receive a private presentation patch.
 
 The opt-in RPC suite under `tests/e2e` checks one extension-owned append,
 active discarded/focused content, version-13 details and checkpoint integrity, continuation recovery,

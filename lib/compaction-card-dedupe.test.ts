@@ -5,6 +5,8 @@ import { join } from "node:path";
 import {
   installCompactionCardDedupe,
   installPiCompactionCardDedupe,
+  isNativeCardPiVersion,
+  SUPPORTED_PI_VERSIONS,
 } from "./compaction-card-dedupe.ts";
 import { COMPACTION_CARD_TYPE } from "./compaction-card.ts";
 import { Runtime } from "./runtime-probe.ts";
@@ -209,24 +211,10 @@ describe("compaction card dedupe", () => {
 
   test("uses the reviewed active Pi presentation with fixture session rendering", async () => {
     const activePi = await Runtime.loadActivePiInteractiveMode();
-    expect([
-      "0.79.8",
-      "0.80.9",
-      "0.80.10",
-      "0.82.0",
-      "0.82.1",
-      "0.83.0",
-      "0.84.4",
-      "0.85.1",
-      "0.87.0",
-      "0.87.1",
-      "0.99.0",
-      "0.99.2",
-      "1.0.0",
-      "1.0.2",
-    ]).toContain(
-      activePi.packageVersion,
-    );
+    expect(
+      isNativeCardPiVersion(activePi.packageVersion) ||
+      SUPPORTED_PI_VERSIONS.has(activePi.packageVersion),
+    ).toBe(true);
     const originalHandler = activePi.prototype.handleEvent;
     const installation = await installPiCompactionCardDedupe();
     const rendered: TestMessage[] = [];
@@ -257,7 +245,7 @@ describe("compaction card dedupe", () => {
     // Session rendering is stubbed here; this is not an installed-renderer proof.
     try {
       await activePi.prototype.handleEvent.call(fakeMode, EVENT);
-      if (["0.99.0", "0.99.2", "1.0.0", "1.0.2"].includes(activePi.packageVersion)) {
+      if (isNativeCardPiVersion(activePi.packageVersion)) {
         expect(installation).toBeNull();
         expect(activePi.prototype.handleEvent).toBe(originalHandler);
         expect(rendered).toHaveLength(1);
@@ -272,7 +260,7 @@ describe("compaction card dedupe", () => {
 
   test("the installed native handler and renderer produce one expanded card with deterministic metrics", async () => {
     const activePi = await Runtime.loadActivePiInteractiveMode();
-    if (!["0.99.0", "0.99.2", "1.0.0", "1.0.2"].includes(activePi.packageVersion)) return;
+    if (!isNativeCardPiVersion(activePi.packageVersion)) return;
     const { CompactionSummaryMessageComponent } = await import(
       new URL("./modes/interactive/components/compaction-summary-message.js", activePi.moduleUrl).href
     );
@@ -342,6 +330,33 @@ describe("compaction card dedupe", () => {
 
       await expect(installPiCompactionCardDedupe(join(root, "bin", "pi")))
         .rejects.toThrow("not reviewed");
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  test("isNativeCardPiVersion recognizes Pi 0.99+ and 1.x as native-card hosts", () => {
+    for (const v of ["0.99.0", "0.99.2", "0.99.5", "1.0.0", "1.0.2", "1.0.3", "1.0.4", "1.1.0", "2.0.0"]) {
+      expect(isNativeCardPiVersion(v)).toBe(true);
+    }
+    for (const v of ["0.79.8", "0.80.9", "0.81.0", "0.87.1", "0.98.0", "invalid"]) {
+      expect(isNativeCardPiVersion(v)).toBe(false);
+    }
+  });
+
+  test("accepts future Pi 1.0.x versions as native-card hosts without patching", async () => {
+    const root = mkdtempSync(join(tmpdir(), "dc-distill-future-pi-"));
+    try {
+      mkdirSync(join(root, "bin"));
+      mkdirSync(join(root, "modes", "interactive"), { recursive: true });
+      writeFileSync(join(root, "bin", "pi"), "#!/bin/sh\n");
+      writeFileSync(join(root, "package.json"), JSON.stringify({ version: "1.0.3", type: "module" }));
+      writeFileSync(join(root, "index.js"), "export class InteractiveMode { async handleEvent() {} }\n");
+      writeFileSync(join(root, "modes", "interactive", "interactive-mode.js"), "export {};\n");
+
+      const entrypoint = join(root, "bin", "pi");
+      const handle = await installPiCompactionCardDedupe(entrypoint);
+      expect(handle).toBeNull();
     } finally {
       rmSync(root, { recursive: true, force: true });
     }

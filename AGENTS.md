@@ -256,10 +256,10 @@ Pi's packaging contract requires; the reviewed-host boundary (0.99.2 patch
 releases, exact 1.0.0, and 1.0.2) is carried by the development pins and the review
 process, not by the peer ranges.
 
-Reviewed Pi 0.99.0, 0.99.2, 1.0.0, and 1.0.2 use their native compaction card without patching
-the InteractiveMode prototype. Older reviewed hosts retain historical shim
-fixtures. Add a host version only after inspecting its handler and verifying
-the installed rendering path; fixture-only tests do not prove rendering.
+Reviewed Pi 0.99.0+ and 1.x (including 1.0.0, 1.0.2, 1.0.3, and subsequent releases)
+use their native compaction card without patching the InteractiveMode prototype. Older
+reviewed hosts retain historical shim fixtures. Unreviewed older host versions (< 0.99)
+do not receive a private presentation patch.
 
 ## Verification
 
