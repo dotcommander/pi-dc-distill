@@ -1,11 +1,17 @@
 /** Opt-in local benchmark; never contacts Pi or a provider. */
 import { createHash } from "node:crypto";
-import { mkdir, readFile, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, writeFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { spawnSync } from "node:child_process";
 import type { CompactionSource } from "../lib/compaction-source.ts";
 import { pathToFileURL } from "node:url";
-import { compareOrdinaryPerformance } from "../lib/offline/performance-gate.ts";
+import { compareCachingPerformance, compareOrdinaryPerformance } from "../lib/offline/performance-gate.ts";
+// Reserve diagnostic storage before any Pi/compiler import. Keep the scratch
+// directory in the receipt for inspection; never write into the active profile.
+const scratchPiDirectory = await mkdtemp(join(tmpdir(), 'dc-distill-benchmark-'));
+process.env.PI_CODING_AGENT_DIR = join(scratchPiDirectory, 'agent');
+process.env.PI_CODING_AGENT_SESSION_DIR = join(scratchPiDirectory, 'sessions');
 // An isolated baseline checkout can supply both modules. Import lazily so its
 // RSS is not charged for loading the candidate compiler into the same worker.
 const baselineRoot = process.argv[2] === "--checkpoint-worker" ? process.argv[5] : undefined;
@@ -20,9 +26,10 @@ if (checkpointWorkerMode) {
   const packageInfo = JSON.parse(await readFile(join(import.meta.dir, "../node_modules/@earendil-works/pi-coding-agent/package.json"), "utf8"));
   hostPreload = { piCodingAgentVersion: packageInfo.version, elapsedMs: performance.now() - started, peakRssBytes: process.resourceUsage().maxRSS * 1024 };
 }
+const needsCompiler = !["--seal", "--gate", "--cache-gate", "--compare"].includes(process.argv[2]);
 const compilerLoadStarted = performance.now();
-const { canonicalizeCompactionSource } = await import(baselineRoot ? pathToFileURL(join(baselineRoot, "lib/compaction-source.ts")).href : "../lib/compaction-source.ts");
-const { compileSessionJsonl } = await import(baselineRoot ? pathToFileURL(join(baselineRoot, "lib/local-compact.ts")).href : "../lib/local-compact.ts");
+const { canonicalizeCompactionSource } = (needsCompiler ? await import(baselineRoot ? pathToFileURL(join(baselineRoot, "lib/compaction-source.ts")).href : "../lib/compaction-source.ts") : {} as typeof import("../lib/compaction-source.ts"));
+const { compileSessionJsonl } = (needsCompiler ? await import(baselineRoot ? pathToFileURL(join(baselineRoot, "lib/local-compact.ts")).href : "../lib/local-compact.ts") : {} as typeof import("../lib/local-compact.ts"));
 const compilerLoad = { elapsedMs: performance.now() - compilerLoadStarted, peakRssBytes: process.resourceUsage().maxRSS * 1024 };
 
 // Isolated processes make peak RSS comparable; a shared process's high-water
@@ -56,8 +63,16 @@ if (process.argv[2] === "--semantic-worker" || process.argv[2] === "--checkpoint
   const sorted = samples.map(sample => sample.elapsedMs).sort((a, b) => a - b);
   const quantile = (fraction: number) => sorted[Math.ceil(sorted.length * fraction) - 1];
   const absolutePeakRssBytes = process.resourceUsage().maxRSS * 1024;
-  console.log(JSON.stringify({ runtime: { bun: Bun.version, platform: process.platform, arch: process.arch, execPath: process.execPath }, selection, warmups: 10, repetitions: 30, inputHash: createHash("sha256").update(sealed).digest("hex"), options: { focus: null, recallEnabled: true, ...(hostPreload ? { memoryGeometry: "absolute-lifetime-high-water-with-identical-Pi-host-preload-v1", piCodingAgentVersion: hostPreload.piCodingAgentVersion } : {}) }, ...expected, samples, p50: quantile(.5), p95: quantile(.95), peakRssBytes: absolutePeakRssBytes, absolutePeakRssBytes, incrementalPeakRssBytes: hostPreload ? Math.max(0, absolutePeakRssBytes - hostPreload.peakRssBytes) : undefined, hostPreload, compilerLoad }));
+  console.log(JSON.stringify({ scratchPiDirectory, compilerSourceRoot: baselineRoot ?? join(import.meta.dir, ".."), runtime: { bun: Bun.version, platform: process.platform, arch: process.arch, execPath: process.execPath }, selection, warmups: 10, repetitions: 30, inputHash: createHash("sha256").update(sealed).digest("hex"), options: { focus: null, recallEnabled: true, ...(hostPreload ? { memoryGeometry: "absolute-lifetime-high-water-with-identical-Pi-host-preload-v1", piCodingAgentVersion: hostPreload.piCodingAgentVersion } : {}) }, ...expected, samples, p50: quantile(.5), p95: quantile(.95), peakRssBytes: absolutePeakRssBytes, absolutePeakRssBytes, incrementalPeakRssBytes: hostPreload ? Math.max(0, absolutePeakRssBytes - hostPreload.peakRssBytes) : undefined, hostPreload, compilerLoad }));
   process.exit(0);
+}
+
+if (process.argv[2] === "--cache-gate") {
+  const baseline = JSON.parse(await readFile(process.argv[3], "utf8"));
+  const candidate = JSON.parse(await readFile(process.argv[4], "utf8"));
+  const gate = compareCachingPerformance(baseline, candidate);
+  console.log(JSON.stringify(gate));
+  process.exit(gate.passed ? 0 : 1);
 }
 
 if (process.argv[2] === "--gate") {
@@ -83,11 +98,11 @@ if (process.argv[2] === "--compare") {
 }
 
 const semantic = process.argv[2] === "--semantic";
-const checkpointMode = process.argv[2] === "--checkpoint";
+const checkpointMode = process.argv[2] === "--checkpoint" || process.argv[2] === "--seal";
 const directory = process.argv[semantic || checkpointMode ? 3 : 2];
 const label = process.argv[semantic || checkpointMode ? 4 : 3];
 if (!directory || !label || !/^[a-zA-Z0-9_-]+$/.test(label)) {
-  throw new Error("usage: bun scripts/benchmark-compiler.ts [--semantic|--checkpoint] <artifact-directory> <unique-label> [baseline-checkpoint-receipt]");
+  throw new Error("usage: bun scripts/benchmark-compiler.ts [--semantic|--checkpoint|--seal] <artifact-directory> <unique-label> [baseline-checkpoint-receipt]");
 }
 await mkdir(directory, { recursive: true });
 const hash = (text: string) => createHash("sha256").update(text).digest("hex");
@@ -98,7 +113,14 @@ const base = (messages: CompactionSource["messagesToSummarize"]): CompactionSour
 });
 const workloads: Record<string, () => CompactionSource> = {
   ordinary: () => base(Array.from({ length: 40 }, (_, i) => ({ role: i % 2 ? "assistant" : "user", content: `Implement parser slice ${i}: preserve Unicode 😀 and é with deterministic ordering.` }))),
+  readinessIdentity: () => ({ ...base([
+    { role: 'assistant', content: [{ type: 'toolCall', id: 'ready-check', name: 'bash', arguments: { command: 'bun test parser.test.ts', cwd: '/synthetic/project' } }] },
+    { role: 'toolResult', toolCallId: 'ready-check', toolName: 'bash', isError: false, content: '1 pass, 0 fail' },
+    { role: 'user', content: 'Continue only the exact verified parser task.' },
+  ]), handoff: '```distill-handoff-v3\n' + JSON.stringify({ objective: 'Preserve exact readiness', invariants: ['Never call a provider'], decisions: [], 'rejected-hypotheses': [], 'verification-needed': [], preconditions: [{ id: 'check', kind: 'verification-pass', runner: 'bash', command: 'bun test parser.test.ts', cwd: '/synthetic/project' }], tasks: [{ id: 'parser', action: 'Finish parser', status: 'pending', 'depends-on': [], blocker: '', requires: ['check'] }] }) + '\n```' }),
+  unicodeLexical: () => base([{ role: 'user', content: 'Preserve 😀 é 中文 العربية and <task-state> literal markers; no provider calls.' }, { role: 'assistant', content: '### Decision\n' + 'é😀 & < > lexical-budget '.repeat(2_000) }]),
   manyRecords: () => base(Array.from({ length: 340 }, (_, i) => ({ role: "user", content: `record ${i}: ` + "é😀payload ".repeat(5_500) }))),
+  protectedOverflow: () => ({ ...base([]), previousSummary: "x".repeat(21 * 1024 * 1024) }),
   oversizedRecord: () => base([{ role: "user", content: "Keep older whole record." }, { role: "user", content: "x".repeat(21 * 1024 * 1024) }]),
   budgetPressureV2: () => {
     const messages: CompactionSource["messagesToSummarize"] = [];
@@ -113,6 +135,22 @@ const workloads: Record<string, () => CompactionSource> = {
     return base(messages);
   },
 };
+if (process.argv[2] === '--seal') {
+  const sealed: Array<{ name: string; path: string; inputHash: string; inputBytes: number }> = [];
+  for (const [name, build] of Object.entries(workloads)) {
+    const path = join(directory, `${name}.input.json`);
+    let bytes: string;
+    try { bytes = await readFile(path, 'utf8'); }
+    catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error;
+      bytes = JSON.stringify(build());
+      await writeFile(path, bytes, { flag: 'wx' });
+    }
+    sealed.push({ name, path, inputHash: hash(bytes), inputBytes: Buffer.byteLength(bytes) });
+  }
+  console.log(JSON.stringify({ sealed }));
+  process.exit(0);
+}
 if (checkpointMode) {
   const measurements: Record<string, any> = {};
   const failures: string[] = [];
@@ -123,7 +161,7 @@ if (checkpointMode) {
       if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
       await writeFile(path, JSON.stringify(build()), { flag: "wx" });
     }
-    const child = spawnSync(process.execPath, [import.meta.path, "--checkpoint-worker", path, "baseline"], { encoding: "utf8", maxBuffer: 16 * 1024 * 1024 });
+    const child = spawnSync(process.execPath, [import.meta.path, "--checkpoint-worker", path, "baseline", ...(process.argv[6] ? [process.argv[6]] : [])], { encoding: "utf8", maxBuffer: 16 * 1024 * 1024 });
     if (child.status !== 0 || child.error) { failures.push(`${name}: ${child.error?.message ?? child.stderr}`); continue; }
     try {
       const measurement = JSON.parse(child.stdout);
@@ -139,7 +177,7 @@ if (checkpointMode) {
     ? compareOrdinaryPerformance(JSON.parse(await readFile(baselinePath, "utf8")).ordinary, measurements.ordinary)
     : { passed: false, failures: ["ordinary baseline receipt not supplied"], limits: null };
   failures.push(...gate.failures);
-  const report = { schema: 3, mode: "checkpoint-bounded-processing", label, ordinary: measurements.ordinary, nearLimit: Object.fromEntries(Object.entries(measurements).filter(([name]) => name !== "ordinary")), ordinaryGate: gate, passed: failures.length === 0, failures, limitations: ["Near-limit results are measured separately and are not ordinary latency acceptance.", "Baseline and candidate must use identical runtime, input and options; summary changes are expected.", "RSS gate uses absolute lifetime high-water with identical installed Pi host preload. Incremental RSS is advisory only; prior host high-water can mask below-peak allocations in that advisory subtraction. Module-load overhead is reported separately."] };
+  const report = { schema: 4, compilerSourceRoot: process.argv[6] ?? join(import.meta.dir, ".."), mode: "checkpoint-bounded-processing", label, ordinary: measurements.ordinary, nearLimit: Object.fromEntries(Object.entries(measurements).filter(([name]) => name !== "ordinary")), ordinaryGate: gate, passed: failures.length === 0, failures, limitations: ["Near-limit results are measured separately and are not ordinary latency acceptance.", "Baseline and candidate must use identical runtime, input and options; summary changes are expected.", "RSS gate uses absolute lifetime high-water with identical installed Pi host preload. Incremental RSS is advisory only; prior host high-water can mask below-peak allocations in that advisory subtraction. Module-load overhead is reported separately."] };
   await writeFile(join(directory, `${label}.checkpoint.json`), JSON.stringify(report, null, 2) + "\n", { flag: "wx" });
   console.log(JSON.stringify({ passed: report.passed, ordinaryGate: gate, failures }));
   process.exit(failures.length ? 1 : 0);
