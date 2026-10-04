@@ -108,7 +108,8 @@ floor clamps to the 140,000 fallback warn line.
 The monitor retains a fixed 120-second cooldown and post-compaction growth
 guard. These are loop-safety mechanics, not user settings. `auto-check blocked`
 lines in `~/.pi/agent/data/dc-distill/diag.log` record the resolved geometry and its
-Pi inputs.
+Pi inputs. Monitor lines also carry `session=<first 8 characters>` of the owning
+session, so records from interleaved sessions sharing the log stay attributable.
 
 ## Diagnostic Dumps
 

@@ -81,6 +81,7 @@ export class Phase1Controller {
     this.generation++;
     this.contextRevision++;
     this.ownerSessionId = id;
+    this.monitor.sessionTag = id.slice(0, 8);
     this.ticket = null;
     this.preparing = false;
     this.preparationCancelled = false;

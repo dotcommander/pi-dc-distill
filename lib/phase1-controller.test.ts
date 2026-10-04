@@ -280,3 +280,10 @@ describe("Phase 1 decided diagnostics (policy v2)", () => {
     expect(diagnostics[0]).toContain("policy=v2");
   });
 });
+
+describe("Phase 1 diagnostic session attribution", () => {
+  test("start tags the monitor with the first 8 characters of the owner session id", () => {
+    const { controller } = fixture();
+    expect(controller.monitor.sessionTag).toBe("stub-ses");
+  });
+});

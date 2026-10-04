@@ -29,6 +29,8 @@ function contentBlockText(item: Record<string, unknown>): string {
 
 export class Monitor {
   state: CompactState
+  /** Short owner-session id (first 8 chars) tagging monitor diagnostics for attribution in the shared diag.log. */
+  sessionTag: string | null = null
   private _recorded = false // diagnostic: has record() ever been called?
   private _hasPiSynced = false // has ctx.getContextUsage() ever returned a positive token count?
 
@@ -130,7 +132,7 @@ export class Monitor {
   }
 
   private _diagLog(msg: string): void {
-    void Diag.monitor(msg)
+    void Diag.monitor(this.sessionTag ? `${msg} session=${this.sessionTag}` : msg)
   }
 
   reset(): void {

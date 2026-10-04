@@ -3,6 +3,7 @@
 
 import { describe, test, expect, beforeEach } from "bun:test"
 import { Monitor, extractText } from "./monitor.ts"
+import { Diag } from "./diag-support.ts"
 import type { CompactState } from "./types.ts"
 
 // --- Test fixture helpers ---
@@ -393,3 +394,34 @@ describe("missedAuto state reset", () => {
     expect(monitor.state.awaitingPostCompactionSample).toBe(true)
   })
 })
+
+describe("monitor diagnostic session attribution", () => {
+  test("sessionTag suffixes first-record, syncFromPi, and monitor diagnostics", () => {
+    const original = Diag.monitor;
+    const captured: string[] = [];
+    Diag.monitor = async (msg: string) => { captured.push(msg); return Promise.resolve(); };
+    try {
+      const monitor = new Monitor();
+      monitor.sessionTag = "01a106a8";
+      monitor.record(userMsg("hello"));
+      monitor.syncFromPi(null);
+      monitor.diagnostic("auto-check blocked reason=warmup");
+      expect(captured).toHaveLength(3);
+      for (const line of captured) expect(line.endsWith(" session=01a106a8")).toBe(true);
+      expect(captured[0]).toContain("first record(): role=user");
+      expect(captured[1]).toContain("syncFromPi: pi tokens=null");
+      expect(captured[2]).toBe("auto-check blocked reason=warmup session=01a106a8");
+    } finally { Diag.monitor = original; }
+  });
+
+  test("untagged monitor emits unchanged lines", () => {
+    const original = Diag.monitor;
+    const captured: string[] = [];
+    Diag.monitor = async (msg: string) => { captured.push(msg); return Promise.resolve(); };
+    try {
+      const monitor = new Monitor();
+      monitor.diagnostic("plain");
+      expect(captured).toEqual(["plain"]);
+    } finally { Diag.monitor = original; }
+  });
+});
