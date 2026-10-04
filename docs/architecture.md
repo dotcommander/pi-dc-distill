@@ -4,8 +4,8 @@
 
 The package entry point is `index.ts`. Load it with `pi -e ./index.ts`
 from an installed checkout, or use the
-[package quick start](../README.md#install). It depends only on the
-`@earendil-works/pi-coding-agent` SDK; the removed vendored framework
+[package quick start](../README.md#install). It depends only on the Pi host's `@earendil-works` SDK packages
+(`pi-coding-agent`, `pi-ai`, `pi-tui`); the removed vendored framework
 copy is gone (see [ADR 0002](adr/0002-remove-vendored-framework.md)), replaced
 by small owned support modules under `lib/` (events, entries, tool results,
 notification, paths, fs, diagnostics, host probing).
