@@ -33,6 +33,16 @@ test("recall searches durable retained source context by name and technical term
   expect(searchRecallEntries([entry], "NativeRepository migration")[0]).toContain("qualified migration evidence");
 });
 
+test("recall ranks Chinese keyword queries against Chinese summary content", () => {
+  const entries = [
+    makeEntry("2026-10-01", 100, 20, { Conversation: "缓存层级调优完成" }),
+    makeEntry("2026-10-02", 100, 20, { Conversation: "用户要求修复数据库迁移脚本。" }),
+  ];
+  const results = searchRecallEntries(entries, "数据库");
+  expect(results).toHaveLength(1);
+  expect(results[0]).toContain("数据库迁移");
+});
+
 const V4_PARTS = {
   sections: {
     Session: "Tokens before: 100000; after: 2000",

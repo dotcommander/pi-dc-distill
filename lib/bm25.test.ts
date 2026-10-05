@@ -1,6 +1,7 @@
 import { describe, test, expect } from "bun:test";
 import {
   tokenize,
+  tokenizeUnicode,
   bm25Rank,
   computeBM25Score,
   type BM25Document,
@@ -46,6 +47,52 @@ describe("BM25 Tokenizer", () => {
   test("returns empty array for empty or whitespace-only string", () => {
     expect(tokenize("")).toEqual([]);
     expect(tokenize("   \n\t  ")).toEqual([]);
+  });
+
+  test("ASCII tokenizer drops CJK text entirely (motivating limitation)", () => {
+    expect(tokenize("数据库")).toEqual([]);
+    expect(tokenize("修复 fix")).toEqual(["fix"]);
+  });
+});
+
+describe("Unicode search tokenization (tokenizeUnicode)", () => {
+  test("indexes Han characters as unigram terms and keeps the whole run", () => {
+    const tokens = tokenizeUnicode("数据库");
+    expect(tokens).toContain("数据库");
+    expect(tokens).toContain("数");
+    expect(tokens).toContain("据");
+    expect(tokens).toContain("库");
+  });
+
+  test("keeps ASCII output byte-identical to tokenize", () => {
+    const text = "getAuthToken auth_token lib/recall.ts deploy --force 123";
+    expect(tokenizeUnicode(text)).toEqual(tokenize(text));
+    expect(tokenizeUnicode("")).toEqual([]);
+  });
+
+  test("indexes non-Han non-ASCII scripts as whole letter runs", () => {
+    const tokens = tokenizeUnicode("よろしく 안녕 Привет");
+    expect(tokens).toContain("よろしく");
+    expect(tokens).toContain("안녕");
+    expect(tokens).toContain("привет");
+  });
+
+  test("adds Han unigrams inside fused Latin-CJK runs", () => {
+    const tokens = tokenizeUnicode("read数据库");
+    expect(tokens).toContain("read数据库");
+    expect(tokens).toContain("数");
+    expect(tokens).toContain("据");
+    expect(tokens).toContain("库");
+    expect(tokens).toContain("read");
+  });
+
+  test("does not index CJK punctuation", () => {
+    expect(tokenizeUnicode("，。！？")).toEqual([]);
+  });
+
+  test("Han term frequency follows character occurrences", () => {
+    const tokens = tokenizeUnicode("数据 数据");
+    expect(tokens.filter((t) => t === "数").length).toBe(2);
   });
 });
 
@@ -118,6 +165,40 @@ describe("BM25 Scoring & Ranking", () => {
     ];
     const results = bm25Rank(docs, (d) => d.text, "authentication");
     expect(results).toHaveLength(0);
+  });
+
+  test("ranks Chinese query against Chinese document content", () => {
+    const docs = [
+      { id: "en", text: "fixed cache invalidation bug" },
+      { id: "zh", text: "修复了数据库连接错误" },
+    ];
+    const results = bm25Rank(docs, (d) => d.text, "数据库");
+    expect(results).toHaveLength(1);
+    expect(results[0].doc.id).toBe("zh");
+    expect(results[0].score).toBeGreaterThan(0);
+  });
+
+  test("Chinese substring query matches via Han unigrams where whole runs cannot", () => {
+    // Run tokens alone would miss: run 数据库 vs run 数据丢失风险 share no whole run.
+    const docs = [
+      { id: "risk", text: "数据丢失风险 needs review" },
+      { id: "other", text: "unrelated migration notes" },
+    ];
+    const results = bm25Rank(docs, (d) => d.text, "数据");
+    expect(results).toHaveLength(1);
+    expect(results[0].doc.id).toBe("risk");
+  });
+
+  test("mixed Chinese-English query ranks on both scripts' terms", () => {
+    const docs = [
+      { id: "1", text: "cache layer tuning notes" },
+      { id: "2", text: "缓存 cache 层调优记录" },
+    ];
+    const results = bm25Rank(docs, (d) => d.text, "cache 缓存");
+    // Doc 2 matches both scripts' terms and outranks doc 1's single ASCII match.
+    expect(results[0].doc.id).toBe("2");
+    expect(results[0].score).toBeGreaterThan(results[1]!.score);
+    expect(results[1].doc.id).toBe("1");
   });
 
   test("deterministic tie-breaking preserves original order on equal scores", () => {

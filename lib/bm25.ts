@@ -5,6 +5,11 @@
  *   IDF(q) = ln(1 + (N - n + 0.5) / (n + 0.5))
  *
  * Zero external dependencies. 100% deterministic.
+ *
+ * Two tokenizers: `tokenize` stays ASCII-only (the compiler's lexical budget
+ * depends on its byte-for-byte stability), while `tokenizeUnicode` adds a
+ * non-ASCII supplement — Han unigrams plus non-ASCII letter runs — for recall
+ * search. Only bm25Rank (the recall path) uses the Unicode-aware tokenizer.
  */
 
 export interface BM25Document<T> {
@@ -23,6 +28,10 @@ export interface BM25Options {
 }
 
 const TOKEN_PATTERN = /[A-Za-z0-9_./-]+/g;
+/** Non-ASCII letter/number runs (same class family as lexical-budget's relevanceTokens). */
+const UNICODE_RUN_PATTERN = /[\p{L}\p{M}\p{N}_./-]+/gu;
+/** Han characters, matched one code point at a time for unigram indexing. */
+const HAN_CHAR_PATTERN = /\p{Script=Han}/gu;
 
 /**
  * Code-aware tokenization:
@@ -82,9 +91,26 @@ export function tokenize(text: string): string[] {
   return tokens;
 }
 
+const HAS_NON_ASCII = /[^\x00-\x7f]/;
+
 /**
- * Compute Lucene-style non-negative Okapi BM25 score for a single document.
+ * Unicode-aware search tokenization: the ASCII tokenizer plus a non-ASCII
+ * supplement. Han characters index as single-character terms (unigrams) so
+ * substring queries match unspaced Chinese text — whole runs alone cannot
+ * (query 数据 vs run 数据丢失). Other non-ASCII scripts (kana, hangul,
+ * Cyrillic, ...) index as whole letter runs, matching their space/segment
+ * structure. ASCII output is byte-identical to tokenize().
  */
+export function tokenizeUnicode(text: string): string[] {
+  const ascii = tokenize(text);
+  if (!HAS_NON_ASCII.test(text)) return ascii;
+  const supplement: string[] = [];
+  for (const run of text.match(UNICODE_RUN_PATTERN) ?? []) {
+    if (HAS_NON_ASCII.test(run)) supplement.push(run.toLowerCase());
+  }
+  for (const [han] of text.matchAll(HAN_CHAR_PATTERN)) supplement.push(han);
+  return [...ascii, ...supplement];
+}
 export function computeBM25Score(
   queryTokens: string[],
   docTokens: string[],
@@ -126,6 +152,8 @@ export function computeBM25Score(
 
 /**
  * Rank an array of documents against a text query using BM25.
+ * Uses the Unicode-aware tokenizer: CJK content and queries rank correctly
+ * (Han unigrams + non-ASCII letter runs supplement the ASCII terms).
  * Only returns documents with score > 0, sorted descending by score.
  * Equal scores preserve original array order (deterministic tie-breaking).
  */
@@ -135,7 +163,7 @@ export function bm25Rank<T>(
   query: string,
   options: BM25Options = {},
 ): BM25Document<T>[] {
-  const qTokens = tokenize(query);
+  const qTokens = tokenizeUnicode(query);
   if (qTokens.length === 0 || docs.length === 0) return [];
 
   const k1 = options.k1 ?? 1.2;
@@ -143,7 +171,7 @@ export function bm25Rank<T>(
   const boostExact = options.boostExact ?? true;
 
   const docTexts = docs.map(getText);
-  const tokenizedDocs = docTexts.map(tokenize);
+  const tokenizedDocs = docTexts.map(tokenizeUnicode);
   const totalDocs = docs.length;
 
   const totalTokens = tokenizedDocs.reduce((sum, tokens) => sum + tokens.length, 0);
