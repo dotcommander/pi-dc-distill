@@ -289,7 +289,7 @@ git diff --check
 ```
 
 `bun run distill:quality <artifact-directory> <unique-label>` writes the offline
-checkpoint and optional-selector quality receipt.
+checkpoint, generation-survival, and optional-selector quality receipts.
 `bun run distill:performance <artifact-directory> <unique-label> <baseline-checkpoint-receipt>`
 runs the checkpoint benchmark with 10 warmups and 30 samples in isolated workers.
 The ordinary gate requires identical sealed input, runtime/options, and Pi SDK
