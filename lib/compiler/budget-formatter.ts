@@ -485,7 +485,7 @@ function formatRetainedContext(conv: ConversationResult, measure = false): Rende
   return sink.value();
 }
 
-interface SummaryProjection {
+export interface SummaryProjection {
   structured: ParsedStructuredDistillHandoff | null;
   handoffBlock: string;
   blocks?: WeakMap<object, Map<string, RenderedSection>>;
@@ -494,7 +494,7 @@ interface SummaryProjection {
   measureOnly?: boolean;
   renderedCost?: number;
 }
-function prepareSummaryProjection(meta: SessionMeta, conv: ConversationResult): SummaryProjection {
+export function prepareSummaryProjection(meta: SessionMeta, conv: ConversationResult): SummaryProjection {
   const handoff = meta.handoff?.trim();
   const checkpoint = conv.checkpoint;
   const attributed = handoff ? parseAnyStructuredDistillHandoff(handoff) : undefined;
@@ -504,10 +504,16 @@ function prepareSummaryProjection(meta: SessionMeta, conv: ConversationResult): 
   } : handoff ? parseAnyStructuredDistillHandoff(handoff) ?? null : null;
   return { structured, handoffBlock: structured ? renderStructuredHandoff(structured, conv.observationSnapshot) : handoff ? `<current-intent>\n${escapeAngles(handoff)}\n</current-intent>` : "" };
 }
+/** Fixed first line of every compiled summary: it describes only the discarded
+ * prefix, and the retained tail carries newer state. Static by design — no
+ * timestamp, so identical input keeps producing byte-identical summaries. */
+const SUMMARY_SCOPE_NOTE = "This summary covers only the entries Pi discarded at compaction; newer state lives in the retained messages that follow it in context.";
+
 export function formatSummary(meta: SessionMeta, conv: ConversationResult, userFocus?: string, projection?: SummaryProjection): string {
   const parts: RenderedSection[] = [];
-  if (conv.checkpoint) { const text = renderCheckpoint(conv.checkpoint); if (text) parts.push(projection?.measureOnly ? codePointLength(text) : text, ""); }
   const measure = projection?.measureOnly ?? false;
+  parts.push(measure ? codePointLength(SUMMARY_SCOPE_NOTE) : SUMMARY_SCOPE_NOTE, "");
+  if (conv.checkpoint) { const text = renderCheckpoint(conv.checkpoint); if (text) parts.push(measure ? codePointLength(text) : text, ""); }
   if (conv.requestCandidate) {
     const candidate = renderRequestCandidate(conv.requestCandidate);
     parts.push(measure ? codePointLength(candidate) : candidate, "");

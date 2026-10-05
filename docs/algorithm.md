@@ -260,7 +260,12 @@ omission counts and complete retained references.
 
 ## Summary organization
 
-Complete sections place stable supplied identity first, then goal/focus,
+Every summary opens with a fixed one-line scope note: it covers only the
+entries Pi discarded at compaction, and newer state lives in the retained
+messages that follow it in context. The note is static — no timestamp, so
+identical input still compiles byte-identically — and its cost is charged to
+the summary budget in both the measure and wire passes. Complete sections then
+place stable supplied identity first, then goal/focus,
 conversation and prior context; file/tool/working-tree evidence; anchors and
 resume index; recovery and omissions; change-impact advice and verification;
 the complete handoff projection; resume risks; resume tasks. Version 13 omits
