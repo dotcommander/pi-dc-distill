@@ -52,7 +52,7 @@ function detailsOf(entry: RecoveryEntryLike): Record<string, unknown> {
 function autonomousAttemptId(entry: RecoveryEntryLike): string | null {
   if (entry.type !== "compaction") return null;
   const details = detailsOf(entry);
-  if (!isDistillCompactor(details.compactor) || ![8, 9, 10, 11, 12, 13].includes(details.version as number)) return null;
+  if (!isDistillCompactor(details.compactor) || ![8, 9, 10, 11, 12, 13, 14].includes(details.version as number)) return null;
   if (details.autonomous !== true) return null;
   const attemptId = details.attemptId;
   return typeof attemptId === "string" && attemptId.length > 0 ? attemptId : null;
@@ -76,7 +76,7 @@ export function recoverContinuation(entries: RecoveryEntryLike[]): ContinuationR
   for (let i = entries.length - 1; i >= 0; i--) {
     const entry = entries[i]!;
     const details = detailsOf(entry);
-    if (entry.type === "compaction" && isDistillCompactor(details.compactor) && details.version === 13) {
+    if (entry.type === "compaction" && isDistillCompactor(details.compactor) && (details.version === 13 || details.version === 14)) {
       try {
         if (typeof details.checkpointDigest !== "string" || typeof entry.summary !== "string"
           || sha256Hex(entry.summary) !== details.summaryDigest) return { ...NONE };

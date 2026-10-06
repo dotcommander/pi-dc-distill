@@ -3,7 +3,9 @@ import { emptyCheckpoint, buildCheckpoint, checkpointDigest, validateCheckpoint,
 import { compileSessionJsonl } from "../local-compact.ts";
 import { normalizeSessionJsonl } from "./normalizer.ts";
 import { LexicalBudget } from "./lexical-budget.ts";
-import { digest } from "./helpers.ts";
+import { digest, sliceU16 } from "./helpers.ts";
+import { codePointLength } from "../unicode.ts";
+import type { CheckpointFailureV2 } from "./checkpoint.ts";
 import type { StructuredDistillHandoffV3 } from "../handoff.ts";
 const blank = { mutationEpoch: 0, fileReads: [], verification: [], modifiedPaths: [] };
 const declaration: StructuredDistillHandoffV3 = {
@@ -161,8 +163,8 @@ describe("failure retirement policy", () => {
   test("later success with the same invocation identity resolves the failure", () => {
     const attemptedFix = 'bash: {"command":"ls"}';
     const failure = { signature: digest(`${attemptedFix}\0exit 1`), attemptedFix, observedOutcome: "exit 1", sources: [] };
-    const second = buildCheckpoint(undefined, declaration, blank, undefined, undefined, undefined, [], [failure], new Set([attemptedFix]));
-    expect(second.failures.find(f => f.attemptedFix === attemptedFix)?.resolution).toBe(RESOLVED);
+    const second = buildCheckpoint(undefined, declaration, blank, undefined, undefined, undefined, [], [failure], new Set([digest(attemptedFix)]));
+    expect(second.failures.find(f => f.signature === failure.signature)?.resolution).toBe(RESOLVED);
   });
 
   test("verification failure resolves when the same identity passes in the same compaction input", () => {
@@ -234,5 +236,74 @@ describe("exact verification failure recovery", () => {
   test("historical omissions render without retained resolved records", () => {
     const c = emptyCheckpoint(); c.omittedResolvedFailures = 9;
     expect(renderCheckpoint(c)).toContain("auto-resolved failures: 0 by later success; 0 retired as not re-observed; 9 omitted historical");
+  });
+});
+
+describe("checkpoint v2 failure identity storage", () => {
+  const RESOLVED = "resolved: later success with same invocation";
+  const toolFailure = (fix: string, outcome: string) => ({ signature: digest(`${fix}\0${outcome}`), attemptedFix: fix, observedOutcome: outcome, sources: [] });
+
+  test("v2 storage keeps digest identity and bounded excerpts without full fix bytes", () => {
+    const fix = 'edit_tool: {"path":"/repo/a.ts"}';
+    const c = buildCheckpoint(undefined, undefined, blank, undefined, undefined, undefined, [], [toolFailure(fix, "boom")]);
+    expect(c.version).toBe(2);
+    const stored = c.failures[0] as CheckpointFailureV2;
+    expect(Object.keys(stored).includes("attemptedFix")).toBe(false);
+    expect(stored.fixExcerpt).toBe(fix);
+    expect(stored.invocationDigest).toBe(digest(fix));
+  });
+  test("oversized fixes and outcomes store 512-code-point excerpts and still validate", () => {
+    const fix = `edit_tool: {"newText":"${"y".repeat(2000)}"}`;
+    const outcome = "x".repeat(2000);
+    const c = buildCheckpoint(undefined, undefined, blank, undefined, undefined, undefined, [], [toolFailure(fix, outcome)]);
+    const stored = c.failures[0] as CheckpointFailureV2;
+    expect(codePointLength(stored.fixExcerpt)).toBe(512);
+    expect(codePointLength(stored.observedOutcome)).toBe(512);
+    expect(stored.fixExcerpt).toBe(sliceU16(fix, 512));
+    const round = validateCheckpoint(JSON.parse(JSON.stringify(c)), checkpointDigest(c));
+    expect(round.failures).toHaveLength(1);
+  });
+  test("prose fixes carry no invocation digest and survive a compaction", () => {
+    const prose = toolFailure("maybe the parser is wrong", "boom");
+    const first = buildCheckpoint(undefined, undefined, blank, undefined, undefined, undefined, [], [prose]);
+    expect((first.failures[0] as CheckpointFailureV2).invocationDigest).toBeUndefined();
+    const second = buildCheckpoint(first, undefined, blank, undefined, undefined, undefined, [], [prose]);
+    expect(second.failures[0].occurrences).toBe(2);
+  });
+  test("v1 carried failures convert in memory with identity, lifecycle, and retirement preserved", () => {
+    const v1 = emptyCheckpoint(); v1.version = 1;
+    const proseSig = digest("carried prose\0boom");
+    const toolFix = 'bash: {"command":"ls"}';
+    const toolSig = digest(`${toolFix}\0exit 1`);
+    v1.failures = [
+      { id: "legacy-1", objective: "", signature: proseSig, attemptedFix: "carried prose", observedOutcome: "boom", sources: [], resolution: null, occurrences: 3 },
+      { id: "legacy-2", objective: "", signature: toolSig, attemptedFix: toolFix, observedOutcome: "exit 1", sources: [], resolution: null, occurrences: 1 },
+    ];
+    const converted = buildCheckpoint(v1, undefined, blank, undefined, undefined, undefined, [], [toolFailure(toolFix, "exit 1")]);
+    expect(converted.version).toBe(2);
+    const prose = converted.failures.find(f => f.signature === proseSig)!;
+    const tool = converted.failures.find(f => f.signature === toolSig)!;
+    expect(prose.id).toBe("legacy-1");
+    expect(prose.occurrences).toBe(3);
+    expect((prose as CheckpointFailureV2).fixExcerpt).toBe("carried prose");
+    expect(prose.resolution).toBe("retired: not re-observed in compaction input");
+    expect((tool as CheckpointFailureV2).invocationDigest).toBe(digest(toolFix));
+    expect(tool.occurrences).toBe(2);
+    expect(tool.resolution).toBeNull();
+  });
+  test("raw invocation strings no longer match success identity; only digests do", () => {
+    const fix = 'bash: {"command":"ls"}';
+    const failure = toolFailure(fix, "exit 1");
+    expect(buildCheckpoint(undefined, undefined, blank, undefined, undefined, undefined, [], [failure], new Set([fix])).failures[0].resolution).toBeNull();
+    expect(buildCheckpoint(undefined, undefined, blank, undefined, undefined, undefined, [], [failure], new Set([digest(fix)])).failures[0].resolution).toBe(RESOLVED);
+  });
+  test("rendered v2 failure lines preserve the exact v13 prefix under the shared 512-code-point bound", () => {
+    const fix = `edit_tool: {"newText":"${"y".repeat(2000)}"}`;
+    const outcome = "x".repeat(2000);
+    const c = buildCheckpoint(undefined, declaration, blank, undefined, undefined, undefined, [], [toolFailure(fix, outcome)]);
+    const stored = c.failures[0] as CheckpointFailureV2;
+    const v2Line = renderCheckpoint(c).split("\n").find(l => l.startsWith(`failure ${stored.id} `))!;
+    const v13Line = `failure ${stored.id} (1): objective=${c.objective}; fix=${fix}; outcome=${outcome}; signature=${stored.signature}; sources=`;
+    expect(sliceU16(v2Line, 512)).toBe(sliceU16(v13Line, 512));
   });
 });

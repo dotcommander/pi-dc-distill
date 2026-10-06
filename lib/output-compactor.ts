@@ -1,3 +1,4 @@
+import { codePointLength, codePointPrefix, codePointSuffix } from "./unicode.ts";
 import { appendFile, mkdir } from "node:fs/promises";
 import { sha256Hex } from "./sha256.ts";
 import { dirname, join } from "node:path";
@@ -111,7 +112,7 @@ export function shouldCompact(
   text: string,
   config: OutputCompactorConfig,
 ): boolean {
-  return text.length > config.maxChars || countLines(text) > config.maxLines;
+  return codePointLength(text) > charBudget(config.maxChars) || countLines(text) > config.maxLines;
 }
 
 function policyFor(
@@ -133,27 +134,48 @@ function policyFor(
       };
 }
 
+function charBudget(limit: number): number {
+  return Number.isNaN(limit) ? 0 : Math.max(0, Math.trunc(limit));
+}
+
+/** Reserve the complete frame at the largest possible omission digit width. */
+function shortenPreview(text: string, maxChars: number, label: string): string {
+  const budget = charBudget(maxChars);
+  const length = codePointLength(text);
+  if (length <= budget) return text;
+  const frame = (omitted: number) => `\n\n... omitted ${omitted} ${label} ...\n\n`;
+  const available = budget - codePointLength(frame(length));
+  if (available < 0) return budget > 0 ? "…" : "";
+  let headCount = Math.floor(available * 0.6);
+  let tailCount = available - headCount;
+  // A cut through an existing line omission marker drops that marker whole.
+  // Regex offsets are UTF-16, converted before comparing code-point windows.
+  for (const match of text.matchAll(/^\.\.\. omitted \d+ lines \.\.\.$/gm)) {
+    const start = codePointLength(text.slice(0, match.index));
+    const end = start + codePointLength(match[0]);
+    if (start < headCount && headCount < end) headCount = start;
+    const tailStart = length - tailCount;
+    if (start < tailStart && tailStart < end) tailCount = length - end;
+  }
+  const head = codePointPrefix(text, headCount);
+  const tail = codePointSuffix(text, tailCount);
+  return head + frame(length - codePointLength(head) - codePointLength(tail)) + tail;
+}
+
 export function compactText(
   text: string,
   policy: CompactPolicy,
 ): CompactResult {
-  const originalChars = text.length;
+  const originalChars = codePointLength(text);
   const originalLines = countLines(text);
   const lines = text.split("\n");
   let preview: string;
 
   if (lines.length <= policy.headLines + policy.tailLines) {
-    if (text.length <= policy.maxChars) {
-      preview = text;
-    } else {
-      const headChars = Math.max(1, Math.floor(policy.maxChars * 0.6));
-      const tailChars = Math.max(1, policy.maxChars - headChars);
-      const omittedChars = Math.max(0, text.length - headChars - tailChars);
-      preview = `${text.slice(0, headChars)}\n\n... omitted ${omittedChars} characters ...\n\n${text.slice(-tailChars)}`;
-    }
+    preview = shortenPreview(text, policy.maxChars, "characters");
   } else {
     const head = lines.slice(0, policy.headLines);
-    const tail = lines.slice(-policy.tailLines);
+    const tail = policy.tailLines > 0 ? lines.slice(-policy.tailLines) : [];
     const omitted = lines.length - head.length - tail.length;
     preview = [
       ...head,
@@ -164,18 +186,12 @@ export function compactText(
     ].join("\n");
   }
 
-  if (preview.length > policy.maxChars) {
-    const headChars = Math.max(1, Math.floor(policy.maxChars * 0.6));
-    const tailChars = Math.max(1, policy.maxChars - headChars);
-    const omittedChars = Math.max(0, preview.length - headChars - tailChars);
-    preview = `${preview.slice(0, headChars)}\n\n... omitted ${omittedChars} preview characters ...\n\n${preview.slice(-tailChars)}`;
-  }
-
+  preview = shortenPreview(preview, policy.maxChars, "preview characters");
   return {
     text: preview,
     originalChars,
     originalLines,
-    previewChars: preview.length,
+    previewChars: codePointLength(preview),
     previewLines: countLines(preview),
   };
 }
@@ -194,6 +210,7 @@ function boundedSelectedPreview(
 ): CompactResult | undefined {
   if (selected.length === 0) return undefined;
   const sourceLineCount = countLines(text);
+  const maxChars = charBudget(policy.maxChars);
   const unique = new Map<number, SelectedLine>();
   for (const line of selected) {
     if (line.index >= sourceLineCount) continue;
@@ -221,31 +238,41 @@ function boundedSelectedPreview(
   const kept: SelectedLine[] = [];
   for (const original of ranked) {
     let line = original;
-    if ((line.priority ?? 0) > 0 && line.text.length > policy.maxChars - 64) {
-      const budget = Math.max(1, policy.maxChars - 64);
+    if ((line.priority ?? 0) > 0 && maxChars > 64 && codePointLength(line.text) > maxChars - 64) {
+      const budget = Math.max(0, maxChars - 64);
       const markerIndex = verificationFailureIndex(line.text);
-      const start = markerIndex >= 0 ? Math.max(0, markerIndex - 20) : Math.max(0, line.text.length - budget);
-      line = { ...line, text: `${start > 0 ? "…" : ""}${line.text.slice(start, start + Math.max(0, budget - 2))}${start + budget - 2 < line.text.length ? "…" : ""}` };
+      const markerPoint = markerIndex >= 0 ? codePointLength(line.text.slice(0, markerIndex)) : -1;
+      const length = codePointLength(line.text);
+      const start = markerPoint >= 0 ? Math.max(0, markerPoint - 20) : Math.max(0, length - budget);
+      const prefix = start > 0 ? "…" : "";
+      const window = codePointSuffix(line.text, length - start);
+      const available = Math.max(0, budget - codePointLength(prefix));
+      const shortened = codePointLength(window) > available;
+      const excerpt = codePointPrefix(window, Math.max(0, available - (shortened ? 1 : 0)));
+      line = { ...line, text: budget > 0 ? prefix + excerpt + (shortened && available > 0 ? "…" : "") : "" };
     }
     if (kept.length >= sourceBudget) break;
     const candidate = render([...kept, line]);
-    if (candidate.length <= policy.maxChars && countLines(candidate) <= lineBudget) kept.push(line);
+    if (codePointLength(candidate) <= maxChars && countLines(candidate) <= lineBudget) kept.push(line);
   }
   // A single oversized line must remain bounded, too. Preserve its tail (where
   // terminal causes commonly live) when no complete selected record can fit.
   let body = render(kept);
   if (kept.length === 0) {
     const line = ranked[0];
-    const marker = "…";
-    const available = Math.max(0, policy.maxChars - render([{ ...line, text: "" }]).length - marker.length);
-    body = render([{ ...line, text: marker + line.text.slice(-available || line.text.length) }]);
-    if (body.length > policy.maxChars || countLines(body) > lineBudget) body = policy.maxChars > 0 ? line.text.slice(-policy.maxChars) : "";
+    const frameChars = codePointLength(render([{ ...line, text: "" }]));
+    const available = Math.max(0, maxChars - frameChars);
+    const length = codePointLength(line.text);
+    const excerpt = length <= available ? line.text
+      : available > 0 ? "…" + codePointSuffix(line.text, available - 1) : "";
+    body = render([{ ...line, text: excerpt }]);
+    if (codePointLength(body) > maxChars || countLines(body) > lineBudget) body = maxChars > 0 ? "…" : "";
   }
   return {
     text: body,
-    originalChars: text.length,
+    originalChars: codePointLength(text),
     originalLines: countLines(text),
-    previewChars: body.length,
+    previewChars: codePointLength(body),
     previewLines: countLines(body),
   };
 }
@@ -320,14 +347,14 @@ function jsonPreview(text: string, policy: CompactPolicy): CompactResult | undef
         const errorValues = boundedEntries(record)
           .filter(([key]) => diagnosticKey(key))
           .slice(0, 8)
-          .map(([key, value]) => [key, typeof value === "string" ? value.slice(0, 160) : value]);
+          .map(([key, value]) => [key, typeof value === "string" ? codePointPrefix(value, 160) : value]);
         return {
           type: "object",
           count: Object.keys(record).length,
           ...(errorValues.length > 0 ? { errorValues: Object.fromEntries(errorValues) } : {}),
         };
       }
-      return typeof input === "string" ? input.slice(0, 160) : input;
+      return typeof input === "string" ? codePointPrefix(input, 160) : input;
     }
     if (Array.isArray(input)) {
       return { count: input.length, values: input.slice(0, 8).map((item) => describe(item, depth + 1)) };
@@ -335,7 +362,7 @@ function jsonPreview(text: string, policy: CompactPolicy): CompactResult | undef
     if (input && typeof input === "object") {
       return Object.fromEntries(boundedEntries(input as Record<string, unknown>).map(([key, item]) => [key, describe(item, depth + 1)]));
     }
-    return typeof input === "string" ? input.slice(0, 256) : input;
+    return typeof input === "string" ? codePointPrefix(input, 256) : input;
   };
   const root = Array.isArray(value)
     ? { root: "array", count: value.length, preview: describe(value, 0) }
@@ -349,7 +376,7 @@ function jsonPreview(text: string, policy: CompactPolicy): CompactResult | undef
       : { root: typeof value, value: describe(value, 0) };
   const preview = JSON.stringify(root, null, 2);
   const bounded = compactText(preview, policy);
-  return { ...bounded, originalChars: text.length, originalLines: countLines(text) };
+  return { ...bounded, originalChars: codePointLength(text), originalLines: countLines(text) };
 }
 
 function testPreview(text: string, policy: CompactPolicy): CompactResult | undefined {
@@ -426,7 +453,7 @@ function defaultArtifactRoot(cwd: string): string {
 function inputSummary(input: unknown): string {
   try {
     const json = JSON.stringify(input ?? {});
-    return json.length > 500 ? `${json.slice(0, 500)}...` : json;
+    return codePointLength(json) > 500 ? `${codePointPrefix(json, 497)}...` : json;
   } catch {
     return "<unserializable input>";
   }
@@ -462,7 +489,7 @@ async function writeArtifact(args: {
     toolName: args.toolName,
     toolCallId: args.toolCallId,
     artifactPath,
-    chars: args.text.length,
+    chars: codePointLength(args.text),
     lines: args.lines,
     contentSha256: sha256Hex(args.text),
     bytes: Buffer.byteLength(args.text, "utf8"),

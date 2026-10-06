@@ -57,7 +57,7 @@ entirely filtered input.
 ## Output Contract
 
 `session_before_compact` returns Pi's canonical shape with dc-distill details
-version 13:
+version 14:
 
 ```ts
 {
@@ -67,7 +67,7 @@ version 13:
     tokensBefore: number,
     details: {
       compactor: "dc-distill",
-      version: 13,
+      version: 14,
       tier: 1,
       attemptId: string,
       autonomous: boolean,
@@ -83,8 +83,9 @@ version 13:
       literalAnchors: string[],
       inputDigest: string,
       summaryDigest: string,
-      checkpoint: ResumeCheckpointV1,
+      checkpoint: ResumeCheckpoint, // schema v2; historical v1 readable
       checkpointDigest: string,
+      checkpointSections: CheckpointSectionLedger, // 17 fixed keys, derived telemetry
       digestScope: "compaction-input" | "bounded-compaction-input"
     }
   }
@@ -94,7 +95,7 @@ version 13:
 `tokensAfter` is Pi's rebuilt message-context estimate, calculated with
 `buildSessionContext()` and `estimateTokens()`. `summaryTokens` estimates the
 returned summary alone. `summaryDigest` hashes the exact returned wire summary,
-without a model-facing metric line. These counts are host-consistent heuristics. Version-5 through version-12 session entries remain
+without a model-facing metric line. These counts are host-consistent heuristics. Version-5 through version-13 session entries remain
 readable and are not rewritten.
 
 The final summary is limited to 65,536 Unicode code points and targets an 8,192-
@@ -158,7 +159,7 @@ metrics, freezes a `PendingCompaction`, and returns it. It does not emit durable
 success artifacts or reset the monitor.
 
 `session_compact` commits only when the owner session, extension identity,
-details version 13, owning attempt/lease, settings/model snapshot, first-kept ID, exact summary digest, and validated checkpoint digest match. Branch
+details version 14, owning attempt/lease, settings/model snapshot, first-kept ID, exact summary digest, validated checkpoint digest, and the exact section ledger derived from the pending checkpoint match. Branch
 ownership requires the compaction entry to remain the active branch's newest
 compaction; entries that sibling extensions append after it (for example
 compaction-reactive markers) are tolerated, while superseding or abandoned
@@ -168,7 +169,32 @@ diagnostic. Commit
 then resets the monitor from Pi's post-rebuild full-context usage when available,
 writes log/dump/recall, clears failure state, notifies only in a UI, and queues
 continuation only for an autonomous attempt. Continuation delivery is durable: the attempt id is journalled in the compaction details and the delivered message, and on `session_start` or tree changes a pure reducer over the active branch recovers an unanswered autonomous continuation subject to process submission fences and journal acknowledgement. Pending state and the latch are
-released in `finally`. Historical v8–v12 autonomous continuations remain readable alongside v13.
+released in `finally`. Historical v8–v13 autonomous continuations remain readable alongside v14.
+
+A non-cancelled local compiler failure in a still-owned autonomous attempt pauses
+Mechanical admission process-locally before both turn-end abort and settled
+submission, including Auto, missed-auto pursuit, headroom floor and Emergency.
+Source construction, compilation and returned-result validation (including
+protected capacity overflow) carry structured stage/code identity; an untyped
+local strategy failure is `compiler_failure`, never classified from its message.
+Cancellation, stale snapshots, generic host callback failures, storage/reporting
+errors and post-commit artifact failures do not arm the pause. Capture the owning
+attempt, lease/generation, branch anchor and model/settings snapshot before
+reporting or releasing its reservation; late or anonymous events cannot pause or
+release another attempt. Notify once per pause episode and diagnose admission
+with `compiler-paused`; duplicate local failure reports are suppressed and
+reporting remains best effort. Warn steering and manual `/compact` remain available.
+
+Clear the pause only on a new session lifecycle generation, an actual effective
+model/context-window change or valid effective compaction-settings change,
+trustworthy branch navigation outside the failed anchor's lineage, or a validated
+newest active-branch successful compaction commit (including manual/native
+recovery). Ordinary user prompts, new leaves/input digests, identical callbacks,
+invalid settings, missing branch evidence, failed manual attempts and mismatched
+commits cannot clear it. Reservation-release rules remain independent. The pause
+has no persistent circuit, retry timer or new command; restart follows existing
+startup guards. Successful wire output, details v14, checkpoint schema v2 and
+trigger policy v3 are unchanged.
 
 Session replacement, shutdown, autonomous errors, cancellation, foreign
 compaction, mismatches, and duplicate events cannot create success artifacts.
@@ -195,7 +221,8 @@ and 100K/140K/160K are legacy fallbacks only when Pi cannot report a context
 window; small-window floors can reduce the 20K lead. Ordinary checks require a
 current finite positive host count and apply cooldown, post-compaction growth,
 Pi-sync, and warmup guards. Headroom floor and emergency bypass those guards; ownership, valid
-enabled Pi settings, and the concurrency latch still apply. The 120,000-token target is fixed
+enabled Pi settings, the concurrency latch, and the separate compiler-failure pause
+still apply. The 120,000-token target is fixed
 policy, not extension configuration; smaller contexts are capped by Pi's safe
 geometry. `auto-check blocked` records in `~/.pi/agent/data/dc-distill/diag.log` carry Pi's inputs and the resolved boundaries.
 
@@ -222,7 +249,7 @@ malformed, future-dated, or inaccessible journal data preserves conservative
 guards. Model and branch changes require fresh samples. Duplicate commit events
 cannot reset guards; manual, foreign, and legacy commits update admission without
 extension success artifacts. Diagnostics include session/process provenance.
-Trigger policy is v3; compaction details remain version 13.
+Trigger policy is v3; compaction details are version 14.
 
 ## Optional Feature Gates
 
@@ -300,16 +327,17 @@ preload; it compares absolute lifetime RSS, never host-subtracted RSS. See
 provider, sandboxed HOME plus temp Pi dirs); the autonomous scenario observes
 the production 120-second startup cooldown. `bun run distill:demo` runs one
 offline manual lifecycle and writes inspectable artifacts. Both stay out of
-`bun test` discovery.
+`bun test` discovery. Their historical v13/schema-v1 assertions have not yet
+been refreshed for v14; neither is v14 acceptance evidence.
 
 Keep `runStrategies()` single-strategy and deterministic. Bump
 `details.version` when details fields or their semantics change.
 
-Version 12 hardens unknown-tool effects, structural parsing, locale-independent wire counts/order, and exact rebuilt-context capacity acceptance. Unknown capacity is explicit; observed token drift requires a valid post-commit host count. Historical versions 5–11 remain readable, continuation recovery supports 8–13, and integrity validation supports 10–13. Recovery is host-journal dependent and is not crash-atomic across process restarts.
+Version 12 hardens unknown-tool effects, structural parsing, locale-independent wire counts/order, and exact rebuilt-context capacity acceptance. Unknown capacity is explicit; observed token drift requires a valid post-commit host count. Historical versions 5–11 remain readable, continuation recovery supports 8–14, and integrity validation supports 10–14. Recovery is host-journal dependent and is not crash-atomic across process restarts.
 
-## Checkpoint v13
+## Checkpoint v14
 
-`details.checkpoint` is a validated schema-v1 snapshot and the sole authority for
+`details.checkpoint` is a validated schema-v2 snapshot and the sole authority for
 declared tasks, user-source pins, constraints, decisions, exact evidence identities,
 mutation frontier, risks, failure history, and predecessor identity. Its deterministic
 serialization has a separate digest; the wire summary is hashed independently.
@@ -323,8 +351,10 @@ invocation identity — tool name and arguments, or the same verification runner
 command bytes, and working directory — later succeeds resolves
 (`resolved: later success with same invocation`). Auto-resolved records render
 only as one bounded transparency count and share the ten-resolved retention
-bound with omission accounting. This projection-only behavior changes no
-details field, so `details.version` stays 13.
+bound with omission accounting. This projection-only behavior changed no details field in v13; v14 adds the
+schema-v2 failure identity and section ledger. A stored v2 failure retains its
+full invocation digest and a bounded display excerpt, not the full fix bytes.
+Historical schema-v1 checkpoints remain read-only and convert in memory.
 
 `save_distill_handoff` optionally accepts `checkpoint: { version: 1, expectedBase:
 { checkpointDigest, updateEntryId }, operations }`. Pin, resolve, and supersede
@@ -337,11 +367,42 @@ Protected state is mandatory. Limits include 32 pins of 2,048 code points, 32
 update operations in a 16,384-code-point envelope, and a 65,536-code-point checkpoint.
 If mandatory input, obligations, checkpoint, or rebuilt context cannot fit, the
 compiler cancels with `protected_overflow`; optional whole records are dropped
-first. Invalid expected v13 state cancels instead of reconstructing from prose.
-Rollback requires a v13-aware reader or must refuse lossy carry-forward.
+first, using the fixed T3 source → T2 unreferenced-read → T1 excerpt ladder;
+T0 identity cores, declared work, required observations, mutation frontier and
+predecessor cannot be evicted. `checkpointSections` reports 17 fixed Unicode
+code-point section costs and ladder outcomes from the final validated checkpoint;
+it is observability only, not authorization or a new scoring engine. Invalid
+expected v13/v14 state cancels instead of reconstructing from prose. Production
+and diagnostic predecessor carry accept authenticated v13/v14 details; recall
+retains v5–14 entries (integrity checks for v10–14), and continuation recovery
+accepts v8–14. Rollback requires a v14-aware reader or must refuse lossy
+carry-forward.
 
-The `agent_settled` observer requests `ctx.compact()` as a separate operation;
-migration to `agent_before_settle` is deferred. Trigger policy version 3 names
+`tool_call` samples the first fresh post-compaction host count after the
+assistant is persisted, without interrupting tools, consuming warmup, or resetting
+cooldown. Completed persisted `turn_end` checks run after all sibling results;
+a mechanical decision reserves a bounded process-local stop intent with a
+30-second lifetime and requests non-awaiting `ctx.abort()`, not a compaction ticket. `agent_settled` validates the
+intent and re-assesses current host usage before taking the existing exact-leaf
+ticket and requesting `ctx.compact()` as a separate operation. Ownership,
+settings/latch, user/branch/model changes and cancellation fence stale intents;
+turn-end plus settled fallback must not consume warmup twice. Validate ownership,
+revision, model/settings, concurrency and active-branch provenance before age:
+the origin turn and boundary leaf must remain on the branch, followed only by
+allowed custom entries or the strictly validated owned-abort shape. A stop older
+than 30 seconds or affected by a backward clock loses its old authority. Consume
+it once; if provenance remains valid, make one fresh assessment regardless of
+delay, requiring a current finite positive host count and current admission
+guards, with no second warmup consumption or invented baseline. Only successful
+admission can obtain a new exact-leaf ticket. Unknown usage cannot compact;
+invalid or superseded stops remain silent and duplicate settlement cannot retry.
+Unknown samples cannot establish a baseline; ordinary 120-second cooldown and 4,000-token growth
+remain intact. Only a matching transactional host commit authorizes continuation.
+The settled fallback remains; migration to `agent_before_settle` is deferred.
+Package version 0.1.7 includes this fix; publication does not update installed npm
+0.1.6 or activate it in an existing session. The opt-in turn-boundary runtime gate is
+documented in `tests/e2e/README.md`; no passing receipt is implied.
+Trigger policy version 3 names
 the 120,000 cap, 20,000 lead, headroom floor, and missed-auto pursuit.
 Positive ordered boundaries are required;
 effective windows below three tokens disable automatic admission.

@@ -384,3 +384,46 @@ test("recall exposes v11 advisory and observed-readiness markers without inventi
   }
   expect(searchRecallEntries([entry], "ready-tasks")[0]).not.toContain("blocked-task");
 });
+
+describe("checkpoint recall", () => {
+  test("checkpoint-only pins are found by exact section, prefix, and keyword", () => {
+    const entry = { ...makeEntry("now", 100, 20, {}, {
+      "checkpoint-v1": 'version: 2\npin: Preserve unique quasaranchor <source> & "literal"',
+    }), project: "/project/checkpoint", sessionId: "checkpoint-session" };
+    for (const query of ["checkpoint-v1", "checkpoint", "quasaranchor"]) {
+      const results = searchRecallEntries([entry], query);
+      expect(results).toHaveLength(1);
+      expect(results[0]).toContain("quasaranchor");
+      expect(results[0]).toContain("project: /project/checkpoint | session: checkpoint-session");
+      expect(results[0]).toContain("&lt;source&gt; &amp;");
+      expect(results[0].match(/<checkpoint-v1>/g)).toHaveLength(1);
+      expect(results[0].match(/<\/checkpoint-v1>/g)).toHaveLength(1);
+      expect(results[0]).not.toContain("<source>");
+    }
+  });
+
+  test("large checkpoint blocks retain balanced escaped framing inside the wire limit", () => {
+    const entry = makeEntry("now", 100, 20, {}, {
+      "checkpoint-v1": `pin: kept <source> & evidence\n${"😀".repeat(9000)}\npin: final evidence`,
+    });
+    const output = searchRecallEntries([entry], "checkpoint-v1").join(RECALL_SEPARATOR);
+    expect(Array.from(output).length).toBeLessThanOrEqual(8192);
+    expect(output.match(/<checkpoint-v1>/g)).toHaveLength(1);
+    expect(output.match(/<\/checkpoint-v1>/g)).toHaveLength(1);
+    expect(output).toContain("kept &lt;source&gt; &amp; evidence");
+    expect(output).toContain("final evidence");
+    expect(output).toContain("Recall omitted 1 line(s)");
+  });
+
+  test("historical entries and existing candidate order remain unchanged", () => {
+    const legacy = makeEntry("legacy", 100, 20, { Conversation: "legacy retrieval" }, { "verification": "PASS legacy" });
+    expect(searchRecallEntries([legacy], "checkpoint")).toEqual([]);
+    expect(searchRecallEntries([legacy], "conversation")[0]).toContain("legacy-unscoped");
+    expect(searchRecallEntries([legacy], "verification")[0]).toContain("PASS legacy");
+    const tied = makeEntry("now", 100, 20, {}, {
+      "retained-context": "sharedquasar", "checkpoint-v1": "sharedquasar",
+    });
+    expect(searchRecallEntries([tied], "sharedquasar")[0]).toContain("<retained-context>");
+    expect(searchRecallEntries([tied], "sharedquasar")[0]).not.toContain("<checkpoint-v1>");
+  });
+});

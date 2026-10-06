@@ -1,5 +1,5 @@
 import { renderRequestCandidate } from "./request-candidate.ts";
-import { verificationEvictionIndex } from "./verification-display.ts";
+import { verificationEvictionIndex, verificationProtection } from "./verification-display.ts";
 import { renderCheckpoint, checkpointReadyTasks } from "./checkpoint.ts";
 import { scanSections } from "./section-scanner.ts";
 import { formatInteger } from "../wire-format.ts";
@@ -691,6 +691,9 @@ export function enforceOperatingBudget(
     return projection.renderedCost!;
   };
   let renderedCost = measureCurrent();
+  const isProtectedVerification = verificationProtection(conv.checkpoint);
+  const staleVerificationIndex = () => conv.verification.findIndex(line => !isProtectedVerification(line)
+    && line.startsWith("PASS ") && line.includes("[freshness: not established"));
   let guard = 0;
   while (renderedCost > target && guard++ < 1_000) {
     if (conv.recentToolResults.length > 0 && conv.recentToolResults.some((result) => !result.artifactReceipt)) {
@@ -706,8 +709,8 @@ export function enforceOperatingBudget(
     } else if (conv.recentToolCalls.length > 0) {
       conv.recentToolCalls.shift();
       note("recent tool calls");
-    } else if (conv.verification.some((line) => line.startsWith("PASS ") && line.includes("[freshness: not established"))) {
-      const stale = conv.verification.findIndex((line) => line.startsWith("PASS ") && line.includes("[freshness: not established"));
+    } else if (staleVerificationIndex() >= 0) {
+      const stale = staleVerificationIndex();
       conv.verification.splice(stale, 1);
       note("stale verification receipts");
     } else if (conv.workingTree.length > 0) {
@@ -722,7 +725,7 @@ export function enforceOperatingBudget(
     } else if (conv.modifiedFiles.length > 0) {
       conv.modifiedFiles.shift();
       conv.omittedModifiedFiles += 1;
-    } else if (conv.verification.length > 1) {
+    } else if (conv.verification.length > 1 && verificationEvictionIndex(conv.verification, conv.checkpoint) >= 0) {
       conv.verification.splice(verificationEvictionIndex(conv.verification, conv.checkpoint), 1);
       note("verification receipts");
     } else if (conv.turns.length > 1) {
@@ -791,7 +794,9 @@ function selectCoverageRecords(meta: SessionMeta, conv: ConversationResult, user
   add("workingTree", "working-tree", conv.workingTree, String);
   add("sourceAnchors", "anchor", conv.sourceAnchors, String);
   add("literalAnchors", "anchor", conv.literalAnchors, String);
-  add("verification", "stale-verification", conv.verification, String, (line) => line.startsWith("PASS ") && line.includes("[freshness: not established"));
+  const isProtectedVerification = verificationProtection(conv.checkpoint);
+  add("verification", "stale-verification", conv.verification, String, (line) => !isProtectedVerification(line)
+    && line.startsWith("PASS ") && line.includes("[freshness: not established"));
   // When every bounded candidate already fits, greedy admission selects all of
   // them (including zero-gain records). One exact rendering establishes that
   // result without rebuilding the complete summary once for every candidate.

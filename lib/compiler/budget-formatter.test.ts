@@ -1,9 +1,14 @@
 import { describe, expect, test } from "bun:test";
-import { formatSummary, prepareSummaryProjection } from "./budget-formatter.ts";
+import { enforceOperatingBudget, formatSummary, prepareSummaryProjection } from "./budget-formatter.ts";
 import { buildResumeIndex } from "./resume-index.ts";
 import { scanSections } from "./section-scanner.ts";
 import { codePointLength } from "../unicode.ts";
 import type { ConversationResult, ConversationTurn, SessionMeta } from "./types.ts";
+import { emptyCheckpoint } from "./checkpoint.ts";
+import { prioritizeVerificationDisplay, verificationEvictionIndex } from "./verification-display.ts";
+import { renderVerificationReceipt } from "./tool-tracker.ts";
+import { enforceSummaryLimit } from "../local-compact.ts";
+import { CompactionInputError } from "./errors.ts";
 
 /** Wire-format contract text: a wording change must update this literal deliberately. */
 const SCOPE_NOTE = "This summary covers only the entries Pi discarded at compaction; newer state lives in the retained messages that follow it in context.";
@@ -50,3 +55,66 @@ describe("summary scope note", () => {
     expect(scanSections(summary).valid).toBe(true);
   });
 });
+
+function verificationPressure() {
+  const state = emptyCheckpoint();
+  state.tasks = [{ id: "work", action: "Keep working", status: "pending", blocker: "", "depends-on": [], requires: ["fresh", "stale"] }];
+  state.preconditions = ["fresh", "stale"].map(id => ({ id, kind: "verification-pass" as const,
+    runner: "bash", command: `bun test ${id}`, cwd: "/repo" }));
+  state.evidence = { ...state.evidence, mutationEpoch: 1, verification: [
+    { id: "fresh", tool: "bash", command: "bun test fresh", cwd: "/repo", status: "PASS", evidence: "exit 0", mutationEpoch: 1, freshnessEstablished: true },
+    { id: "stale", tool: "bash", command: "bun test stale", cwd: "/repo", status: "PASS", evidence: "exit 0", mutationEpoch: 0, freshnessEstablished: true },
+    { id: "failed", tool: "bash", command: "bun test failed", cwd: "/repo", status: "FAIL", evidence: "failed", mutationEpoch: 1, freshnessEstablished: true },
+    { id: "pending", tool: "bash", command: "bun test pending", cwd: "/repo", status: "INCOMPLETE", evidence: "pending", mutationEpoch: 1, freshnessEstablished: true },
+  ] };
+  const conv = conversation([
+    { role: "user", text: "Keep the current request." },
+    { role: "assistant", text: "Newest outcome " + "O".repeat(3_000) },
+    { role: "assistant", text: "Newest proposal " + "P".repeat(3_000) },
+  ]);
+  conv.checkpoint = state;
+  conv.verification = prioritizeVerificationDisplay(state);
+  // Mandatory checkpoint text forces eviction beyond earlier optional categories.
+  state.objective = "protected objective " + "Q".repeat(9_000);
+  conv.retainedContext = [
+    { role: "assistant", kind: "outcome", text: "Old outcome " + "X".repeat(2_000) },
+    { role: "assistant", kind: "outcome", text: "Newest outcome " + "O".repeat(3_000) },
+    { role: "assistant", kind: "proposal", text: "Newest proposal " + "P".repeat(3_000) },
+  ];
+  return conv;
+}
+
+for (const selection of ["baseline", "coverage"] as const) {
+  test(`${selection} preserves protected verification after category exhaustion and evicts other optional sections`, () => {
+    const conv = verificationPressure();
+    const protectedRows = [...conv.verification];
+    const mismatch = { ...conv.checkpoint!.evidence.verification[1], id: "stale-other-cwd", cwd: "/other" };
+    conv.checkpoint!.evidence = { ...conv.checkpoint!.evidence,
+      verification: [...conv.checkpoint!.evidence.verification, mismatch] };
+    const optionalRow = renderVerificationReceipt(mismatch, conv.checkpoint!.evidence.mutationEpoch);
+    conv.verification.push(optionalRow);
+    enforceOperatingBudget({ priorSummaries: [] }, conv, undefined, false, selection);
+    for (const row of protectedRows) expect(conv.verification).toContain(row);
+    expect(conv.verification).not.toContain(optionalRow);
+    expect(verificationEvictionIndex(conv.verification, conv.checkpoint)).toBe(-1);
+    expect(conv.retainedContext).toHaveLength(2);
+    expect(conv.budgetOmissions.join("\n")).toContain("protected-content overflow");
+    const summary = enforceSummaryLimit(() => formatSummary({ priorSummaries: [] }, conv), conv);
+    expect(codePointLength(summary)).toBeGreaterThan(8_192);
+    expect(codePointLength(summary)).toBeLessThanOrEqual(65_536);
+    expect(scanSections(summary).valid).toBe(true);
+  });
+
+  test(`${selection} protected-only soft overflow still cancels at the hard wire limit`, () => {
+    const conv = verificationPressure();
+    conv.checkpoint!.objective = "Q".repeat(66_000);
+    const protectedRows = [...conv.verification];
+    let failure: unknown;
+    try { enforceOperatingBudget({ priorSummaries: [] }, conv, undefined, false, selection); }
+    catch (error) { failure = error; }
+    expect(failure).toBeInstanceOf(CompactionInputError);
+    expect((failure as CompactionInputError).code).toBe("protected_overflow");
+    expect((failure as CompactionInputError).message).toBe("protected rendered checkpoint overflow");
+    for (const row of protectedRows) expect(conv.verification).toContain(row);
+  });
+}

@@ -32,7 +32,17 @@ Pi appends the matching compaction.
 
 ## Automatic compaction
 
-The monitor checks at `agent_settled`, after a response and its tool calls settle.
+The monitor checks completed persisted `turn_end` boundaries after every sibling
+tool result in the batch. A mechanical decision requests a non-awaiting stop;
+`agent_settled` validates it and re-checks fresh host usage before requesting Pi's
+standard compaction with a settled exact-leaf ticket. The settled fallback remains
+without consuming warmup twice; tools are never interrupted mid-batch.
+An expired stop (over 30 seconds or a backward clock) loses its prior authority.
+If ownership and active-branch provenance still match, settlement consumes it
+once and makes a fresh assessment requiring current finite positive host usage
+and current guards before taking a new ticket. Duplicate settlement cannot retry;
+superseded or unprovable stops remain silent.
+
 It normally attempts compaction at the lower of 120,000 tokens or 20,000 tokens
 before Pi's native trigger. A startup warmup, 120-second cooldown, in-flight
 latch, post-compaction growth guard, and Pi-sync guard can delay attempts.
@@ -45,14 +55,38 @@ After a restart, admission guards are restored once from the active branch
 journal: a branch with a prior compaction waits for a fresh host usage baseline
 before another ordinary compaction (still requiring 4,000 tokens of growth),
 while a trustworthy branch without any compaction can skip the synthetic
-startup cooldown after warmup. See
+startup cooldown after warmup. Sample-only `tool_call` bookkeeping can capture
+the first fresh host count after assistant persistence, before long tools finish;
+it does not reset cooldown, consume warmup or trigger compaction. Unknown counts
+leave sampling pending; neither raw assistant usage nor `details.tokensAfter`
+establishes the baseline. User, branch, model, settings and cancellation changes
+invalidate stale stop intents. See
 [trigger policy](settings.md#trigger-policy) for exact geometry and small-window
 fallbacks. Above the auto boundary, blocked attempts are recorded in `diag.log`.
+
+A non-cancelled local compiler failure in an owned autonomous attempt pauses all
+Mechanical admission, including headroom floor, Emergency and missed-auto
+pursuit. It prevents repeated automatic stops and submissions; Warn steering and
+manual `/compact` remain available. The pause notifies once and records
+`compiler-paused` in diagnostics. Ordinary prompts, new input, failed manual
+attempts, invalid settings, missing branch evidence and mismatched commits do not
+reset it. It clears only on a new lifecycle generation, an actual effective
+model/context-window or valid compaction-settings change, trustworthy navigation
+outside the failed anchor's lineage, or a validated newest active-branch
+successful compaction commit, including manual/native recovery. It is
+process-local; restart follows existing startup guards. See
+[lifecycle details](architecture.md#local-compiler-failure-pause).
 
 After a matching autonomous compaction is committed, the extension may queue a
 hidden `dc-distill-continuation` turn while idle. Its delivery state is recorded
 in the session ledger so startup and tree changes can recover an unanswered
 continuation. Manual compaction leaves the next move to you.
+
+Package version 0.1.7 includes this timing change; installed version 0.1.6 retains
+the earlier settlement-only checks. Publication does not update an installed
+package or activate it in an existing session. The focused opt-in
+scripted-host gate is documented in `tests/e2e/README.md`; no passing runtime
+check is claimed.
 
 ## Save a handoff
 
@@ -250,7 +284,13 @@ commands mark earlier results as having unestablished freshness.
 The operating summary target is 8,192 Unicode code points. Complete optional
 records are removed first, and omissions are reported; the hard wire ceiling
 is 65,536. See [algorithm](algorithm.md) for scoring and eviction, and
-[architecture](architecture.md#compaction-contract) for version-13 details, checkpoint integrity, and token estimates.
+[architecture](architecture.md#compaction-contract) for version 14 details,
+schema-v2 checkpoint integrity, the 17-section `checkpointSections` ledger,
+and token estimates.
+The fixed T3→T2→T1 checkpoint ladder drops optional failure sources, unreferenced
+reads and then shortens excerpts; T0 identities, declared work and required
+evidence remain protected. Historical schema-v1 checkpoints remain readable.
+Rollback from v14 requires a v14-aware reader or refusal of lossy carry-forward.
 
 ### Persistence and generated artifacts
 

@@ -1,7 +1,7 @@
 import { isAbsolute } from "node:path";
 import type { DistillHandoffTask, DistillHandoffDecision, DistillHandoffPrecondition, ParsedStructuredDistillHandoff } from "../handoff.ts";
 import type { ObservationSnapshot } from "./types.ts";
-import { digest } from "./helpers.ts";
+import { digest, sliceU16 } from "./helpers.ts";
 import { codePointLength } from "../unicode.ts";
 import { CompactionInputError } from "./errors.ts";
 import { pathIdentity } from "./tool-tracker.ts";
@@ -21,22 +21,36 @@ export interface CheckpointPin {
   source: CheckpointSourceReference; status: "active" | "resolved" | "superseded";
   resolution?: CheckpointResolution;
 }
-export interface CheckpointFailure {
+/** Historical v1 failure record: carried the full attempted-fix bytes verbatim. Read-only. */
+export interface CheckpointFailureV1 {
   id: string; objective: string; signature: string; attemptedFix: string;
   observedOutcome: string; sources: CheckpointSourceReference[];
   resolution: string | null; occurrences: number;
 }
-export interface ResumeCheckpointV1 {
-  version: 1; objective: string; files: { read: string[]; modified: string[] }; tasks: CheckpointTask[]; pins: CheckpointPin[];
+/** Stored v2 failure record: digest invocation identity plus bounded display excerpts. */
+export interface CheckpointFailureV2 {
+  id: string; objective: string; signature: string; invocationDigest?: string;
+  fixExcerpt: string; observedOutcome: string; sources: CheckpointSourceReference[];
+  resolution: string | null; occurrences: number;
+}
+export type CheckpointFailure = CheckpointFailureV1 | CheckpointFailureV2;
+/** Fresh window failure input still carries full bytes; storage conversion happens in buildCheckpoint. */
+export interface CheckpointFailureInput {
+  signature: string; attemptedFix: string; observedOutcome: string; sources: CheckpointSourceReference[];
+}
+export interface ResumeCheckpoint {
+  version: 1 | 2; objective: string; files: { read: string[]; modified: string[] }; tasks: CheckpointTask[]; pins: CheckpointPin[];
   constraints: string[]; decisions: DistillHandoffDecision[];
   preconditions: DistillHandoffPrecondition[]; evidence: ObservationSnapshot;
   risks: string[]; failures: CheckpointFailure[]; omittedResolvedFailures: number;
   predecessor: { checkpointDigest: string; entryId: string | null } | null;
   updateEntryId: string | null;
 }
-export interface CheckpointUpdate { checkpoint: ResumeCheckpointV1; checkpointDigest: string; entryId: string }
-export function emptyCheckpoint(): ResumeCheckpointV1 {
-  return { version: 1, objective: "", files: { read: [], modified: [] }, tasks: [], pins: [], constraints: [], decisions: [],
+/** Legacy alias: the interface is version-polymorphic since checkpoint schema v2. */
+export type ResumeCheckpointV1 = ResumeCheckpoint;
+export interface CheckpointUpdate { checkpoint: ResumeCheckpoint; checkpointDigest: string; entryId: string }
+export function emptyCheckpoint(): ResumeCheckpoint {
+  return { version: 2, objective: "", files: { read: [], modified: [] }, tasks: [], pins: [], constraints: [], decisions: [],
     preconditions: [], evidence: { mutationEpoch: 0, fileReads: [], verification: [], modifiedPaths: [] },
     risks: [], failures: [], omittedResolvedFailures: 0, predecessor: null, updateEntryId: null };
 }
@@ -74,7 +88,7 @@ export function canonicalJson(value: unknown): string {
   if (value && typeof value === "object") return `{${Object.keys(value).sort().filter(key => (value as Record<string, unknown>)[key] !== undefined).map(key => `${JSON.stringify(key)}:${canonicalJson((value as Record<string, unknown>)[key])}`).join(",")}}`;
   return JSON.stringify(value);
 }
-export function checkpointDigest(value: ResumeCheckpointV1): string { assertStructuralBounds(value); return digest(canonicalJson(value)); }
+export function checkpointDigest(value: ResumeCheckpoint): string { assertStructuralBounds(value); return digest(canonicalJson(value)); }
 function invalid(): never { throw new CompactionInputError("invalid v13 checkpoint state", "invalid_checkpoint"); }
 const strings = (value: unknown): value is string[] => Array.isArray(value) && value.every(item => typeof item === "string");
 function sourceValid(value: unknown): value is CheckpointSourceReference {
@@ -85,14 +99,14 @@ function sourceValid(value: unknown): value is CheckpointSourceReference {
     [s.messageIndex,s.blockIndex,s.start,s.end].every(n => n === undefined || (Number.isSafeInteger(n) && n! >= 0)) &&
     (s.start === undefined || s.end === undefined || s.end >= s.start);
 }
-export function validateCheckpoint(value: unknown, expectedDigest?: string): ResumeCheckpointV1 {
+export function validateCheckpoint(value: unknown, expectedDigest?: string): ResumeCheckpoint {
   assertStructuralBounds(value);
   if (!value || typeof value !== "object") return invalid();
   const c = value as ResumeCheckpointV1;
   const keys = ["version","objective","files","tasks","pins","constraints","decisions","preconditions","evidence","risks","failures","omittedResolvedFailures","predecessor","updateEntryId"];
   if (Object.keys(c).some(key=>!keys.includes(key)) || keys.some(key=>!(key in c))) return invalid();
   if (!c.files || !strings(c.files.read) || !strings(c.files.modified)) return invalid();
-  if (c.version !== 1 || typeof c.objective !== "string" || !Array.isArray(c.tasks) || !Array.isArray(c.pins) || c.pins.length > 32 ||
+  if ((c.version !== 1 && c.version !== 2) || typeof c.objective !== "string" || !Array.isArray(c.tasks) || !Array.isArray(c.pins) || c.pins.length > 32 ||
       !strings(c.constraints) || !Array.isArray(c.decisions) || !Array.isArray(c.preconditions) || !strings(c.risks) || !Array.isArray(c.failures) ||
       !Number.isSafeInteger(c.omittedResolvedFailures) || c.omittedResolvedFailures < 0 || !(c.updateEntryId === null || typeof c.updateEntryId === "string")) return invalid();
   if (c.predecessor !== null && (!c.predecessor || !/^[a-f0-9]{64}$/.test(c.predecessor.checkpointDigest) || !(c.predecessor.entryId === null || typeof c.predecessor.entryId === "string"))) return invalid();
@@ -131,7 +145,18 @@ export function validateCheckpoint(value: unknown, expectedDigest?: string): Res
   if (e.pendingMutations !== undefined && (!Array.isArray(e.pendingMutations) || e.pendingMutations.some(call => !call || typeof call.name !== "string" || call.potentiallyModifying !== true || (call.callId !== undefined && typeof call.callId !== "string") || (call.args !== undefined && (!call.args || typeof call.args !== "object" || Array.isArray(call.args)))))) return invalid();
   for (const r of e.fileReads) if (!r || typeof r.id !== "string" || typeof r.path !== "string" || typeof r.runner !== "string" || !["succeeded","failed","incomplete"].includes(r.status) || !Number.isSafeInteger(r.mutationEpoch) || r.mutationEpoch < 0 || r.mutationEpoch > e.mutationEpoch || (r.cwd !== undefined && typeof r.cwd !== "string") || typeof r.freshnessEstablished !== "boolean" || !strings(r.imports)) return invalid();
   for (const r of e.verification) if (!r || typeof r.id !== "string" || typeof r.tool !== "string" || typeof r.command !== "string" || typeof r.evidence !== "string" || !["PASS","FAIL","SKIP","INCOMPLETE"].includes(r.status) || !Number.isSafeInteger(r.mutationEpoch) || r.mutationEpoch < 0 || r.mutationEpoch > e.mutationEpoch || (r.cwd !== undefined && typeof r.cwd !== "string") || (r.freshnessEstablished !== undefined && typeof r.freshnessEstablished !== "boolean")) return invalid();
-  for (const f of c.failures) if (!f || ![f.id,f.objective,f.signature,f.attemptedFix,f.observedOutcome].every(v => typeof v === "string") || !Array.isArray(f.sources) || !f.sources.every(sourceValid) || !(f.resolution === null || typeof f.resolution === "string") || !Number.isSafeInteger(f.occurrences) || f.occurrences < 1) return invalid();
+  for (const f of c.failures) {
+    if (!f || typeof f !== "object") return invalid();
+    if (c.version === 2) {
+      const v2 = f as CheckpointFailureV2;
+      if (!Object.keys(f).every(key => V2_FAILURE_KEYS.includes(key)) || typeof v2.id !== "string" || typeof v2.objective !== "string" || typeof v2.signature !== "string" || typeof v2.fixExcerpt !== "string" || typeof v2.observedOutcome !== "string") return invalid();
+      if (v2.invocationDigest !== undefined && (typeof v2.invocationDigest !== "string" || !/^[a-f0-9]{64}$/.test(v2.invocationDigest))) return invalid();
+    } else {
+      const v1 = f as CheckpointFailureV1;
+      if (typeof v1.id !== "string" || typeof v1.objective !== "string" || typeof v1.signature !== "string" || typeof v1.attemptedFix !== "string" || typeof v1.observedOutcome !== "string") return invalid();
+    }
+    if (!Array.isArray(f.sources) || !f.sources.every(sourceValid) || !(f.resolution === null || typeof f.resolution === "string") || !Number.isSafeInteger(f.occurrences) || f.occurrences < 1) return invalid();
+  }
   if (c.failures.filter(f=>f.resolution!==null).length > 10) return invalid();
   let stringCost = 0;
   const stringsToCount: unknown[] = [c];
@@ -139,11 +164,11 @@ export function validateCheckpoint(value: unknown, expectedDigest?: string): Res
   const wire = canonicalJson(c);
   if (codePointLength(wire) > 65_536) throw new CompactionInputError("protected checkpoint exceeds 65,536 code points", "protected_overflow");
   if (expectedDigest !== undefined && digest(wire) !== expectedDigest) throw new CompactionInputError("checkpoint digest mismatch", "invalid_checkpoint");
-  return JSON.parse(wire) as ResumeCheckpointV1;
+  return JSON.parse(wire) as ResumeCheckpoint;
 }
 function freeze<T>(value: T): T { if (value && typeof value === "object") { for (const item of Object.values(value)) freeze(item); Object.freeze(value); } return value; }
 /** Recover only compiler-generated tool invocations whose original signature proves provenance. */
-export function failureInvocation(f: Pick<CheckpointFailure, "signature" | "attemptedFix" | "observedOutcome">): string | undefined {
+export function failureInvocation(f: { signature: string; attemptedFix: string; observedOutcome: string }): string | undefined {
   if (digest(`${f.attemptedFix}\0${f.observedOutcome}`) !== f.signature) return undefined;
   const match = /^([^:]+): (\{[\s\S]*\})$/.exec(f.attemptedFix);
   if (!match) return undefined;
@@ -155,11 +180,39 @@ export function failureInvocation(f: Pick<CheckpointFailure, "signature" | "atte
 }
 const verificationKey = (r: ObservationSnapshot["verification"][number]) => `${r.tool}\0${r.command}\0${r.cwd ?? ""}`;
 const verificationSignature = (r: ObservationSnapshot["verification"][number]) => digest(`${verificationKey(r)}\0${r.evidence}`);
+const V2_FAILURE_KEYS = ["id","objective","signature","invocationDigest","fixExcerpt","observedOutcome","sources","resolution","occurrences"];
 const RESOLVED_BY_SUCCESS = "resolved: later success with same invocation";
 const RETIRED_NOT_REOBSERVED = "retired: not re-observed in compaction input";
+const FIX_EXCERPT_CODE_POINTS = 512;
+/** Canonical stored v2 form of one failed invocation: digest identity plus bounded display excerpts. */
+function toStoredFailure(input: CheckpointFailureInput & { id?: string }, objective: string): CheckpointFailureV2 {
+  const invocation = failureInvocation(input);
+  return { id: input.id ?? `failure-${input.signature.slice(0, 16)}`, objective, signature: input.signature,
+    ...(invocation ? { invocationDigest: digest(invocation) } : {}),
+    fixExcerpt: sliceU16(input.attemptedFix, FIX_EXCERPT_CODE_POINTS),
+    observedOutcome: sliceU16(input.observedOutcome, FIX_EXCERPT_CODE_POINTS),
+    sources: input.sources, resolution: null, occurrences: 1 };
+}
+/** Carried v1 failures convert to v2 in memory at merge; stored history is never rewritten. */
+function convertV1Failure(f: CheckpointFailureV1): CheckpointFailureV2 {
+  const invocation = failureInvocation(f);
+  return { id: f.id, objective: f.objective, signature: f.signature,
+    ...(invocation ? { invocationDigest: digest(invocation) } : {}),
+    fixExcerpt: sliceU16(f.attemptedFix, FIX_EXCERPT_CODE_POINTS),
+    observedOutcome: sliceU16(f.observedOutcome, FIX_EXCERPT_CODE_POINTS),
+    sources: f.sources, resolution: f.resolution, occurrences: f.occurrences };
+}
+/** A fresh occurrence of the same signature re-derives display excerpts (and any digest) from full bytes. */
+function refreshStoredFailure(stored: CheckpointFailureV2, fresh: { attemptedFix: string; observedOutcome: string }): void {
+  const invocation = failureInvocation({ signature: stored.signature, attemptedFix: fresh.attemptedFix, observedOutcome: fresh.observedOutcome });
+  stored.fixExcerpt = sliceU16(fresh.attemptedFix, FIX_EXCERPT_CODE_POINTS);
+  stored.observedOutcome = sliceU16(fresh.observedOutcome, FIX_EXCERPT_CODE_POINTS);
+  if (invocation) stored.invocationDigest = digest(invocation); else delete stored.invocationDigest;
+}
 /** Missing declarations and prose cannot retire existing declared work. */
-export function buildCheckpoint(previous: ResumeCheckpointV1 | undefined, declarations: ParsedStructuredDistillHandoff | ParsedStructuredDistillHandoff[] | undefined, observations: ObservationSnapshot, entryId?: string, files?: { read: string[]; modified: string[] }, sources?: Array<CheckpointSourceReference | undefined>, risks: string[] = [], failures: Array<Omit<CheckpointFailure, "objective" | "id" | "occurrences" | "resolution">> = [], successfulInvocations?: ReadonlySet<string>): ResumeCheckpointV1 {
+export function buildCheckpoint(previous: ResumeCheckpoint | undefined, declarations: ParsedStructuredDistillHandoff | ParsedStructuredDistillHandoff[] | undefined, observations: ObservationSnapshot, entryId?: string, files?: { read: string[]; modified: string[] }, sources?: Array<CheckpointSourceReference | undefined>, risks: string[] = [], failures: CheckpointFailureInput[] = [], successfulInvocations?: ReadonlySet<string>): ResumeCheckpoint {
   const c = previous ? validateCheckpoint(previous) : emptyCheckpoint();
+  if (c.version === 1) { c.version = 2; c.failures = c.failures.map(f => convertV1Failure(f as CheckpointFailureV1)); }
   let omittedFiles = 0;
   if (files) {
     const read = [...new Set([...c.files.read, ...files.read])], modified = [...new Set([...c.files.modified, ...files.modified])];
@@ -176,7 +229,7 @@ export function buildCheckpoint(previous: ResumeCheckpointV1 | undefined, declar
         else if (!old.resolution) { if (old.action !== incoming.action || old["depends-on"].join("\0") !== incoming["depends-on"].join("\0") || old.requires.join("\0") !== ("requires" in incoming ? (incoming.requires as string[]).join("\0") : "")) throw new CompactionInputError(`conflicting declaration ID ${incoming.id}`, "invalid_checkpoint"); old.blocker = incoming.blocker; if (incoming.status !== "done") old.status = incoming.status; }
       }
       for (const action of handoff["verification-needed"]) { const id=`verification-${digest(action).slice(0,16)}`; if (!c.tasks.some(t=>t.id===id)) c.tasks.push({id,status:"pending",action,"depends-on":[],blocker:"",requires:[],...(sources?.[index]?{source:sources[index]}:{})}); }
-      for (const h of handoff["rejected-hypotheses"]) { const signature=digest(`${h.claim}\0${h.evidence}`); if (!c.failures.some(f=>f.signature===signature)) c.failures.push({id:h.id,objective:c.objective,signature,attemptedFix:h.claim,observedOutcome:h.evidence,sources:sources?.[index]?[sources[index]!]:[],resolution:"rejected hypothesis",occurrences:1}); }
+      for (const h of handoff["rejected-hypotheses"]) { const signature=digest(`${h.claim}\0${h.evidence}`); if (!c.failures.some(f=>f.signature===signature)) { const stored=toStoredFailure({id:h.id,signature,attemptedFix:h.claim,observedOutcome:h.evidence,sources:sources?.[index]?[sources[index]!]:[]},c.objective); stored.resolution="rejected hypothesis"; c.failures.push(stored); } }
       for (const s of handoff.invariants) if (!c.constraints.includes(s)) c.constraints.push(s);
       for (const d of handoff.decisions) if (!c.decisions.some(old => old.id === d.id)) c.decisions.push({...d});
       if ("preconditions" in handoff) for (const p of handoff.preconditions) { const old = c.preconditions.find(old => old.id === p.id); if (old && canonicalJson(old) !== canonicalJson(p)) throw new CompactionInputError(`conflicting precondition ID ${p.id}`, "invalid_checkpoint"); if (!old) c.preconditions.push({...p}); }
@@ -204,11 +257,11 @@ export function buildCheckpoint(previous: ResumeCheckpointV1 | undefined, declar
   for (const r of observations.verification.filter(r=>r.status==="FAIL")) {
     const signature = digest(`${r.tool}\0${r.command}\0${r.cwd ?? ""}\0${r.evidence}`);
     const old = c.failures.find(f=>f.signature===signature && f.resolution===null);
-    if (old) old.occurrences++; else c.failures.push({id:`failure-${signature.slice(0,16)}`,objective:c.objective,signature,attemptedFix:"",observedOutcome:r.evidence,sources:[],resolution:null,occurrences:1});
+    if (old) old.occurrences++; else c.failures.push(toStoredFailure({signature,attemptedFix:"",observedOutcome:r.evidence,sources:[]},c.objective));
   }
   for (const failure of failures) {
     const old = c.failures.find(f=>f.signature===failure.signature && f.resolution===null);
-    if (old) old.occurrences++; else c.failures.push({...failure,id:`failure-${failure.signature.slice(0,16)}`,objective:c.objective,resolution:null,occurrences:1});
+    if (old) { old.occurrences++; refreshStoredFailure(old as CheckpointFailureV2, failure); } else c.failures.push(toStoredFailure(failure, c.objective));
   }
   for (const f of c.failures) {
     if (f.resolution !== null) continue;
@@ -224,9 +277,9 @@ export function buildCheckpoint(previous: ResumeCheckpointV1 | undefined, declar
       continue;
     }
     // Receipt-less legacy verification failures cannot acquire a guessed invocation identity.
-    if (!f.attemptedFix) continue;
-    const invocation = failureInvocation(f);
-    if (invocation && successfulInvocations?.has(invocation)) { f.resolution = RESOLVED_BY_SUCCESS; continue; }
+    const stored = f as CheckpointFailureV2;
+    if (!stored.fixExcerpt) continue;
+    if (stored.invocationDigest && successfulInvocations?.has(stored.invocationDigest)) { f.resolution = RESOLVED_BY_SUCCESS; continue; }
     if (carriedUnresolved.has(f.signature) && !freshFailureSignatures.has(f.signature)) f.resolution = RETIRED_NOT_REOBSERVED;
   }
   const resolved = c.failures.filter(f=>f.resolution!==null);
@@ -246,24 +299,100 @@ export function buildCheckpoint(previous: ResumeCheckpointV1 | undefined, declar
     try { return freeze(validateCheckpoint(c)); }
     catch (error) {
       if (!(error instanceof CompactionInputError) || error.code !== "protected_overflow") throw error;
-      omitted++;
-      // Entire optional records are evicted before required identities and declarations.
-      const read = reads.findIndex(r=>!requiredRead(r));
-      const check = verification.findIndex(r=>!requiredVerification(r));
-      if (c.files.read.length) c.files.read.shift();
-      else if (c.files.modified.length) c.files.modified.shift();
-      else if (read>=0) reads.splice(read,1);
-      else if (check>=0) verification.splice(check,1);
-      else if (c.evidence.modifiedPaths.length) c.evidence={...c.evidence,modifiedPaths:c.evidence.modifiedPaths.slice(1)};
-      else throw error;
+      // CD3 tier ladder first (T3 sources, T2 unreferenced reads, T1 excerpts), then
+      // optional inventories; T0 (identity cores, declared contracts, referenced
+      // reads, required verification, mutation frontier, predecessor) never evicts.
+      const step = evictCheckpointSection(c, requiredRead, requiredVerification);
+      if (!step) throw error;
+      omitted += step.omittedRecords;
     }
   }
 }
-export function checkpointReadyTasks(c: ResumeCheckpointV1): string[] {
+/** One deterministic eviction step of the CD3 ladder; null = T0 floor reached (cancel). */
+export interface CheckpointLadderStep {
+  tier: "T3" | "T2" | "T1" | "optional";
+  action: "drop-sources" | "trim-reads-20" | "trim-reads-10" | "trim-reads-0" | "shorten-excerpts-256" | "shorten-excerpts-128" | "files-read" | "files-modified" | "verification";
+  omittedRecords: number;
+  detail: string;
+}
+export function evictCheckpointSection(c: ResumeCheckpoint, requiredRead: (r: ObservationSnapshot["fileReads"][number]) => boolean, requiredVerification: (r: ObservationSnapshot["verification"][number]) => boolean): CheckpointLadderStep | null {
+  if (c.failures.some(f => f.sources.length > 0)) {
+    const affected = c.failures.filter(f => f.sources.length > 0);
+    const dropped = affected.reduce((n, f) => n + f.sources.length, 0);
+    for (const f of affected) f.sources = [];
+    return { tier: "T3", action: "drop-sources", omittedRecords: dropped, detail: `cleared sources on ${affected.length} failure record(s)` };
+  }
+  const unreferenced = c.evidence.fileReads.filter(r => !requiredRead(r));
+  const target = unreferenced.length > 20 ? 20 : unreferenced.length > 10 ? 10 : 0;
+  if (unreferenced.length > target) {
+    let toDrop = unreferenced.length - target;
+    const next: Array<ObservationSnapshot["fileReads"][number]> = [];
+    for (const r of c.evidence.fileReads) { if (toDrop > 0 && !requiredRead(r)) { toDrop--; continue; } next.push(r); }
+    c.evidence = { ...c.evidence, fileReads: next };
+    return { tier: "T2", action: `trim-reads-${target}` as CheckpointLadderStep["action"], omittedRecords: unreferenced.length - target, detail: `unreferenced reads -> ${target}` };
+  }
+  const shorten = (limit: 256 | 128): CheckpointLadderStep | null => {
+    const longFix = c.failures.filter(f => "fixExcerpt" in f && codePointLength((f as CheckpointFailureV2).fixExcerpt) > limit);
+    const longOutcome = c.failures.filter(f => codePointLength(f.observedOutcome) > limit);
+    if (!longFix.length && !longOutcome.length) return null;
+    for (const f of c.failures) { if ("fixExcerpt" in f) (f as CheckpointFailureV2).fixExcerpt = sliceU16((f as CheckpointFailureV2).fixExcerpt, limit); f.observedOutcome = sliceU16(f.observedOutcome, limit); }
+    return { tier: "T1", action: (limit === 256 ? "shorten-excerpts-256" : "shorten-excerpts-128") as CheckpointLadderStep["action"], omittedRecords: 0, detail: `${longFix.length} fix and ${longOutcome.length} outcome excerpt(s) -> ${limit} cps` };
+  };
+  const excerptStep = shorten(256) ?? shorten(128);
+  if (excerptStep) return excerptStep;
+  if (c.files.read.length) { c.files.read.shift(); return { tier: "optional", action: "files-read", omittedRecords: 1, detail: "dropped oldest display read file" }; }
+  if (c.files.modified.length) { c.files.modified.shift(); return { tier: "optional", action: "files-modified", omittedRecords: 1, detail: "dropped oldest display modified file" }; }
+  const check = c.evidence.verification.findIndex(r => !requiredVerification(r));
+  if (check >= 0) { c.evidence = { ...c.evidence, verification: c.evidence.verification.filter((_, i) => i !== check) }; return { tier: "optional", action: "verification", omittedRecords: 1, detail: "dropped oldest unreferenced verification receipt" }; }
+  return null;
+}
+export const CHECKPOINT_SECTION_KEYS = ["objective","files.read","files.modified","tasks","pins","constraints","decisions","preconditions","evidence.fileReads","evidence.verification","evidence.modifiedPaths","risks","failures.identityCore","failures.sources","failures.fixExcerpt","failures.observedOutcome","predecessor"] as const;
+export type CheckpointSectionKey = typeof CHECKPOINT_SECTION_KEYS[number];
+export interface CheckpointSectionLedger {
+  version: 1;
+  sections: Record<CheckpointSectionKey, number>;
+  ladderOutcomes: { sourcesDropped: boolean; unreferencedReads: number; maxFixExcerpt: number };
+}
+function subtreeCost(value: unknown): number {
+  let cost = 0;
+  const stack: unknown[] = [value];
+  while (stack.length) {
+    const item = stack.pop()!;
+    if (typeof item === "string") cost += codePointLength(item);
+    else if (item && typeof item === "object") for (const [key, child] of Object.entries(item)) { cost += key.length; stack.push(child); }
+  }
+  return cost;
+}
+/** Observability-only section ledger: fixed keys, cps cost per section, observable ladder outcomes (CD6). */
+export function checkpointSectionLedger(c: ResumeCheckpoint): CheckpointSectionLedger {
+  const sections: Record<CheckpointSectionKey, number> = {
+    "objective": subtreeCost(c.objective),
+    "files.read": subtreeCost(c.files.read),
+    "files.modified": subtreeCost(c.files.modified),
+    "tasks": subtreeCost(c.tasks),
+    "pins": subtreeCost(c.pins),
+    "constraints": subtreeCost(c.constraints),
+    "decisions": subtreeCost(c.decisions),
+    "preconditions": subtreeCost(c.preconditions),
+    "evidence.fileReads": subtreeCost(c.evidence.fileReads),
+    "evidence.verification": subtreeCost(c.evidence.verification),
+    "evidence.modifiedPaths": subtreeCost({ mutationEpoch: c.evidence.mutationEpoch, modifiedPaths: c.evidence.modifiedPaths }),
+    "risks": subtreeCost(c.risks),
+    "failures.identityCore": subtreeCost(c.failures.map(f => ({ id: f.id, objective: f.objective, signature: f.signature, invocationDigest: "invocationDigest" in f ? (f as CheckpointFailureV2).invocationDigest : undefined, resolution: f.resolution, occurrences: f.occurrences }))),
+    "failures.sources": subtreeCost(c.failures.map(f => f.sources)),
+    "failures.fixExcerpt": subtreeCost(c.failures.map(f => "fixExcerpt" in f ? (f as CheckpointFailureV2).fixExcerpt : (f as CheckpointFailureV1).attemptedFix)),
+    "failures.observedOutcome": subtreeCost(c.failures.map(f => f.observedOutcome)),
+    "predecessor": subtreeCost([c.predecessor, c.updateEntryId, c.omittedResolvedFailures]),
+  };
+  const unreferencedReads = c.evidence.fileReads.filter(r => !c.preconditions.some(p => p.kind === "file-read-succeeded" && p.cwd === r.cwd && pathIdentity(p.path, p.cwd) === pathIdentity(r.path, r.cwd))).length;
+  const maxFixExcerpt = c.failures.reduce((m, f) => Math.max(m, "fixExcerpt" in f ? codePointLength((f as CheckpointFailureV2).fixExcerpt) : 0), 0);
+  return { version: 1, sections, ladderOutcomes: { sourcesDropped: c.failures.length > 0 && c.failures.every(f => f.sources.length === 0), unreferencedReads, maxFixExcerpt } };
+}
+export function checkpointReadyTasks(c: ResumeCheckpoint): string[] {
   const states=evaluatePreconditions(c.preconditions,c.evidence);
   return c.tasks.filter(t=>t.status==="pending" && t["depends-on"].every(id=>c.tasks.find(d=>d.id===id)?.status==="done") && t.requires.every(id=>states.get(id)==="satisfied")).map(t=>t.id);
 }
-export function renderCheckpoint(c: ResumeCheckpointV1): string {
+export function renderCheckpoint(c: ResumeCheckpoint): string {
   if (!c.objective && !c.tasks.length && !c.pins.length && !c.constraints.length && !c.decisions.length && !c.risks.length && !c.failures.length && !c.omittedResolvedFailures) return "";
   const escape=(s:string)=>s.replace(/&/g,"&amp;").replace(/</g,"&lt;").replace(/>/g,"&gt;");
   const states=evaluatePreconditions(c.preconditions,c.evidence), ready=checkpointReadyTasks(c);
@@ -277,7 +406,7 @@ export function renderCheckpoint(c: ResumeCheckpointV1): string {
   }
   const requiredIds = new Set(c.tasks.filter(t => t.status !== "done" || t.requires.some(id => states.get(id) !== "satisfied")).flatMap(t => t.requires));
   for (const p of c.preconditions.filter(p => requiredIds.has(p.id))) lines.push(`precondition ${escape(p.id)} [${states.get(p.id) ?? "unknown"}]: ${p.kind === "verification-pass" ? `runner=${escape(p.runner)}; command=${escape(p.command)}` : `path=${escape(p.path)}`}; cwd=${escape(p.cwd)}`);
-  for (const f of c.failures.filter(f=>f.resolution===null)) lines.push(`failure ${escape(f.id)} (${f.occurrences}): objective=${escape(f.objective)}; fix=${escape(f.attemptedFix)}; outcome=${escape(f.observedOutcome)}; signature=${escape(f.signature)}; sources=${escape(f.sources.map(s=>s.entryId).join(","))}`);
+  for (const f of c.failures.filter(f=>f.resolution===null)) lines.push(`failure ${escape(f.id)} (${f.occurrences}): objective=${escape(f.objective)}; fix=${escape("fixExcerpt" in f ? f.fixExcerpt : f.attemptedFix)}; outcome=${escape(f.observedOutcome)}; signature=${escape(f.signature)}; sources=${escape(f.sources.map(s=>s.entryId).join(","))}`);
   const resolvedBySuccess = c.failures.filter(f=>f.resolution===RESOLVED_BY_SUCCESS).length;
   const retiredFailures = c.failures.filter(f=>f.resolution===RETIRED_NOT_REOBSERVED).length;
   if (resolvedBySuccess || retiredFailures || c.omittedResolvedFailures) lines.push(`auto-resolved failures: ${resolvedBySuccess} by later success; ${retiredFailures} retired as not re-observed; ${c.omittedResolvedFailures} omitted historical`);

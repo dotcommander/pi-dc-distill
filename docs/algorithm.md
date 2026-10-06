@@ -45,7 +45,19 @@ retained fields, not general semantic equivalence.
 
 ## Triggering is separate from interception
 
-The early monitor decides **when to request** compaction after `agent_settled`.
+The early monitor evaluates completed persisted `turn_end` boundaries after all
+sibling tool results. A mechanical decision reserves a process-local stop intent
+and requests non-awaiting abort. `agent_settled` validates the intent and
+re-assesses fresh host usage before taking the existing exact-leaf ticket and
+requesting `ctx.compact()`; settled fallback remains without double warmup.
+A stop older than 30 seconds or affected by a backward clock loses its old
+authority. Valid owner/revision, model/settings, concurrency and active-branch
+provenance still permit one fresh assessment regardless of delay. The origin turn
+and boundary leaf must remain, followed only by allowed custom entries or a
+strictly validated owned abort. Current finite positive host usage and admission
+guards are required; no new baseline or second warmup is inferred. Admission
+precedes a new exact-leaf ticket, and the consumed intent cannot be retried by
+duplicate settlement. Superseded or unprovable intent remains silent.
 The before-compact hook decides **what replaces** the default summary when Pi
 prepares an attempt: manual, native threshold or native overflow. Early
 triggering is not required for native-summary replacement.
@@ -54,8 +66,8 @@ Normally the early boundary is `min(120000, window - reserveTokens - 20000)`;
 Pi's native threshold is usage above `window - reserveTokens`. Small-window
 floors can reduce the 20K lead. Ordinary warmup/cooldown/growth guards apply;
 finite emergency estimates bypass them and Pi-sync, while ownership, valid
-enabled settings, and the in-flight attempt guard still apply. Pi can check or overflow before
-the extension's idle check, so this lead does not guarantee preemption.
+enabled settings, the in-flight attempt guard and the compiler-failure pause still apply. Pi can check or overflow before
+the extension's boundary check, so this lead does not guarantee preemption.
 Retained-tail `keepRecentTokens` and the 20,000-token lead are separate values.
 
 The controller reads Pi's effective merged settings at startup, model selection,
@@ -63,8 +75,29 @@ and autonomous checks, preserving host model-override precedence. Invalid settin
 block autonomy while manual deterministic interception remains available. Feature
 gates remain independent default-off startup snapshots. Ordinary auto/warn
 requires a current finite positive Pi usage count; earlier successful sync cannot
-authorize an action after an unavailable or invalid sample. See
+authorize an action after an unavailable or invalid sample. Sample-only
+`tool_call` bookkeeping captures the first fresh post-compaction host count after
+assistant persistence, without interrupting tools or deciding admission. Unknown
+counts leave the baseline pending; raw assistant usage and `details.tokensAfter`
+are not substitutes. Ordinary admission still requires the 120-second cooldown
+and 4,000-token growth from an above-auto baseline. Ownership, settings/latch,
+user/branch/model changes and cancellation invalidate stale stop intents. Only
+a matching host commit authorizes success effects and durable continuation;
+`agent_before_settle` migration remains deferred. See
 [settings](settings.md) for host geometry and optional features.
+
+A non-cancelled local compiler failure during an owned autonomous attempt pauses
+Mechanical admission before further turn-end aborts or settled submissions,
+including urgent bands and missed-auto pursuit. Source construction, compilation
+and result validation (including protected overflow) qualify; cancellation and
+host, storage or reporting failures do not. Warn steering and manual `/compact`
+remain available. Ordinary prompts do not clear the pause. Only a new lifecycle
+generation, an actual model/context-window or valid settings change, trustworthy
+navigation outside the failed anchor's lineage, or a validated newest
+active-branch successful compaction clears it. Failed manual attempts, mismatched
+commits, new input, invalid settings and missing branch evidence leave it intact.
+The process-local pause notifies once and logs `compiler-paused`; restart follows
+existing startup guards. See [lifecycle details](architecture.md#local-compiler-failure-pause).
 
 Real Pi RPC tests observed one dc-distill compaction and zero summary-provider
 calls for manual, native threshold and successful-response overflow paths.
@@ -151,8 +184,14 @@ Eligible conversation prose receives a separate display projection before its
 preview is clipped. The original semantic turn preview remains the input to
 turn scoring, selection, the resume index, and evidence handling. This changes
 optional rendered text, not checkpoint declarations, pins, evidence identities,
-mutation state, or task authority. Details stay version 13 with checkpoint schema
-v1; the exact resulting wire summary is hashed and used for host estimates.
+mutation state, or task authority. Details use version 14 with checkpoint schema
+v2; the exact resulting wire summary is hashed and used for host estimates.
+The checkpoint pressure ladder is separate from optional prose cleanup: it drops
+failure sources (T3), then unreferenced reads (T2), then shortens display excerpts
+(T1), without evicting T0 identity cores, declared work, required evidence,
+mutation frontier or predecessor. A 17-key `checkpointSections` ledger reports
+Unicode code-point section costs and final ladder outcomes. It is observability
+only, not a new scoring or authorization input; T0 overflow still cancels.
 
 The scanner considers adjacent exact phrase runs, trying the shortest period
 first, up to 16 whitespace-delimited tokens. A run needs at least three

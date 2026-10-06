@@ -26,3 +26,19 @@ export function codePointPrefix(text: string, limit: number): string {
   }
   return text.slice(0, index);
 }
+
+/** Last normalized `limit` code points; zero never means the whole string. */
+export function codePointSuffix(text: string, limit: number): string {
+  let remaining = Number.isNaN(limit) ? 0 : Math.trunc(limit);
+  if (remaining < 0) remaining = Math.max(0, codePointLength(text) + remaining);
+  let index = text.length;
+  while (index > 0 && remaining > 0) {
+    const unit = text.charCodeAt(--index);
+    if (unit >= 0xdc00 && unit <= 0xdfff && index > 0) {
+      const previous = text.charCodeAt(index - 1);
+      if (previous >= 0xd800 && previous <= 0xdbff) index--;
+    }
+    remaining--;
+  }
+  return text.slice(index);
+}

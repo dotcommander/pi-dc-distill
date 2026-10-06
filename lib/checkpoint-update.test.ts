@@ -96,7 +96,8 @@ describe("explicit checkpoint updates", () => {
     expect(base.checkpointDigest).toBe(checkpointDigest(base.checkpoint!));
     expect(base.checkpointDigest).not.toBe(saved.checkpointDigest);
     expect(readCheckpointUpdateBase(branch.slice(0, 1)).checkpoint).toBeNull();
-    expect(() => readCheckpointUpdateBase([{ type: "compaction", details: { compactor: "dc-distill", version: 13 } }])).toThrow("missing");
+    for (const version of [13, 14])
+      expect(() => readCheckpointUpdateBase([{ type: "compaction", details: { compactor: "dc-distill", version } }])).toThrow("missing");
   });
 });
 

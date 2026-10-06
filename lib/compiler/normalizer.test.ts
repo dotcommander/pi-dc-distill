@@ -2,7 +2,7 @@ import { expect, test } from "bun:test";
 import { compressToolResults, filterNoise, normalizeSessionJsonl } from "./normalizer.ts";
 import { KIND_USER, KIND_TOOL_RESULT } from "./types.ts";
 import { digest } from "./helpers.ts";
-import type { CheckpointSourceReference } from "./checkpoint.ts";
+import { emptyCheckpoint, checkpointDigest, type CheckpointSourceReference } from "./checkpoint.ts";
 
 const instruction = "Continue from where you left off. Do not deploy; first inspect src/parser.ts.";
 
@@ -34,6 +34,21 @@ test("untyped primer-like prefixes and mixed historical summary lines remain con
   const { blocks, meta } = normalizeSessionJsonl(JSON.stringify({ type: "compaction", summary: [...lines, "[User] No response requested."].join("\n") }));
   expect(blocks[0].text).toBe(lines.join("\n"));
   expect(meta.priorSummaries).toEqual([lines.join("\n")]);
+});
+
+test("diagnostic v13/v14 predecessor carries only authenticated checkpoint and summary", () => {
+  const checkpoint = emptyCheckpoint();
+  for (const version of [13, 14]) {
+    const entry = { type: "compaction", id: "prior", summary: "wire summary", details: {
+      compactor: "dc-distill", version, checkpoint, checkpointDigest: checkpointDigest(checkpoint), summaryDigest: digest("wire summary") } };
+    const result = normalizeSessionJsonl(JSON.stringify(entry));
+    expect(result.meta.checkpoint).toEqual(checkpoint);
+    expect(result.meta.checkpointDigest).toBe(checkpointDigest(checkpoint));
+    expect(result.meta.predecessorEntryId).toBe("prior");
+    expect(result.meta.authenticatedPriorSummary).toBe("wire summary");
+    expect(() => normalizeSessionJsonl(JSON.stringify({ ...entry, details: { ...entry.details, checkpointDigest: "0".repeat(64) } }))).toThrow();
+    if (version === 14) expect(() => normalizeSessionJsonl(JSON.stringify({ ...entry, summary: "tampered" }))).toThrow("wire summary digest mismatch");
+  }
 });
 
 test("explicitly typed transient messages remain excluded", () => {

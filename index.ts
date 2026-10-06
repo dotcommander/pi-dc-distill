@@ -4,6 +4,7 @@ import { Path } from "./lib/paths.ts";
 import { LEGACY_COMPACTION_CARD_TYPE } from "./lib/legacy.ts";
 /** dc-distill: deterministic, local compaction with a prepare/commit lifecycle. */
 import { randomUUID } from "node:crypto";
+import { isDeepStrictEqual } from "node:util";
 import { sha256Hex } from "./lib/sha256.ts";
 import type {
   CompactionEntry,
@@ -40,9 +41,10 @@ import { recoverContinuation, type RecoveryEntryLike } from "./lib/continuation-
 import { injectFocusEcho } from "./lib/focus-echo.ts";
 import { prepareCheckpointUpdate, readCheckpointUpdateBase } from "./lib/checkpoint-update.ts";
 import { DISTILL_HANDOFF_ENTRY_TYPE, distillHandoffEntry } from "./lib/handoff.ts";
-import { validateCheckpoint, checkpointDigest } from "./lib/compiler/checkpoint.ts";
+import { validateCheckpoint, checkpointDigest, checkpointSectionLedger } from "./lib/compiler/checkpoint.ts";
+import type { CheckpointSectionLedger } from "./lib/compiler/checkpoint.ts";
 import type { ResumeCheckpointV1 } from "./lib/compiler/checkpoint.ts";
-import { CompactionInputError } from "./lib/compiler/errors.ts";
+import { CompactionInputError, compilerFailureCode } from "./lib/compiler/errors.ts";
 import { buildMetricLine } from "./lib/metric.ts";
 import { Phase1Controller, type AttemptTicket } from "./lib/phase1-controller.ts";
 import { searchRecallEntries } from "./lib/recall.ts";
@@ -54,11 +56,11 @@ import {
 } from "./lib/settings.ts";
 import { projectActiveBranchRecall } from "./lib/recall-projection.ts";
 import { DistillStore } from "./lib/store.ts";
-import { hasLocalCompactor, runStrategies } from "./lib/strategy.ts";
+import { runStrategies } from "./lib/strategy.ts";
 import { Tier } from "./lib/types.ts";
 import { registerOutputCompactor } from "./lib/output-compactor.ts";
 
-const VERSION = 13;
+const VERSION = 14;
 const WARN_STEER_PROMPT = [
   "You are near the context boundary — compaction is imminent.",
   "Finish the current atomic unit, then call save_distill_handoff with either legacy text",
@@ -82,30 +84,24 @@ interface PendingCompaction {
   readonly summaryDigest: string;
   readonly checkpoint: ResumeCheckpointV1;
   readonly checkpointDigest: string;
+  readonly checkpointSections: CheckpointSectionLedger;
   readonly wireSummary: string;
   readonly canonicalInput: string;
   readonly ts: string;
   readonly autonomous: boolean;
   readonly tokensBefore: number;
   readonly tokensAfter: number;
-  readonly summaryTokens: number;
   readonly apiTokensBefore?: number;
   readonly exchangesBefore: number;
   readonly callsBefore: number;
   readonly toolTokensBefore: number;
   readonly tier: 1;
-  readonly readFiles: string[];
-  readonly modifiedFiles: string[];
-  readonly literalAnchors: string[];
-  readonly inputDigest: string;
-  readonly digestScope: "compaction-input" | "bounded-compaction-input";
   readonly metric: string;
 }
 
 interface DistillRuntime extends Phase1Controller {
   store: DistillStore | null;
   pending: PendingCompaction | null;
-  lastFocusEcho: string | null;
   lastFailure: string | null;
   recallRecovery: Promise<void> | null;
   recallRequested: { ctx: ExtensionContext; revision: number; committedEntry?: CompactionEntry } | null;
@@ -147,8 +143,8 @@ function cancellation(error: unknown): boolean {
     || (error instanceof Error && ["AbortError", "LoaderAbortError"].includes(error.name)); } catch { return false; }
 }
 
-function checkAutonomousCompaction(runtime: DistillRuntime, ctx: ExtensionContext): void {
-  const evaluation = runtime.assess(ctx);
+function checkAutonomousCompaction(runtime: DistillRuntime, ctx: ExtensionContext, revalidate = false): void {
+  const evaluation = runtime.assess(ctx, "agent_settled", revalidate);
   const decision = evaluation?.decision;
   if (!decision) return;
   if (decision.tier === Tier.Warn) {
@@ -169,7 +165,7 @@ function checkAutonomousCompaction(runtime: DistillRuntime, ctx: ExtensionContex
         if (!runtime.ownsAttempt(ticket, ctx)) return;
         // Callback captures submission ownership; an anonymous host event cannot.
         try {
-          if (!cancellation(error) && ctx.hasUI) {
+          if (!cancellation(error) && !runtime.failedCompilerAttempt(ticket) && ctx.hasUI) {
             try { Notify.fail(ctx, `Distill failed: ${errorText(error)}`); } catch { /* Total diagnostics. */ }
           }
         } finally { clearAttempt(runtime, ticket); }
@@ -212,16 +208,12 @@ function reconcileContinuation(runtime: DistillRuntime, ctx: ExtensionContext, c
 async function independentEffect(runtime: DistillRuntime, label: string, effect: () => unknown): Promise<void> {
   const store = runtime.store;
   try { await effect(); }
-  catch {
-    // One retry: log writes are lock-serialized, so a first failure is most
-    // plausibly transient contention or rotation. Never throws into the host
-    // callback — the second failure falls through to best-effort reporting.
-    try { await effect(); return; }
-    catch (secondError) {
-      const message = `${label} failed: ${errorText(secondError)}`;
-      try { runtime.monitor.diagnostic(message); } catch { /* Independent best effort diagnostics. */ }
-      await reportFailure(runtime, [message], undefined, store);
-    }
+  catch (error) {
+    // A callback may complete its effect before rejecting. Do not replay it;
+    // storage owns any safe internal retry, and journal recovery stays separate.
+    const message = `${label} failed: ${errorText(error)}`;
+    try { runtime.monitor.diagnostic(message); } catch { /* Independent best effort diagnostics. */ }
+    await reportFailure(runtime, [message], undefined, store);
   }
 }
 
@@ -302,7 +294,7 @@ function buildWireSummary(input: {
 function createRuntime(pi: ExtensionAPI, options: DistillExtensionOptions): DistillRuntime {
   return Object.assign(new Phase1Controller(pi, options), {
     store: null, pending: null, recallRecovery: null, recallRequested: null,
-    lastFocusEcho: null, lastFailure: null,
+    lastFailure: null,
   });
 }
 
@@ -358,12 +350,21 @@ function createExtension(pi: ExtensionAPI, options: DistillExtensionOptions = {}
           && (preparation.turnPrefixMessages?.length ?? 0) === 0
           && !preparation.previousSummary
         ) {
+          const firstPause = runtime.pauseCompilerFailure(ticket, ctx, "source", "invalid_input");
           runtime.cancelPreparation(ticket);
           runtime.lastFailure = "No usable messages were available for deterministic compaction.";
+          if (firstPause) await reportFailure(runtime, [runtime.lastFailure], {
+            ctx, message: `Distill automatic compaction paused: ${runtime.lastFailure}\nManual /compact remains available.`,
+          }, store);
           return Events.cancelCompact();
         }
 
+        let failureStage: "source" | "compile" | "validation" | null = null;
+        let failureWindow = runtime.contextWindow;
         try {
+          // Host metadata access is outside local compiler classification.
+          const timestamp = ctx.sessionManager?.getHeader?.()?.timestamp;
+          failureStage = "source";
           const source = buildCompactionSource({
             previousSummary: preparation.previousSummary,
             firstKeptEntryId: preparation.firstKeptEntryId,
@@ -372,9 +373,10 @@ function createExtension(pi: ExtensionAPI, options: DistillExtensionOptions = {}
             branchEntries: event.branchEntries,
             sessionId: ticket.lease.sessionId,
             cwd: ctx.cwd,
-            timestamp: ctx.sessionManager?.getHeader?.()?.timestamp,
+            timestamp,
           });
           const canonical = canonicalizeCompactionSource(source, event.signal);
+          failureStage = "compile";
           const result = await runStrategies({
             userFocus: event.customInstructions,
             recallEnabled: runtime.featureSettings.recall.enabled,
@@ -383,17 +385,27 @@ function createExtension(pi: ExtensionAPI, options: DistillExtensionOptions = {}
           }, event.signal);
           if (!runtime.snapshotMatches(ticket, ctx)) { runtime.cancelPreparation(ticket); return Events.cancelCompact(); }
           if (!result.ok) {
+            const firstPause = !result.cancelled && runtime.pauseCompilerFailure(ticket, ctx, "compile", result.failure?.code ?? "compiler_failure");
             runtime.cancelPreparation(ticket);
             if (result.cancelled) return Events.cancelCompact();
+            if (ticket.autonomous && !firstPause && runtime.failedCompilerAttempt(ticket)) return Events.cancelCompact();
             runtime.lastFailure = result.reasons.join(" | ");
+            // Bound only the UI excerpt; durable failure logging keeps every reason.
+            const reasonPoints = Array.from(runtime.lastFailure);
+            const reasonExcerpt = reasonPoints.length > 2_048
+              ? `${reasonPoints.slice(0, 2_048).join("")}…`
+              : runtime.lastFailure;
             await reportFailure(runtime, result.reasons, {
-              ctx, message: "Distill cancelled — deterministic compiler failed.",
+              ctx, message: firstPause
+                ? `Distill automatic compaction paused — deterministic compiler failed.\n${reasonExcerpt}\nManual /compact remains available.`
+                : `Distill cancelled — deterministic compiler failed.\n${reasonExcerpt}`,
             }, store);
             return Events.cancelCompact();
           }
           if (event.signal.aborted) throw new CompactionCancelledError();
 
           const apiTokensBefore = metrics.apiTokensBefore;
+          failureStage = "validation";
           const wire = buildWireSummary({
             summary: result.summary,
             apiTokensBefore,
@@ -406,11 +418,14 @@ function createExtension(pi: ExtensionAPI, options: DistillExtensionOptions = {}
           }
           if (event.signal.aborted) throw new CompactionCancelledError();
 
+          failureStage = null;
           let currentUsage: ReturnType<ExtensionContext["getContextUsage"]>;
           try { currentUsage = ctx.getContextUsage?.(); } catch { currentUsage = undefined; }
           const validWindow = (value: unknown): value is number => typeof value === "number" && Number.isFinite(value) && value > 0;
           const capacityWindow = validWindow(currentUsage?.contextWindow) ? currentUsage.contextWindow
             : validWindow(ctx.model?.contextWindow) ? ctx.model.contextWindow : undefined;
+          failureWindow = capacityWindow;
+          failureStage = "validation";
           if (capacityWindow !== undefined && wire.tokensAfter >= capacityWindow) {
             throw new CompactionInputError(`rebuilt context estimate ${wire.tokensAfter} reaches or exceeds context window ${capacityWindow}`, "protected_overflow");
           }
@@ -420,31 +435,28 @@ function createExtension(pi: ExtensionAPI, options: DistillExtensionOptions = {}
             ? Math.round(((preparation.tokensBefore - wire.tokensAfter) / preparation.tokensBefore) * 100)
             : 0;
           const attemptId = ticket.attemptId;
+          const checkpoint = validateCheckpoint(result.checkpoint, result.checkpointDigest);
+          const checkpointSections = checkpointSectionLedger(checkpoint);
           runtime.pending = Object.freeze({
             ticket,
             attemptId,
             sessionId: ticket.lease.sessionId,
             firstKeptEntryId: preparation.firstKeptEntryId,
             summaryDigest,
-            checkpoint: validateCheckpoint(result.checkpoint, result.checkpointDigest),
+            checkpoint,
             checkpointDigest: result.checkpointDigest,
+            checkpointSections,
             wireSummary: wire.wireSummary,
             canonicalInput: canonical.bytes,
             ts: new Date().toISOString(),
             autonomous: ticket.autonomous,
             tokensBefore: preparation.tokensBefore,
             tokensAfter: wire.tokensAfter,
-            summaryTokens: wire.summaryTokens,
             apiTokensBefore: apiTokensBefore || undefined,
             exchangesBefore: metrics.exchangesBefore,
             callsBefore: metrics.callsBefore,
             toolTokensBefore: metrics.toolTokensBefore,
             tier: result.tier,
-            readFiles: result.readFiles,
-            modifiedFiles: result.modifiedFiles,
-            literalAnchors: result.literalAnchors,
-            inputDigest: result.inputDigest,
-            digestScope: result.digestScope,
             metric: wire.metric,
           });
 
@@ -470,18 +482,24 @@ function createExtension(pi: ExtensionAPI, options: DistillExtensionOptions = {}
               literalAnchors: result.literalAnchors,
               inputDigest: result.inputDigest,
               summaryDigest,
-              checkpoint: result.checkpoint,
+              checkpoint,
               checkpointDigest: result.checkpointDigest,
+              checkpointSections,
               digestScope: result.digestScope,
             },
           });
         } catch (error) {
           if (!runtime.snapshotMatches(ticket, ctx)) { runtime.cancelPreparation(ticket); return Events.cancelCompact(); }
+          const firstPause = !cancellation(error) && failureStage !== null
+            && runtime.pauseCompilerFailure(ticket, ctx, failureStage, compilerFailureCode(error), failureWindow);
           runtime.cancelPreparation(ticket);
           if (cancellation(error)) return Events.cancelCompact();
+          if (ticket.autonomous && !firstPause && runtime.failedCompilerAttempt(ticket)) return Events.cancelCompact();
           runtime.lastFailure = errorText(error);
           await reportFailure(runtime, [runtime.lastFailure], {
-            ctx, message: `Distill cancelled: ${runtime.lastFailure}`,
+            ctx, message: firstPause
+              ? `Distill automatic compaction paused: ${runtime.lastFailure}\nManual /compact remains available.`
+              : `Distill cancelled: ${runtime.lastFailure}`,
           }, store);
           return Events.cancelCompact();
         }
@@ -495,7 +513,6 @@ function createExtension(pi: ExtensionAPI, options: DistillExtensionOptions = {}
         if (!runtime.featureSettings.recall.enabled) return;
         const transformed = injectFocusEcho(messages);
         if (!transformed) return undefined;
-        runtime.lastFocusEcho = transformed.echoText;
         return Events.messages(transformed.messages);
       }, { label: "dc-distill context focus echo" });
 
@@ -550,7 +567,6 @@ function createExtension(pi: ExtensionAPI, options: DistillExtensionOptions = {}
         if (!lease) return;
         runtime.pending = null;
         runtime.lastFailure = null;
-        runtime.lastFocusEcho = null;
         if (runtime.ownerSessionId) cancelContinuationCallback(runtime.ownerSessionId);
         runtime.store = null;
         try {
@@ -616,10 +632,67 @@ function createExtension(pi: ExtensionAPI, options: DistillExtensionOptions = {}
         runtime.refreshSettings(ctx);
       },
 
-      // Settled observation followed by ctx.compact is a separate host operation;
-      // migrating to agent_before_settle is deliberately deferred.
+      input: async (event, ctx) => {
+        if (isOwner(runtime, ctx) && event.source !== "extension") runtime.cancelBoundaryStop();
+      },
+
+      tool_call: async (event, ctx) => {
+        if (!isOwner(runtime, ctx)) return;
+        // message_end precedes persistence. At tool_call the calling assistant
+        // is in the journal; sampling here never interrupts pending siblings.
+        try {
+          const entry = ctx.sessionManager.getBranch().findLast((item) => item.type === "message"
+            && item.message.role === "assistant");
+          if (entry?.type !== "message" || entry.message.role !== "assistant"
+            || entry.message.stopReason === "error" || entry.message.stopReason === "aborted"
+            || !entry.message.content.some((block) => block.type === "toolCall" && block.id === event.toolCallId)) return;
+          runtime.samplePostCompaction(ctx);
+        } catch { /* Unknown journal cannot establish a fresh baseline. */ }
+      },
+
+      turn_end: async (event, ctx) => {
+        if (!isOwner(runtime, ctx) || event.message.role !== "assistant") return;
+        try {
+          const branch = ctx.sessionManager.getBranch();
+          const assistant = branch.find((entry) => entry.id === event.messageEntryId);
+          if (assistant?.type !== "message" || assistant.message.role !== "assistant"
+            || event.toolResultEntryIds.length !== event.toolResults.length
+            || event.toolResultEntryIds.some((id) => !branch.some((entry) => entry.id === id
+              && entry.type === "message" && entry.message.role === "toolResult"))) return;
+        } catch { return; }
+        if (event.outcome !== "completed" || event.message.stopReason === "error"
+          || event.message.stopReason === "aborted") {
+          runtime.ignoreTurn(ctx, event.messageEntryId);
+          return;
+        }
+        runtime.samplePostCompaction(ctx);
+        const decision = runtime.assessTurn(ctx, event.messageEntryId)?.decision;
+        if (!decision) return;
+        if (decision.tier === Tier.Warn) {
+          Notify.toLLM(runtime.pi, WARN_STEER_PROMPT, { customType: "dc-distill-warn",
+            details: { reason: decision.reason }, deliverAs: "steer", triggerTurn: false });
+          return;
+        }
+        if (!runtime.reserveBoundaryStop(ctx, event.messageEntryId)) return;
+        // Do not await idle here, and do not capture a request ticket until
+        // settlement: the host may append an aborted assistant after this turn.
+        try { ctx.abort(); } catch { runtime.cancelBoundaryStop(); }
+      },
+
+      // Settled submission is a separate host operation, with its own fresh
+      // sample and exact leaf anchor. Only the journal owns continuation sends.
       agent_settled: async (_event, ctx) => {
-        if (!reconcileContinuation(runtime, ctx)) checkAutonomousCompaction(runtime, ctx);
+        const stop = runtime.consumeBoundaryStop(ctx);
+        if (stop === "invalid") {
+          runtime.ignoreSettledTurn(ctx);
+          return;
+        }
+        if (reconcileContinuation(runtime, ctx)) return;
+        if (stop === "valid" || stop === "expired") {
+          runtime.ignoreSettledTurn(ctx);
+          checkAutonomousCompaction(runtime, ctx, true);
+        }
+        else if (runtime.shouldAssessSettled(ctx)) checkAutonomousCompaction(runtime, ctx);
       },
 
       session_tree: async (_event, ctx) => {
@@ -637,7 +710,8 @@ function createExtension(pi: ExtensionAPI, options: DistillExtensionOptions = {}
         const incomingDetails = event.compactionEntry.details as Record<string, unknown> | undefined;
         if (!pending || !event.fromExtension || incomingDetails?.compactor !== "dc-distill"
           || incomingDetails?.version !== VERSION || incomingDetails?.attemptId !== pending.attemptId) {
-          runtime.observeHostCompaction(ctx, event.compactionEntry);
+          runtime.observeHostCompaction(ctx, event.compactionEntry,
+            incomingDetails?.compactor !== "dc-distill" || incomingDetails?.version !== VERSION);
         }
         if (!pending) return;
         const ticket = pending.ticket;
@@ -650,10 +724,14 @@ function createExtension(pi: ExtensionAPI, options: DistillExtensionOptions = {}
         const details = (entry.details ?? {}) as Record<string, unknown>;
         let checkpointMatches = false;
         try {
+          const committedCheckpoint = validateCheckpoint(details.checkpoint, pending.checkpointDigest);
           checkpointMatches = checkpointDigest(pending.checkpoint) === pending.checkpointDigest
             && details.checkpointDigest === pending.checkpointDigest
-            && checkpointDigest(validateCheckpoint(details.checkpoint, pending.checkpointDigest)) === pending.checkpointDigest;
-        } catch { /* Invalid expected v13 state never downgrades to legacy prose. */ }
+            && checkpointDigest(committedCheckpoint) === pending.checkpointDigest
+            && isDeepStrictEqual(pending.checkpointSections, checkpointSectionLedger(pending.checkpoint))
+            && isDeepStrictEqual(details.checkpointSections, pending.checkpointSections)
+            && isDeepStrictEqual(details.checkpointSections, checkpointSectionLedger(committedCheckpoint));
+        } catch { /* Invalid expected v14 state never downgrades to legacy prose. */ }
         let branchMatches = false;
         try {
           const branch = ctx.sessionManager.getBranch();
@@ -711,8 +789,8 @@ function createExtension(pi: ExtensionAPI, options: DistillExtensionOptions = {}
             ? usage.tokens
             : undefined;
           runtime.recordCommittedCompaction(fullContextAfter ?? pending.tokensAfter, entry.id);
+          runtime.clearCompilerPauseAfterCommit(ctx, entry.id);
           runtime.lastFailure = null;
-          runtime.lastFocusEcho = null;
           if (pending.autonomous) reconcileContinuation(runtime, ctx, pending.attemptId);
           await independentEffect(runtime, "Compaction log", () => store?.appendLog({
             ts: pending.ts,
@@ -753,7 +831,6 @@ function createExtension(pi: ExtensionAPI, options: DistillExtensionOptions = {}
           await reconcileRecall(runtime, ctx, entry);
           if (!runtime.isCurrent(lease, ctx)) return;
           runtime.lastFailure = null;
-          runtime.lastFocusEcho = null;
           if (ctx.hasUI) {
             const observation = fullContextAfter === undefined ? "post-commit observation unavailable"
               : `${formatInteger(fullContextAfter)} observed post-commit; delta ${formatInteger(fullContextAfter - pending.tokensAfter)}`;
@@ -782,7 +859,7 @@ function createExtension(pi: ExtensionAPI, options: DistillExtensionOptions = {}
           const failure = `Compaction ${outcome} (${errorText(event.reason)}): ${errorText(event.errorMessage ?? "no error message")}`;
           if (identified && !event.aborted) runtime.lastFailure = failure;
           try { runtime.monitor.diagnostic(failure); } catch { /* Total diagnostics. */ }
-          if (!event.aborted) await reportFailure(runtime, [failure]);
+          if (!event.aborted && !runtime.failedCompilerAttempt(ticket)) await reportFailure(runtime, [failure]);
         } catch { /* A diagnostic must never release an ambiguously owned attempt. */ }
         finally {
           if (identified) clearAttempt(runtime, ticket);

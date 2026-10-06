@@ -15,10 +15,10 @@ function fixture() {
   const event = { reason: "manual", signal: new AbortController().signal, branchEntries: [] as any[], preparation: { messagesToSummarize: [{ role: "user", content: "Keep exact task parser correction." }], turnPrefixMessages: [], firstKeptEntryId: "tail", tokensBefore: 120000 } };
   return { root, stub, event };
 }
-test("v13 accepts unknown capacity and retains a cancelled reservation until lifecycle reset", async () => {
+test("v14 accepts unknown capacity and retains a cancelled reservation until lifecycle reset", async () => {
   const { stub, event } = fixture(); await simulate.hook(stub, "session_start", {});
   const [first] = await simulate.hook(stub, "session_before_compact", event); const compaction = (first as any).compaction;
-  expect(compaction.details).toMatchObject({ version: 13, capacityStatus: "unknown" });
+  expect(compaction.details).toMatchObject({ version: 14, capacityStatus: "unknown" });
   await simulate.hook(stub, "session_compact_failed", { aborted: true, reason: "manual", attemptId: compaction.details.attemptId });
   stub.ctx.getContextUsage = () => ({ tokens: 120000, contextWindow: compaction.details.tokensAfter, percent: 100 });
   expect((await simulate.hook(stub, "session_before_compact", event))[0]).toEqual({ cancel: true });

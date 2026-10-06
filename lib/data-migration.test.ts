@@ -122,6 +122,62 @@ describe("migrateDistillData", () => {
     expect(existsSync(join(currentDir, ".migrated-from-legacy-distill"))).toBe(false);
   });
 
+  const oldRecall = { ts: "2026-01-01T00:00:00Z", before: 10, after: 2, summary: "old" };
+  const sameRecall = { ts: "2026-01-02T00:00:00Z", before: 11, after: 3, summary: "same" };
+  const newRecall = { ts: "2026-01-03T00:00:00Z", before: 12, after: 4, summary: "new" };
+  const objectEnvelope = '  {"records":[{"summary":"historical"}]}\n';
+  const nullEnvelope = "  null\n";
+  for (const { label, relativePath, source, destination } of [
+    { label: "root object source with no destination", relativePath: "recall.json", source: objectEnvelope, destination: undefined },
+    { label: "project null source with no destination", relativePath: "projects/fixture/recall.json", source: nullEnvelope, destination: undefined },
+    { label: "identical root object envelopes", relativePath: "recall.json", source: objectEnvelope, destination: objectEnvelope },
+    { label: "identical project null envelopes", relativePath: "projects/fixture/recall.json", source: nullEnvelope, destination: nullEnvelope },
+    { label: "root null source with a valid destination", relativePath: "recall.json", source: nullEnvelope, destination: JSON.stringify([newRecall]) + "\n" },
+    { label: "project object source with a valid destination", relativePath: "projects/fixture/recall.json", source: objectEnvelope, destination: JSON.stringify([newRecall]) + "\n" },
+    { label: "root null destination with a valid source", relativePath: "recall.json", source: "[]\n", destination: nullEnvelope },
+    { label: "project object destination with a valid source", relativePath: "projects/fixture/recall.json", source: "[]\n", destination: objectEnvelope },
+  ]) {
+    test(`rejects ${label}, preserves bytes and retries after repair`, async () => {
+      const root = tempRoot();
+      const legacyDir = join(root, legacyName());
+      const currentDir = join(root, "dc-distill");
+      const sourcePath = join(legacyDir, relativePath);
+      const destinationPath = join(currentDir, relativePath);
+      const markerPath = join(currentDir, ".migrated-from-legacy-distill");
+      await write(sourcePath, source);
+      if (destination !== undefined) await write(destinationPath, destination);
+
+      const result = await migrateDistillData({ legacyDir, currentDir });
+
+      expect(result.status).toBe("failed");
+      expect(result.errors).toEqual([`${relativePath}: Recall file must contain a JSON array`]);
+      expect(result.copied).toEqual([]);
+      expect(result.merged).toEqual([]);
+      expect(readFileSync(sourcePath, "utf8")).toBe(source);
+      if (destination === undefined) expect(existsSync(destinationPath)).toBe(false);
+      else expect(readFileSync(destinationPath, "utf8")).toBe(destination);
+      expect(existsSync(markerPath)).toBe(false);
+
+      const repairedSource = JSON.stringify([oldRecall, sameRecall]) + "\n";
+      await write(sourcePath, repairedSource);
+      if (destination !== undefined) {
+        await write(destinationPath, JSON.stringify([sameRecall, newRecall]) + "\n");
+      }
+      const retry = await migrateDistillData({ legacyDir, currentDir });
+
+      expect(retry.status).toBe("migrated");
+      expect(retry.errors).toEqual([]);
+      expect(existsSync(markerPath)).toBe(true);
+      expect(readFileSync(sourcePath, "utf8")).toBe(repairedSource);
+      const migrated = JSON.parse(readFileSync(destinationPath, "utf8"));
+      expect(migrated.map((entry: { summary: string }) => entry.summary)).toEqual(
+        destination === undefined ? ["old", "same"] : ["old", "same", "new"],
+      );
+      const completed = await migrateDistillData({ legacyDir, currentDir });
+      expect(completed.status).toBe("skipped");
+    });
+  }
+
   test("marker-write failure retries idempotently without creating conflicts", async () => {
     const root = tempRoot();
     const legacyDir = join(root, legacyName());

@@ -465,8 +465,8 @@ describe("authoritative projected occurrence binding", () => {
 });
 
 
-describe("v13 prior checkpoint identity", () => {
-  const priorInput = (corrupt = false) => {
+describe("v13/v14 prior checkpoint identity", () => {
+  const priorInput = (corrupt = false, version = 13) => {
     const checkpoint = emptyCheckpoint();
     const message = { role: "user", content: "discarded native text" };
     return { previousSummary: "prior checkpoint prose", messagesToSummarize: [message], firstKeptEntryId: "retained",
@@ -474,7 +474,7 @@ describe("v13 prior checkpoint identity", () => {
         { type: "message", id: "original", parentId: null, timestamp: "2026-01-01", message },
         { type: "compaction", id: "prior", parentId: "original", timestamp: "2026-01-01",
           firstKeptEntryId: "original", summary: "prior checkpoint prose", tokensBefore: 100,
-          details: { compactor: "dc-distill", version: 13, checkpoint,
+          details: { compactor: "dc-distill", version, checkpoint,
             summaryDigest: createHash("sha256").update("prior checkpoint prose", "utf8").digest("hex"),
             checkpointDigest: corrupt ? "0".repeat(64) : checkpointDigest(checkpoint) } },
         { type: "message", id: "retained", parentId: "prior", timestamp: "2026-01-01", message: { role: "user", content: "retained" } },
@@ -495,7 +495,15 @@ describe("v13 prior checkpoint identity", () => {
     packet.previousSummary = prior.summary;
     expect(() => buildCompactionSource(packet)).toThrow("prior wire summary digest mismatch");
   });
-  test("rejects corrupted expected v13 state without legacy fallback", () => {
-    expect(() => buildCompactionSource(priorInput(true))).toThrow();
+  for (const version of [13, 14]) test(`v${version} carries exact predecessor checkpoint and fails closed on corruption`, () => {
+    const source = buildCompactionSource(priorInput(false, version));
+    expect(source.previousCheckpoint).toEqual(emptyCheckpoint());
+    expect(source.previousCheckpointDigest).toBe(checkpointDigest(emptyCheckpoint()));
+    expect(source.predecessorEntryId).toBe("prior");
+    expect(() => buildCompactionSource(priorInput(true, version))).toThrow();
+    const bad = priorInput(false, version);
+    (bad.branchEntries[1] as any).summary = "tampered summary";
+    bad.previousSummary = "tampered summary";
+    expect(() => buildCompactionSource(bad)).toThrow("prior wire summary digest mismatch");
   });
 });

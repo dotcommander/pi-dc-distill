@@ -234,7 +234,7 @@ export function readCheckpointUpdateBase(branch: Iterable<unknown>): CheckpointU
     const data = entry.type === "custom" && entry.customType === DISTILL_HANDOFF_ENTRY_TYPE ? entry.data : entry.type === "compaction" ? entry.details : undefined;
     if (!data) continue;
     if (data.checkpoint === undefined) {
-      if (entry.type === "compaction" && data.compactor === "dc-distill" && data.version === 13) fail("Expected v13 checkpoint is missing.");
+      if (entry.type === "compaction" && data.compactor === "dc-distill" && (data.version === 13 || data.version === 14)) fail("Expected v13/v14 checkpoint is missing.");
       continue;
     }
     if (typeof data.checkpointDigest !== "string") fail("Expected checkpoint digest is missing.");

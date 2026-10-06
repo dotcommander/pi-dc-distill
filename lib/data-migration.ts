@@ -54,7 +54,10 @@ async function exists(path: string): Promise<boolean> {
 
 async function readJsonArray(path: string): Promise<unknown[]> {
   const parsed = JSON.parse(await readFile(path, "utf8"));
-  return Array.isArray(parsed) ? parsed : [];
+  if (!Array.isArray(parsed)) {
+    throw new TypeError("Recall file must contain a JSON array");
+  }
+  return parsed;
 }
 
 async function mergeRecallFile(src: string, dst: string): Promise<void> {
@@ -141,7 +144,10 @@ async function migrateEntry(
         if (basename(relativePath) === "recall.json") await readJsonArray(src);
         await Fs.write(dst, await readFile(src)); result.copied.push(relativePath); return;
       }
-      if ((await readFile(src)).equals(await readFile(dst))) return;
+      if ((await readFile(src)).equals(await readFile(dst))) {
+        if (basename(relativePath) === "recall.json") await readJsonArray(src);
+        return;
+      }
       if (basename(relativePath) === "recall.json") {
         await mergeRecallFile(src, dst); result.merged.push(relativePath); return;
       }

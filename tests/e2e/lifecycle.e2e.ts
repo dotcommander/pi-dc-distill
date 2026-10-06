@@ -17,6 +17,8 @@ import { join } from "node:path";
 import { RpcClient, eventsOfType, messageText, type RpcEvent } from "./harness/rpc-client.ts";
 import { makeTestDir, piEnv, scriptedArgs, latestSessionFile, type TestDir } from "./harness/env.ts";
 
+import { assertCurrentCompaction } from "./harness/current-compaction.ts";
+
 const CONTINUATION = "dc-distill-continuation";
 
 interface CompactionDetails {
@@ -107,9 +109,7 @@ describe("dc-distill real-Pi lifecycle", () => {
 
         const result = end.result as { summary?: string; details?: CompactionDetails };
         expect(result.details?.compactor).toBe("dc-distill");
-        expect(result.details?.version).toBe(13);
-        expect((result.details as Record<string, any>)?.checkpoint?.version).toBe(1);
-        expect((result.details as Record<string, any>)?.checkpointDigest).toMatch(/^[0-9a-f]{64}$/);
+        assertCurrentCompaction(result.summary, result.details);
         expect(result.summary).not.toMatch(/^_.*(?:→|tokens|reduction).*_\n/);
         expect(result.details?.autonomous).toBe(false);
         expect(result.summary).toContain("TASK-13");
@@ -119,6 +119,9 @@ describe("dc-distill real-Pi lifecycle", () => {
         const committed = ledgerCompactions(latestSessionFile(t));
         expect(committed).toHaveLength(1);
         expect(committed[0]?.details?.attemptId).toBe(result.details?.attemptId);
+        expect(committed[0]?.summary).toBe(result.summary);
+        expect(committed[0]?.details).toEqual(result.details);
+        assertCurrentCompaction(committed[0]?.summary, committed[0]?.details);
 
         // The provider saw exactly one request per agent run — no host-side
         // LLM summarizer fallback ever ran.
@@ -146,14 +149,40 @@ describe("dc-distill real-Pi lifecycle", () => {
   test(
     "B: autonomous threshold compaction commits and delivers continuation once",
     async () => {
-    const t = makeTestDir("autonomous");
+    const t = makeTestDir("autonomous", { keepRecentTokens: 1024 });
     let passed = false;
     try {
-      // auto = min(120000, (200000-16384)-20000) = 120000; crossed when
-      // 4000 + 25000*n >= 120000, i.e. the 5th assistant message.
+      // A trustworthy branch without a compaction can skip the synthetic
+      // startup cooldown. Seed a genuine recent compaction and restart so this
+      // scenario exercises the restored real 120-second cooldown instead.
+      const seed = new RpcClient({ args: scriptedArgs(t), cwd: t.dir,
+        env: piEnv(t, { DISTILL_FAKE_BASE: "4000", DISTILL_FAKE_STEP: "500" }),
+        logFile: join(t.dir, "seed.log") });
+      try {
+        for (let i = 1; i <= 4; i++) {
+          const since = seed.mark();
+          expect((await seed.request({ type: "prompt", message: filler(i) })).success).toBe(true);
+          await settle(seed, since);
+        }
+        const since = seed.mark();
+        expect((await seed.request({ type: "compact" })).success).toBe(true);
+        const end = await seed.waitFor((e) => e.type === "compaction_end" && e.aborted === false,
+          60_000, { since });
+        const result = end.result as { summary?: unknown; details?: unknown };
+        assertCurrentCompaction(result.summary, result.details);
+      } finally { await seed.close(); }
+      const session = latestSessionFile(t);
+      expect(session).toBeDefined();
+      const seedCompactions = ledgerCompactions(session);
+      expect(seedCompactions).toHaveLength(1);
+      const seedTraceCount = providerTrace(t).length;
+      const seedLogCount = readFileSync(join(t.agentHome, "data", "dc-distill", "compact-log.jsonl"), "utf8")
+        .trim().split("\n").length;
+      // auto = min(120000, (200000-16384)-20000) = 120000. The small
+      // retained tail keeps six growth samples below the native warn boundary.
       const spawnedAt = Date.now();
       const client = new RpcClient({
-        args: scriptedArgs(t),
+        args: scriptedArgs(t, [], { session }),
         cwd: t.dir,
         env: piEnv(t, {
           DISTILL_FAKE_BASE: "4000",
@@ -174,7 +203,7 @@ describe("dc-distill real-Pi lifecycle", () => {
         // Phase 2: the documented startup cooldown holds the check back — the
         // threshold is crossed with a current finite positive Pi usage sample,
         // but compaction waits out
-        // the cooldown window from session start.
+        // the real cooldown restored from the seeded compaction.
         await new Promise((r) => setTimeout(r, 250));
         const diag = readFileSync(join(t.agentHome, "data", "dc-distill", "diag.log"), "utf8");
         expect(diag).toContain("auto-check blocked reason=cooldown source=agent_settled");
@@ -182,7 +211,7 @@ describe("dc-distill real-Pi lifecycle", () => {
         expect(eventsOfType(client.events, "compaction_start")).toEqual([]);
 
         // Phase 3: ride out the cooldown; the next settled boundary fires.
-        // Turn 7 reports 4000 + 25000*6 = 154000 tokens: auto tier, below warn.
+        // Turn 7 remains in the auto tier, below warn with the retained tail.
         const cooldownEnds = spawnedAt + 120_000 + 1_500;
         await new Promise((r) => setTimeout(r, Math.max(0, cooldownEnds - Date.now())));
         const since = client.mark();
@@ -220,6 +249,13 @@ describe("dc-distill real-Pi lifecycle", () => {
         const result = end.result as { summary?: string; details?: CompactionDetails };
         expect(result.details?.compactor).toBe("dc-distill");
         expect(result.details?.autonomous).toBe(true);
+        assertCurrentCompaction(result.summary, result.details);
+        const committed = ledgerCompactions(latestSessionFile(t));
+        expect(committed).toHaveLength(2); // preserved seed + this one autonomous append
+        expect(committed[0]).toEqual(seedCompactions[0]);
+        expect(committed[1]?.summary).toBe(result.summary);
+        expect(committed[1]?.details).toEqual(result.details);
+        assertCurrentCompaction(committed[1]?.summary, committed[1]?.details);
 
         // Durable continuation: delivered once while idle, journalled with the
         // attempt id, triggers a run, and is answered by the model.
@@ -257,7 +293,7 @@ describe("dc-distill real-Pi lifecycle", () => {
           join(t.agentHome, "data", "dc-distill", "compact-log.jsonl"),
           "utf8",
         ).trim().split("\n").map((l) => JSON.parse(l) as Record<string, any>);
-        const mine = logEntries.filter((e) => e.sessionId === sessionId);
+        const mine = logEntries.slice(seedLogCount).filter((e) => e.sessionId === sessionId);
         expect(mine).toHaveLength(1);
         expect(mine[0]?.tier).toBe(1);
         expect(mine[0]?.strategy).toBe("algorithmic");
@@ -270,10 +306,16 @@ describe("dc-distill real-Pi lifecycle", () => {
           readFileSync(join(projectDir!, "recall.json"), "utf8"),
         ) as Array<Record<string, any>> | { entries?: Array<Record<string, any>> };
         const recallEntries = Array.isArray(parsedRecall) ? parsedRecall : parsedRecall.entries ?? [];
-        expect(recallEntries.filter((e) => e.sessionId === sessionId)).toHaveLength(1);
+        const sessionRecall = recallEntries.filter((e) => e.sessionId === sessionId);
+        expect(sessionRecall).toHaveLength(2); // seed and autonomous commit, both retained
+        expect(sessionRecall.filter((e) => e.attemptId === seedCompactions[0]?.details?.attemptId)).toHaveLength(1);
+        const autonomousRecall = sessionRecall.filter((e) => e.attemptId === result.details?.attemptId);
+        expect(autonomousRecall).toHaveLength(1);
+        expect(autonomousRecall[0]?.summary).toBe(result.summary);
 
-        // No extra provider request for the autonomous cycle either.
-        expect(providerTrace(t)).toHaveLength(
+        // No extra provider request for the autonomous cycle either; the
+        // separately validated seed process has its own earlier trace prefix.
+        expect(providerTrace(t).slice(seedTraceCount)).toHaveLength(
           eventsOfType(client.events, "agent_start").length,
         );
       } finally {
@@ -343,8 +385,10 @@ describe("dc-distill real-Pi lifecycle", () => {
       // continuation delivery can append the custom-message journal.
       const seededLines = [...lines];
       const seededEntry = JSON.parse(seededLines[compactionLine]!) as {
+        summary?: unknown;
         details?: Record<string, unknown>;
       };
+      assertCurrentCompaction(seededEntry.summary, seededEntry.details);
       seededEntry.details = { ...seededEntry.details, autonomous: true };
       seededLines[compactionLine] = JSON.stringify(seededEntry);
 

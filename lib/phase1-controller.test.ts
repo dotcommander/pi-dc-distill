@@ -22,7 +22,7 @@ function fixture() {
     stub.ctx.getContextUsage = () => ({ tokens, contextWindow: 200_000, percent: 50 });
   };
   return { stub, controller, diagnostics, usage,
-    advance: () => { now += 300_000; }, setSettings: (value: any) => { settings = value; } };
+    advance: () => { now += 300_000; }, clock: (value: number) => { now = value; }, setSettings: (value: any) => { settings = value; } };
 }
 
 describe("Phase 1 current-sample policy", () => {
@@ -74,6 +74,169 @@ describe("Phase 1 current-sample policy", () => {
       expect(controller.assess(stub.ctx)?.decision ?? null).toBeNull();
     }
   });
+});
+
+describe("sample-only and boundary-stop admission", () => {
+  test("owned native setup-abort errors are accepted only with empty content and finite zero usage", () => {
+    const abortMessage = () => ({ role: "assistant", content: [], stopReason: "error",
+      errorMessage: "This operation was aborted", usage: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0,
+        totalTokens: 0, cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 } } });
+    const mutations: Array<[string, (message: any) => void]> = [
+      ["native shape", () => {}],
+      ["arbitrary error", (m) => { m.errorMessage = "Provider failed"; }],
+      ["similar abort text", (m) => { m.errorMessage = "This operation was aborted."; }],
+      ["text", (m) => { m.content = [{ type: "text", text: "work" }]; }],
+      ["empty text block", (m) => { m.content = [{ type: "text", text: "" }]; }],
+      ["thinking", (m) => { m.content = [{ type: "thinking", thinking: "work" }]; }],
+      ["tool call", (m) => { m.content = [{ type: "toolCall", id: "x", name: "read", arguments: {} }]; }],
+      ["missing usage", (m) => { delete m.usage; }],
+      ["missing output", (m) => { delete m.usage.output; }],
+      ["unknown output", (m) => { m.usage.output = null; }],
+      ["NaN output", (m) => { m.usage.output = NaN; }],
+      ["infinite output", (m) => { m.usage.output = Infinity; }],
+      ...["input", "output", "cacheRead", "cacheWrite", "totalTokens", "reasoning", "cacheWrite1h"].map((key): [string, (m: any) => void] =>
+        [`positive ${key}`, (m) => { m.usage[key] = 1; }]),
+      ["missing cost", (m) => { delete m.usage.cost; }],
+      ["positive cost", (m) => { m.usage.cost.total = 1; }],
+    ];
+    for (const [name, mutate] of mutations) {
+      const f = fixture();
+      const branch: any[] = [{ type: "message", id: "turn", message: { role: "assistant", stopReason: "toolUse" } }];
+      f.stub.ctx.sessionManager.getBranch = () => branch;
+      expect(f.controller.reserveBoundaryStop(f.stub.ctx, "turn")).toBe(true);
+      const message = abortMessage();
+      mutate(message);
+      branch.push({ type: "message", id: "native-abort", parentId: "turn", message });
+      expect(f.controller.consumeBoundaryStop(f.stub.ctx)).toBe(name === "native shape" ? "valid" : "invalid");
+      expect(f.controller.consumeBoundaryStop(f.stub.ctx)).toBe("none");
+      if (name === "native shape") {
+        const ticket = f.controller.requestAttempt(f.stub.ctx)!;
+        expect(ticket.branchAnchor).toBe("native-abort");
+        branch.push({ type: "custom", id: "changed-leaf" });
+        expect(f.controller.snapshotMatches(ticket, f.stub.ctx)).toBe(false);
+      }
+    }
+    const noStop = fixture();
+    noStop.stub.ctx.sessionManager.getBranch = () => [{ type: "message", id: "native-abort", message: abortMessage() }] as any;
+    expect(noStop.controller.consumeBoundaryStop(noStop.stub.ctx)).toBe("none");
+  });
+  test("stop consumption reads settings only for a real intent and preserves mismatch/tombstone fencing", () => {
+    const f = fixture();
+    const branch: any[] = [{ type: "message", id: "turn", message: { role: "assistant", stopReason: "toolUse" } }];
+    f.stub.ctx.sessionManager.getBranch = () => branch;
+    let reads = 0;
+    let selected = 0;
+    let reserveTokens = 16_384;
+    f.stub.pi.getSettings = () => {
+      reads++;
+      return { compaction: { enabled: true, modelOverrides: {
+        get "fake/one"() { selected++; return { reserveTokens }; },
+      } } } as any;
+    };
+    expect(f.controller.consumeBoundaryStop(f.stub.ctx)).toBe("none");
+    expect(reads).toBe(0);
+    expect(selected).toBe(0);
+    expect(f.controller.reserveBoundaryStop(f.stub.ctx, "turn")).toBe(true);
+    const reservedReads = reads;
+    const reservedSelections = selected;
+    reserveTokens = 20_000;
+    expect(f.controller.consumeBoundaryStop(f.stub.ctx)).toBe("invalid");
+    expect(reads).toBe(reservedReads + 1);
+    expect(selected).toBe(reservedSelections + 1);
+    expect(f.controller.consumeBoundaryStop(f.stub.ctx)).toBe("none");
+    expect(reads).toBe(reservedReads + 1);
+    expect(f.controller.reserveBoundaryStop(f.stub.ctx, "turn")).toBe(true);
+    const cancelledReads = reads;
+    const cancelledSelections = selected;
+    f.controller.cancelBoundaryStop();
+    expect(f.controller.consumeBoundaryStop(f.stub.ctx)).toBe("invalid");
+    expect(f.controller.consumeBoundaryStop(f.stub.ctx)).toBe("none");
+    expect(reads).toBe(cancelledReads);
+    expect(selected).toBe(cancelledSelections);
+  });
+  test("fresh sampling is once-only, preserves warmup/time and requires real growth and cooldown", () => {
+    const f = fixture();
+    f.controller.recordCommittedCompaction(1);
+    const time = f.controller.monitor.state.lastCompactionTime;
+    for (const invalid of [null, undefined, 0, -1, NaN, Infinity]) {
+      f.usage(invalid);
+      expect(f.controller.samplePostCompaction(f.stub.ctx)).toBe(false);
+      expect(f.controller.monitor.state.awaitingPostCompactionSample).toBe(true);
+    }
+    f.stub.ctx.getContextUsage = () => { throw new Error("unknown"); };
+    expect(f.controller.samplePostCompaction(f.stub.ctx)).toBe(false);
+    f.usage(130_000);
+    expect(f.controller.samplePostCompaction(f.stub.ctx)).toBe(true);
+    expect(f.controller.monitor.state.repeatBaselineTokens).toBe(130_000);
+    expect(f.controller.monitor.state.missedAuto).toBe(true);
+    expect(f.controller.warmupTurnsRemaining).toBe(1);
+    expect(f.controller.monitor.state.lastCompactionTime).toBe(time);
+    f.usage(134_000);
+    expect(f.controller.samplePostCompaction(f.stub.ctx)).toBe(false);
+    expect(f.controller.monitor.state.repeatBaselineTokens).toBe(130_000);
+    f.controller.assess(f.stub.ctx); // warmup
+    expect(f.controller.assess(f.stub.ctx)?.blockedBy).toBe("cooldown");
+    f.advance();
+    f.usage(133_999);
+    expect(f.controller.assess(f.stub.ctx)?.blockedBy).toBe("repeat-growth");
+    f.usage(134_000);
+    expect(f.controller.assess(f.stub.ctx)?.decision?.tier).toBe(Tier.Mechanical);
+  });
+  test("below-auto sampling and guards do not consume unknown baselines", () => {
+    const f = fixture();
+    f.controller.recordCommittedCompaction(1);
+    f.usage(100_000);
+    f.setSettings({ compaction: { enabled: false } });
+    expect(f.controller.samplePostCompaction(f.stub.ctx)).toBe(false);
+    f.setSettings({ compaction: { reserveTokens: -1 } });
+    expect(f.controller.samplePostCompaction(f.stub.ctx)).toBe(false);
+    f.setSettings({ compaction: { enabled: true } });
+    const ticket = f.controller.requestAttempt(f.stub.ctx)!;
+    expect(f.controller.samplePostCompaction(f.stub.ctx)).toBe(false);
+    f.controller.finishAttempt(ticket);
+    expect(f.controller.samplePostCompaction(f.stub.ctx)).toBe(true);
+    expect(f.controller.monitor.state.repeatBaselineTokens).toBeNull();
+    expect(f.controller.monitor.state.missedAuto).toBe(false);
+  });
+  test("a stopped boundary consumes once and leaves exact settled ticket identity intact", () => {
+    const f = fixture();
+    const branch: any[] = [{ type: "message", id: "turn", message: { role: "assistant", stopReason: "toolUse" } }];
+    f.stub.ctx.sessionManager.getBranch = () => branch;
+    expect(f.controller.reserveBoundaryStop(f.stub.ctx, "turn")).toBe(true);
+    expect(f.controller.reserveBoundaryStop(f.stub.ctx, "turn")).toBe(false);
+    expect(f.controller.requestAttempt(f.stub.ctx)).toBeNull();
+    branch.push({ type: "message", id: "aborted", parentId: "turn", message: { role: "assistant", stopReason: "aborted", content: [],
+      usage: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, totalTokens: 0,
+        cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 } } } });
+    expect(f.controller.consumeBoundaryStop(f.stub.ctx)).toBe("valid");
+    expect(f.controller.consumeBoundaryStop(f.stub.ctx)).toBe("none");
+    const ticket = f.controller.requestAttempt(f.stub.ctx)!;
+    expect(ticket.branchAnchor).toBe("aborted");
+    branch.push({ type: "custom", id: "later" });
+    expect(f.controller.snapshotMatches(ticket, f.stub.ctx)).toBe(false);
+  });
+  for (const invalidation of ["user", "model", "tree", "disabled", "invalid", "reserve", "cancel", "manual", "foreign"]) {
+    test(`${invalidation} prevents stale stop admission`, () => {
+      const f = fixture();
+      const branch: any[] = [{ type: "message", id: "turn", timestamp: new Date(500_000).toISOString(),
+        parentId: null, message: { role: "assistant", stopReason: "toolUse" } }];
+      f.stub.ctx.sessionManager.getBranch = () => branch;
+      expect(f.controller.reserveBoundaryStop(f.stub.ctx, "turn")).toBe(true);
+      if (invalidation === "user") f.controller.contextChanged(f.stub.ctx);
+      if (invalidation === "model") f.stub.ctx.model = { ...f.stub.ctx.model!, id: "changed" };
+      if (invalidation === "tree") f.controller.admissionContextChanged(f.stub.ctx, true);
+      if (invalidation === "disabled") f.setSettings({ compaction: { enabled: false } });
+      if (invalidation === "invalid") f.setSettings({ compaction: { reserveTokens: -1 } });
+      if (invalidation === "reserve") f.setSettings({ compaction: { enabled: true, reserveTokens: 20_000 } });
+      if (invalidation === "cancel") f.controller.cancelBoundaryStop();
+      if (invalidation === "manual") f.controller.beginPreparation(f.stub.ctx);
+      if (invalidation === "foreign") {
+        branch.push({ type: "compaction", id: "foreign", timestamp: new Date(900_000).toISOString() });
+        f.controller.observeHostCompaction(f.stub.ctx, { id: "foreign" });
+      }
+      expect(f.controller.consumeBoundaryStop(f.stub.ctx)).toBe("invalid");
+    });
+  }
 });
 
 describe("Phase 1 lifecycle and tickets", () => {
@@ -392,4 +555,229 @@ describe("policy v3 restored admission", () => {
     expect(controller.monitor.state.repeatBaselineTokens).toBe(130_000);
     expect(controller.monitor.state.lastCompactionTime).toBe(500_000);
   });
+});
+
+describe("expired stops retain provenance, never stale admission authority", () => {
+  for (const time of [1_030_001, 1_900_000, 999_999]) {
+    test(`clock ${time} consumes an expired intent once and captures a fresh leaf ticket`, () => {
+      const f = fixture();
+      const branch: any[] = [{ type: "message", id: "origin", parentId: null, message: { role: "assistant" } }];
+      f.stub.ctx.sessionManager.getBranch = () => branch;
+      expect(f.controller.reserveBoundaryStop(f.stub.ctx, "origin")).toBe(true);
+      branch.push({ type: "custom", id: "settled-marker", parentId: "origin" });
+      f.clock(time);
+      expect(f.controller.consumeBoundaryStop(f.stub.ctx)).toBe("expired");
+      expect(f.controller.consumeBoundaryStop(f.stub.ctx)).toBe("none");
+      f.usage(200_000);
+      const warmup = f.controller.warmupTurnsRemaining;
+      expect(f.controller.assess(f.stub.ctx, "agent_settled", true)?.decision?.tier).toBe(Tier.Mechanical);
+      expect(f.controller.warmupTurnsRemaining).toBe(warmup);
+      expect(f.controller.requestAttempt(f.stub.ctx)?.branchAnchor).toBe("settled-marker");
+    });
+  }
+  for (const corruption of ["missing-origin", "missing-boundary", "broken-link", "duplicate-id", "new-user", "partial-abort"]) {
+    test(`expired ${corruption} is invalid before age is considered`, () => {
+      const f = fixture();
+      const branch: any[] = [{ type: "message", id: "origin", parentId: null, message: { role: "assistant" } },
+        { type: "custom", id: "boundary", parentId: "origin" }];
+      f.stub.ctx.sessionManager.getBranch = () => branch;
+      expect(f.controller.reserveBoundaryStop(f.stub.ctx, "origin")).toBe(true);
+      f.advance();
+      if (corruption === "missing-origin") branch[0].id = "other";
+      if (corruption === "missing-boundary") branch.pop();
+      if (corruption === "broken-link") branch.push({ type: "custom", id: "next", parentId: "other" });
+      if (corruption === "duplicate-id") branch.push({ type: "custom", id: "boundary", parentId: "boundary" });
+      if (corruption === "new-user") branch.push({ type: "message", id: "next", parentId: "boundary", message: { role: "user", content: "new request" } });
+      if (corruption === "partial-abort") branch.push({ type: "message", id: "next", parentId: "boundary", message: { role: "assistant", stopReason: "aborted", content: [{ type: "text", text: "work" }] } });
+      expect(f.controller.consumeBoundaryStop(f.stub.ctx)).toBe("invalid");
+    });
+  }
+  test("even an urgent stale estimate cannot replace a positive current sample on reassessment", () => {
+    const f = fixture();
+    f.controller.monitor.state.tokenEstimate = 250_000;
+    f.usage(null);
+    expect(f.controller.assess(f.stub.ctx, "agent_settled", true)).toBeNull();
+    expect(f.diagnostics.at(-1)).toContain("reason=missing-pi-sync");
+  });
+});
+
+function pausedFixture() {
+  const f = fixture();
+  const branch: any[] = [{ type: "message", id: "anchor", parentId: null,
+    timestamp: new Date(900_000).toISOString(), message: { role: "assistant", content: [] } }];
+  f.stub.ctx.sessionManager.getBranch = () => branch;
+  f.usage(180_000);
+  const ticket = f.controller.requestAttempt(f.stub.ctx)!;
+  f.controller.beginPreparation(f.stub.ctx);
+  expect(f.controller.pauseCompilerFailure(ticket, f.stub.ctx, "compile", "protected_overflow")).toBe(true);
+  f.controller.cancelPreparation(ticket);
+  f.controller.finishAttempt(ticket);
+  return { ...f, branch, ticket };
+}
+
+describe("local automatic compiler pause", () => {
+  for (const code of ["invalid_input", "invalid_checkpoint", "protected_overflow", "required_analysis_overflow", "compiler_failure"] as const) {
+    test(`${code} records one owned failure episode even when diagnostics throw`, () => {
+      const f = fixture();
+      const ticket = f.controller.requestAttempt(f.stub.ctx)!;
+      f.controller.beginPreparation(f.stub.ctx);
+      f.controller.monitor.diagnostic = () => { throw new Error("diagnostic unavailable"); };
+      expect(f.controller.pauseCompilerFailure(ticket, f.stub.ctx, "source", code)).toBe(true);
+      expect(f.controller.pauseCompilerFailure(ticket, f.stub.ctx, "validation", code)).toBe(false);
+      expect(f.controller.failedCompilerAttempt(ticket)).toBe(true);
+      f.controller.finishAttempt(ticket);
+      f.usage(250_000);
+      expect(f.controller.assess(f.stub.ctx)).toBeNull();
+      expect(f.controller.hasCompilerPause()).toBe(true);
+    });
+  }
+  test("manual, stale and replaced attempts cannot arm the circuit", () => {
+    const f = fixture();
+    const manual = f.controller.beginPreparation(f.stub.ctx)!;
+    expect(f.controller.pauseCompilerFailure(manual, f.stub.ctx, "compile", "compiler_failure")).toBe(false);
+    f.controller.finishAttempt(manual);
+    const autonomous = f.controller.requestAttempt(f.stub.ctx)!;
+    f.controller.contextChanged(f.stub.ctx);
+    expect(f.controller.pauseCompilerFailure(autonomous, f.stub.ctx, "compile", "compiler_failure")).toBe(false);
+    f.controller.start(f.stub.ctx);
+    const current = f.controller.requestAttempt(f.stub.ctx)!;
+    expect(f.controller.pauseCompilerFailure(autonomous, f.stub.ctx, "compile", "compiler_failure")).toBe(false);
+    expect(f.controller.activeAttempt).toBe(current);
+    expect(f.controller.hasCompilerPause()).toBe(false);
+  });
+  for (const band of [130_000, 180_000, 200_000, 250_000, 185_000]) {
+    test(`pause gates mechanical ${band} before both stop and submission`, () => {
+      const f = pausedFixture();
+      f.advance();
+      f.controller.warmupTurnsRemaining = 0;
+      f.controller.monitor.state.missedAuto = true;
+      f.usage(band);
+      expect(f.controller.assess(f.stub.ctx)).toBeNull();
+      expect(f.controller.reserveBoundaryStop(f.stub.ctx, "anchor")).toBe(false);
+      expect(f.controller.requestAttempt(f.stub.ctx)).toBeNull();
+      expect(f.controller.monitor.state.missedAuto).toBe(true);
+      expect(f.diagnostics.at(-1)).toContain("reason=compiler-paused");
+    });
+  }
+  test("warn steering and manual preparation remain available", () => {
+    const f = pausedFixture();
+    f.advance();
+    f.controller.warmupTurnsRemaining = 0;
+    // With the standard reserve the warn line lies above headroom; use a
+    // pause episode captured under a geometry with a reachable warn band.
+    f.setSettings({ compaction: { enabled: true, reserveTokens: 40_000 } });
+    f.controller.refreshSettings(f.stub.ctx);
+    const ticket = f.controller.requestAttempt(f.stub.ctx)!;
+    f.controller.beginPreparation(f.stub.ctx);
+    f.controller.pauseCompilerFailure(ticket, f.stub.ctx, "compile", "compiler_failure");
+    f.controller.finishAttempt(ticket);
+    f.advance();
+    f.controller.monitor.state.missedAuto = false;
+    f.usage(165_000);
+    expect(f.controller.assess(f.stub.ctx)?.decision?.tier).toBe(Tier.Warn);
+    const manual = f.controller.beginPreparation(f.stub.ctx)!;
+    expect(manual.autonomous).toBe(false);
+    f.controller.cancelPreparation(manual);
+    f.controller.finishAttempt(manual);
+    expect(f.controller.hasCompilerPause()).toBe(true);
+  });
+  for (const reset of ["start", "model", "window", "host-window", "settings", "disabled", "branch", "native-commit", "owned-commit"]) {
+    test(`${reset} clears a pause only when its new state is established`, () => {
+      const f = pausedFixture();
+      if (reset === "start") f.controller.start(f.stub.ctx);
+      if (reset === "model" || reset === "window") {
+        f.stub.ctx.model = { ...f.stub.ctx.model!, ...(reset === "model" ? { id: "different" } : { contextWindow: 210_000 }) };
+        f.controller.admissionContextChanged(f.stub.ctx);
+      }
+      if (reset === "host-window") {
+        f.stub.ctx.getContextUsage = () => ({ tokens: 180_000, contextWindow: 210_000, percent: 80 });
+        f.controller.assess(f.stub.ctx);
+      }
+      if (reset === "settings" || reset === "disabled") {
+        f.setSettings({ compaction: { enabled: reset !== "disabled", reserveTokens: reset === "settings" ? 20_000 : 16_384 } });
+        f.controller.refreshSettings(f.stub.ctx);
+      }
+      if (reset === "branch") {
+        f.branch.splice(0, f.branch.length, { type: "message", id: "other", parentId: null, timestamp: new Date(900_000).toISOString(), message: { role: "user", content: "other branch" } });
+        f.controller.admissionContextChanged(f.stub.ctx, true);
+      }
+      if (reset === "native-commit" || reset === "owned-commit") {
+        f.branch.push({ type: "compaction", id: "recovery", parentId: "anchor", timestamp: new Date(950_000).toISOString(), summary: "Recovered", firstKeptEntryId: "anchor", tokensBefore: 180_000 });
+        if (reset === "native-commit") f.controller.observeHostCompaction(f.stub.ctx, f.branch.at(-1)!);
+        else f.controller.clearCompilerPauseAfterCommit(f.stub.ctx, "recovery");
+      }
+      expect(f.controller.hasCompilerPause()).toBe(false);
+    });
+  }
+  for (const kind of ["global-change", "model-change", "shadowed-global", "identical", "invalid-global", "invalid-model"]) {
+    test(`effective keepRecentTokens ${kind} controls pause reset`, () => {
+      const f = pausedFixture();
+      const initial = { compaction: { keepRecentTokens: 20_000,
+        modelOverrides: { "fake/one": { keepRecentTokens: 20_000 } } } };
+      f.setSettings(initial);
+      f.controller.refreshSettings(f.stub.ctx);
+      expect(f.controller.hasCompilerPause()).toBe(true);
+      if (kind === "global-change") f.setSettings({ compaction: { keepRecentTokens: 25_000 } });
+      if (kind === "model-change") f.setSettings({ compaction: { keepRecentTokens: 20_000, modelOverrides: { "fake/one": { keepRecentTokens: 25_000 } } } });
+      if (kind === "shadowed-global") f.setSettings({ compaction: { keepRecentTokens: 25_000, modelOverrides: initial.compaction.modelOverrides } });
+      if (kind === "invalid-global") f.setSettings({ compaction: { keepRecentTokens: -1, modelOverrides: initial.compaction.modelOverrides } });
+      if (kind === "invalid-model") f.setSettings({ compaction: { modelOverrides: { "fake/one": { keepRecentTokens: -1 } } } });
+      f.controller.refreshSettings(f.stub.ctx);
+      expect(f.controller.hasCompilerPause()).toBe(!["global-change", "model-change"].includes(kind));
+      if (kind.startsWith("invalid")) {
+        f.setSettings(initial); f.controller.refreshSettings(f.stub.ctx);
+        expect(f.controller.hasCompilerPause()).toBe(true);
+      }
+    });
+  }
+  for (const corrupt of ["summary", "details", "missing-payload"]) {
+    test(`native newest same-id ${corrupt} cannot reset pause`, () => {
+      const f = pausedFixture();
+      const entry = { type: "compaction", id: "native-recovery", parentId: "anchor", timestamp: new Date(950_000).toISOString(),
+        summary: "Native recovery", firstKeptEntryId: "anchor", tokensBefore: 180_000, details: { source: "native" } };
+      f.branch.push(entry);
+      const forged = corrupt === "summary" ? { ...entry, summary: "Forged" }
+        : corrupt === "details" ? { ...entry, details: {} } : { id: entry.id };
+      f.controller.observeHostCompaction(f.stub.ctx, forged);
+      expect(f.controller.hasCompilerPause()).toBe(true);
+      f.controller.observeHostCompaction(f.stub.ctx, entry);
+      expect(f.controller.hasCompilerPause()).toBe(false);
+    });
+  }
+  for (const unchanged of ["prompt", "descendant", "same-model", "same-settings", "invalid-settings", "missing-branch", "broken-branch", "mismatched-commit", "missing-commit-branch", "superseded-commit", "failed-manual"]) {
+    test(`${unchanged} preserves the failed anchor pause`, () => {
+      const f = pausedFixture();
+      if (unchanged === "prompt") f.controller.contextChanged(f.stub.ctx);
+      if (unchanged === "descendant") {
+        f.branch.push({ type: "message", id: "new-user", parentId: "anchor", timestamp: new Date(950_000).toISOString(), message: { role: "user", content: "new prompt" } });
+        f.controller.admissionContextChanged(f.stub.ctx, true);
+      }
+      if (unchanged === "same-model") f.controller.admissionContextChanged(f.stub.ctx);
+      if (unchanged === "same-settings") f.controller.refreshSettings(f.stub.ctx);
+      if (unchanged === "invalid-settings") {
+        f.setSettings({ compaction: { reserveTokens: -1 } }); f.controller.refreshSettings(f.stub.ctx);
+        f.setSettings({ compaction: { enabled: true, reserveTokens: 16_384 } }); f.controller.refreshSettings(f.stub.ctx);
+      }
+      if (unchanged === "missing-branch" || unchanged === "missing-commit-branch") {
+        f.stub.ctx.sessionManager.getBranch = () => { throw new Error("unavailable"); };
+        if (unchanged === "missing-branch") f.controller.admissionContextChanged(f.stub.ctx, true);
+        else f.controller.observeHostCompaction(f.stub.ctx, { id: "recovery" });
+      }
+      if (unchanged === "broken-branch") {
+        f.branch.splice(0, 1, { type: "custom", id: "other", parentId: "missing" });
+        f.controller.admissionContextChanged(f.stub.ctx, true);
+      }
+      if (unchanged === "mismatched-commit") f.controller.observeHostCompaction(f.stub.ctx, { id: "foreign" });
+      if (unchanged === "superseded-commit") {
+        f.branch.push({ type: "compaction", id: "older", parentId: "anchor", timestamp: new Date(950_000).toISOString() },
+          { type: "compaction", id: "newer", parentId: "older", timestamp: new Date(960_000).toISOString() });
+        f.controller.observeHostCompaction(f.stub.ctx, { id: "older" });
+      }
+      if (unchanged === "failed-manual") {
+        const manual = f.controller.beginPreparation(f.stub.ctx)!;
+        f.controller.cancelPreparation(manual); f.controller.finishAttempt(manual);
+      }
+      expect(f.controller.hasCompilerPause()).toBe(true);
+    });
+  }
 });

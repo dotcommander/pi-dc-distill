@@ -2,6 +2,7 @@ import type { ResumeCheckpointV1 } from "./compiler/checkpoint.ts";
 import { compileSessionJsonl } from "./local-compact.ts";
 import { compileSessionFile } from "./compile-session-file.ts";
 import { CompactionCancelledError } from "./compaction-source.ts";
+import { compilerFailureCode, type CompilerFailureCode } from "./compiler/errors.ts";
 
 const MIN_USEFUL_LENGTH = 50;
 
@@ -28,7 +29,12 @@ export type StrategyResult =
       summaryDigest: string;
       digestScope: "compaction-input" | "bounded-compaction-input";
     }
-  | { ok: false; cancelled: boolean; reasons: string[] };
+  | {
+      ok: false;
+      cancelled: boolean;
+      reasons: string[];
+      failure?: Readonly<{ code: CompilerFailureCode }>;
+    };
 
 interface CompileResult {
   checkpoint: ResumeCheckpointV1;
@@ -75,14 +81,13 @@ const algorithmic = async (
   };
 };
 
-export const hasLocalCompactor = (): boolean => true;
-
 export const runStrategies = async (
   prep: CompactionPrep,
   signal?: AbortSignal,
 ): Promise<StrategyResult> => {
   const reasons: string[] = [];
   let cancelled = Boolean(signal?.aborted);
+  let failure: Readonly<{ code: CompilerFailureCode }> | undefined;
   try {
     const result = await algorithmic(prep, signal);
     // algorithmic() already enforces MIN_USEFUL_LENGTH; no re-check needed.
@@ -105,6 +110,7 @@ export const runStrategies = async (
     );
     cancelled = cancelled || err instanceof CompactionCancelledError
       || (err instanceof Error && (err.name === "AbortError" || err.name === "LoaderAbortError"));
+    if (!cancelled) failure = { code: compilerFailureCode(err) };
   }
-  return { ok: false, cancelled, reasons };
+  return { ok: false, cancelled, reasons, ...(failure ? { failure } : {}) };
 };

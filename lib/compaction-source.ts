@@ -160,7 +160,7 @@ export function buildCompactionSource(input: {
     entry.messages.map((message, messageIndex) => ({ message, messageIndex })).filter(item => item.message.role !== "system")
       .map(item => referenceByMessage.get(`${entry.sourceEntry.id}:${item.messageIndex}`) ?? []));
   const details = prior?.type === "compaction" ? prior.details as Record<string, unknown> | undefined : undefined;
-  if (details?.compactor === "dc-distill" && details.version === 13) {
+  if (details?.compactor === "dc-distill" && (details.version === 13 || details.version === 14)) {
     if (prior?.type !== "compaction" || typeof details.summaryDigest !== "string" ||
         createHash("sha256").update(prior.summary, "utf8").digest("hex") !== details.summaryDigest)
       throw new CompactionInputError("invalid_checkpoint: prior wire summary digest mismatch", "invalid_checkpoint");

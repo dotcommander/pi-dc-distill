@@ -14,8 +14,10 @@ the [logs](#logs). A missing log file can simply mean no attempt has been record
 | Manual `/compact` appears to do nothing | Pi found no eligible discarded context, another attempt owns the latch, or deterministic compilation cancelled. | Inspect Pi's visible message and the latest failure record, if present. Pi can decline a cut before invoking the compiler. |
 | Compaction remains reserved after a native non-aborted failure | Pi's failure event has no attempt identity, so dc-distill preserves an ambiguous reservation to avoid releasing another attempt. | Inspect the failure and address its cause. The originating terminal callback or a session lifecycle reset releases the reservation; if no callback arrives, replace the session or restart Pi. |
 | `/compact status` compacted the session | Pi treats `status` as focus text. | There is no separate status command; inspect `compact-log.jsonl` and `diag.log` instead. |
-| Autonomous compaction does not fire at auto | Pi disabled auto-compaction, invalid settings, warmup, cooldown, unavailable/invalid current Pi usage, repeat-growth guard, or an in-flight attempt. | Inspect the latest `auto-check blocked` line in `diag.log`; it records the exact guard and effective geometry. |
-| A cooperative warning appears | The context reached Pi's `contextWindow - reserveTokens` line below the headroom floor. | Finish the atomic unit; compaction becomes unconditional at `max(warn, contextWindow - 20,480)`. A missed auto window is pursued mechanically at the next unblocked warn-band check. |
+| Autonomous compaction does not fire at auto | Pi disabled auto-compaction, invalid settings, warmup, cooldown, unavailable/invalid current Pi usage, repeat-growth guard, an in-flight attempt, or the compiler-failure pause. | Inspect the latest `auto-check blocked` line in `diag.log`; it records the exact guard and effective geometry. |
+| `post-compaction-sample` delays another ordinary attempt | The first fresh host count establishes an above-auto baseline, not immediate permission to repeat. Version 0.1.6 checks only at settlement. | Version 0.1.7 samples at `tool_call` after assistant persistence and checks completed tool batches; unknown counts remain pending, and 120-second cooldown plus 4,000-token growth still apply. Publication does not activate or update the installed package. |
+| A cooperative warning appears | The context reached Pi's `contextWindow - reserveTokens` line below the headroom floor. | Finish the atomic unit; Mechanical compaction bypasses ordinary guards at `max(warn, contextWindow - 20,480)`, subject to ownership, enabled valid settings, the latch and compiler-failure pause. A missed auto window is pursued mechanically at the next unblocked warn-band check. |
+| Automatic compaction stops after a local compiler failure | An owned autonomous attempt paused Mechanical admission, including urgent bands, to prevent repeated aborts. | Inspect `compiler-paused` and the failure stage/code. Fix the cause and try manual `/compact`; manual recovery clears the pause only after a validated successful newest active-branch commit. New prompts and failed manual attempts do not reset it. |
 | Compaction fires at the headroom floor or emergency despite cooldown | These bands bypass warmup, cooldown, sync, and growth guards by design. | Investigate why earlier Mechanical compaction did not reduce context. |
 | Summary lacks retained-tail content | Retained content is deliberately excluded from the discarded-input summary and remains in rebuilt context. | Inspect rebuilt context rather than expecting duplication in the summary. |
 | Summary lacks abandoned-fork content | Only the active branch is authoritative. | Return to the relevant branch before compacting if that content is needed. |
@@ -27,6 +29,28 @@ the [logs](#logs). A missing log file can simply mean no attempt has been record
 | No diagnostic dumps | Dumps default off. | Start Pi with `DC_DISTILL_DUMPS=1`; dc-distill retains 20 pairs. |
 | Default recall misses an older summary | It is outside the ten newest retained summaries, belongs to another project, or is ownerless legacy history. | Use `scope: "all"` for other projects/legacy entries. Evicted summaries are not recoverable through recall. |
 | Migration retries every startup | A migration operation or completion-marker write is failing. | Inspect diagnostics and permissions; fix the cause. No marker is written on failure. |
+
+The checkout's completed `turn_end` check waits for all sibling results, reserves
+only a process-local stop intent, and calls non-awaiting abort. At `agent_settled`,
+validated intent and a fresh host count precede the exact-leaf ticket and standard
+`ctx.compact()` path. User/branch/model/settings changes and cancellation fence
+stale intent; no double warmup or pre-commit continuation is allowed. An aborted
+assistant may be appended while the host settles, so do not move ticket creation
+to the earlier boundary. `agent_before_settle` migration remains deferred.
+
+An expired intent (over 30 seconds or a backward clock) is consumed once; valid
+provenance permits one fresh positive-host-usage assessment under current guards
+before a new ticket. Duplicate callbacks cannot retry it. Invalid or superseded
+intent remains silent.
+
+The compiler pause also clears on a new lifecycle generation, actual effective
+model/context-window or valid settings change, or trustworthy navigation outside
+the failed anchor's lineage. Identical callbacks, new leaves/input digests,
+invalid settings, unavailable branch evidence and mismatched commits do not
+clear it. Cancellation, generic host errors and storage/reporting failures do
+not arm it. The pause is process-local and reports once per episode; restart
+uses the existing startup guards. See
+[lifecycle details](architecture.md#local-compiler-failure-pause).
 
 ## Logs
 
@@ -93,4 +117,9 @@ git diff --check
 The full unit suite is `bun test`. The opt-in `bun run distill:e2e` suite needs
 an installed Pi runtime and includes a 120-second autonomous startup cooldown.
 `bun run distill:demo` runs one offline manual lifecycle. Neither runs as part of
-the normal unit suite. See [development](../README.md#development-and-documentation).
+the normal unit suite. The separate opt-in `turn-boundary.e2e.ts` gate targets
+safe stop → settle → prepare → matching v14 commit → durable continuation with
+a scripted provider on Pi 0.99.2 and installed 1.0.3. See `tests/e2e/README.md`
+for its isolated-parent invocation; historical suite
+receipts do not prove this timing fix, and no passing gate is claimed here.
+See [development](../README.md#development-and-documentation).

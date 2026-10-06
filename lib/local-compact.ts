@@ -371,8 +371,9 @@ function invocationOutcomes(blocks: NormalizedBlock[], previous: import("./compi
     const identity = matched ? `${call.name}: ${canonicalJson(call.args ?? {})}` : undefined;
     if (identity && !(command && isVerificationCommand(command))) {
       // Last explicit terminal outcome wins; missing diagnostic status never proves success.
-      if (block.isError === false) succeeded.add(identity);
-      else succeeded.delete(identity);
+      // Members are digests of canonical invocations, matching stored invocationDigest identity.
+      if (block.isError === false) succeeded.add(digest(identity));
+      else succeeded.delete(digest(identity));
     }
     if (block.isError !== true || /^(?:File unchanged since last read|No changes to apply|Nothing to replace|No changes were made|Tool call .* was not executed|Operation aborted)\b/i.test(block.text ?? "")) continue;
     // Suppress a generic failure only when an authoritative verification receipt owns this result.

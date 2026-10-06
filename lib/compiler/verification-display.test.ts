@@ -2,6 +2,7 @@ import { expect, test } from "bun:test";
 import { emptyCheckpoint } from "./checkpoint.ts";
 import { prioritizeVerificationDisplay, verificationEvictionIndex } from "./verification-display.ts";
 import type { VerificationReceipt } from "./types.ts";
+import { renderVerificationReceipt } from "./tool-tracker.ts";
 
 function receipt(command: string, status: VerificationReceipt["status"] = "PASS", tool = "bash"): VerificationReceipt & { id: string } {
   return { id: command, command, status, tool, cwd: "/repo", evidence: status === "FAIL" ? "middle-output failure retained" : "exit 0", mutationEpoch: 0, freshnessEstablished: true };
@@ -59,4 +60,34 @@ test("pending attempt preserves its preceding completed observation", () => {
   expect(lines.join("\n")).toContain("INCOMPLETE [bash cwd=/repo]: bun test main");
   expect(lines.join("\n")).toContain("PASS [bash cwd=/repo]: [stale command sha256:");
   expect(state.evidence.verification).toHaveLength(2);
+});
+
+test("protected-only verification rows have no eviction victim, including required stale passes", () => {
+  const state = emptyCheckpoint();
+  state.tasks = [{ id: "work", status: "pending", action: "Continue", blocker: "", "depends-on": [], requires: ["fresh", "stale"] }];
+  state.preconditions = ["fresh", "stale"].map(id => ({ id, kind: "verification-pass" as const,
+    runner: "bash", command: `bun test ${id}`, cwd: "/repo" }));
+  state.evidence = { ...state.evidence, mutationEpoch: 1,
+    verification: [{ ...receipt("bun test fresh"), mutationEpoch: 1 }, receipt("bun test stale"),
+      receipt("bun test failed", "FAIL"), receipt("bun test pending", "INCOMPLETE")] };
+  const protectedRows = state.evidence.verification.map(row => renderVerificationReceipt(row, 1));
+  expect(verificationEvictionIndex(protectedRows, state)).toBe(-1);
+  const display = prioritizeVerificationDisplay(state);
+  expect(display).toHaveLength(protectedRows.length);
+  for (const row of protectedRows) expect(display).toContain(row);
+  for (const mismatch of [
+    { ...receipt("bun test stale"), tool: "exec_command" },
+    { ...receipt("bun test stale"), cwd: "/other" },
+    receipt("bun test stale "),
+  ]) {
+    state.evidence = { ...state.evidence, verification: [...state.evidence.verification, mismatch] };
+    const lines = [...protectedRows, renderVerificationReceipt(mismatch, 1)];
+    expect(verificationEvictionIndex(lines, state)).toBe(lines.length - 1);
+  }
+});
+
+test("failure and incomplete rows remain protected without checkpoint evidence", () => {
+  const rows = [receipt("bun test", "FAIL"), receipt("bun x tsc", "INCOMPLETE")].map(row => renderVerificationReceipt(row, 0));
+  expect(verificationEvictionIndex(rows)).toBe(-1);
+  expect(verificationEvictionIndex([...rows, "PASS optional receipt"])).toBe(2);
 });

@@ -5,16 +5,16 @@ import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 export default function compactionBarrier(pi: ExtensionAPI): void {
   const control = process.env.DISTILL_COMPACTION_BARRIER;
   if (!control) throw new Error("Missing sandbox compaction barrier path");
-  pi.on("session_before_compact", async () => {
+  pi.on("session_before_compact", async (event) => {
     writeFileSync(`${control}.prepared`, "prepared\n");
     // Returning undefined preserves the preceding extension's result. A
     // missing release fails closed rather than accidentally appending it.
     const released = await new Promise<boolean>((resolve) => {
       const deadline = Date.now() + 30_000;
       const timer = setInterval(() => {
-        if (existsSync(`${control}.release`) || Date.now() >= deadline) {
+        if (event.signal.aborted || existsSync(`${control}.release`) || Date.now() >= deadline) {
           clearInterval(timer);
-          resolve(existsSync(`${control}.release`));
+          resolve(!event.signal.aborted && existsSync(`${control}.release`));
         }
       }, 10);
     });

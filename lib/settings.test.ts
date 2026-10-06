@@ -15,12 +15,14 @@ describe("Pi compaction settings", () => {
   test("matches Pi defaults, zero, and model override precedence", () => {
     for (const compaction of [undefined, {}, { reserveTokens: 0 },
       { enabled: false, reserveTokens: 24000 },
+      { keepRecentTokens: 0 },
+      { keepRecentTokens: 30000, modelOverrides: { "fake/scripted": { keepRecentTokens: 50000 } } },
       { reserveTokens: 24000, modelOverrides: { "fake/scripted": { reserveTokens: 50000 } } },
       { modelOverrides: { "other/model": { reserveTokens: -1 } } }]) {
       const settings = { compaction };
       const host = SettingsManager.inMemory(settings as any).getCompactionSettings(model);
       expect(resolvePiCompactionSettings(settings, model)).toEqual({
-        enabled: host.enabled, reserveTokens: host.reserveTokens,
+        enabled: host.enabled, reserveTokens: host.reserveTokens, keepRecentTokens: host.keepRecentTokens,
       });
     }
     expect(resolvePiCompactionSettings({})).toEqual(DEFAULT_PI_COMPACTION_SETTINGS);

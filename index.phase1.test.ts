@@ -112,7 +112,7 @@ describe("Phase 1 host adapter regression boundaries", () => {
     await simulate.hook(stub, "session_start", {});
     expect((await obsolete)[0]).toEqual({ cancel: true });
     const [fresh] = await simulate.hook(stub, "session_before_compact", event());
-    expect(fresh).toHaveProperty("compaction.details.version", 13);
+    expect(fresh).toHaveProperty("compaction.details.version", 14);
     await simulate.hook(stub, "session_compact", { fromExtension: true, compactionEntry: { type: "compaction", ...(fresh as any).compaction } });
     expect(logs).toHaveLength(1);
   });
@@ -237,15 +237,70 @@ test("postcommit artifacts and their failure diagnostics cannot undo a commit or
   const [prepared] = await simulate.hook(stub, "session_before_compact", event());
   const committed = { fromExtension: true, compactionEntry: { type: "compaction", ...(prepared as any).compaction } };
   await simulate.hook(stub, "session_compact", committed);
-  // Independent artifacts retry once on failure; the duplicate event adds no attempts.
-  expect(logAttempts).toBe(2);
-  expect(dumpAttempts).toBe(2);
+  // Each callback is one-shot even on rejection; duplicate events add no attempts.
+  expect(logAttempts).toBe(1);
+  expect(dumpAttempts).toBe(1);
   await simulate.hook(stub, "session_compact", committed);
-  expect(logAttempts).toBe(2);
-  expect(dumpAttempts).toBe(2);
+  expect(logAttempts).toBe(1);
+  expect(dumpAttempts).toBe(1);
   expect(compactCalls(stub)).toHaveLength(0);
-  expect((await simulate.hook(stub, "session_before_compact", event()))[0]).toHaveProperty("compaction.details.version", 13);
+  expect((await simulate.hook(stub, "session_before_compact", event()))[0]).toHaveProperty("compaction.details.version", 14);
 });
+
+test("committed callbacks that complete an effect and then reject are invoked once independently", async () => {
+  const { stub, store } = fixture({
+    loadFeatureSettings: () => ({ recall: { enabled: true }, toolOutput: { enabled: false } }),
+  });
+  Object.defineProperty(store, "projectIdentity", { value: "/repo" });
+  const effects: string[] = [];
+  const failures: string[] = [];
+  store.appendFailure = async reasons => { failures.push(...reasons); };
+  store.appendLog = async () => { effects.push("log"); throw new Error("log completed before rejection"); };
+  store.writeDump = async () => { effects.push("dump"); throw new Error("dump completed before rejection"); };
+  store.reconcileRecall = async () => { effects.push("recall"); throw new Error("recall completed before rejection"); };
+  stub.ctx.ui.notify = () => { effects.push("notification"); throw new Error("notification completed before rejection"); };
+  await simulate.hook(stub, "session_start", {});
+  const [prepared] = await simulate.hook(stub, "session_before_compact", event());
+  const committed = { fromExtension: true, compactionEntry: { type: "compaction", id: "committed",
+    parentId: (stub.sessionBranch.at(-1) as { id?: string } | undefined)?.id ?? null,
+    timestamp: "2026-10-05T00:00:00Z", ...(prepared as any).compaction } };
+  await simulate.hook(stub, "session_compact", committed);
+  expect(effects).toEqual(["log", "dump", "recall", "notification"]);
+  expect(failures).toEqual([
+    "Compaction log failed: log completed before rejection",
+    "Compaction dump failed: dump completed before rejection",
+    "Recall reconciliation failed: recall completed before rejection",
+    "Compaction notification failed: notification completed before rejection",
+  ]);
+  await simulate.hook(stub, "session_compact", committed);
+  expect(effects).toEqual(["log", "dump", "recall", "notification"]);
+  expect((await simulate.hook(stub, "session_before_compact", event()))[0]).toHaveProperty("compaction.details.version", 14);
+});
+
+for (const lifecycle of ["shutdown", "replacement"] as const) {
+  test(`rejected old callback is not replayed after ${lifecycle}, and later effects are fenced`, async () => {
+    const { stub, store, logs, dumps } = fixture();
+    await simulate.hook(stub, "session_start", {});
+    const [prepared] = await simulate.hook(stub, "session_before_compact", event());
+    const write = deferred<void>();
+    store.appendLog = async entry => { logs.push(entry); await write.promise; throw new Error("completed old log"); };
+    const oldCommit = simulate.hook(stub, "session_compact", {
+      fromExtension: true, compactionEntry: { type: "compaction", ...(prepared as any).compaction },
+    });
+    await simulate.hook(stub, "session_shutdown", {});
+    if (lifecycle === "replacement") {
+      await simulate.hook(stub, "session_start", {});
+      expect((await simulate.hook(stub, "session_before_compact", event()))[0]).toHaveProperty("compaction");
+    }
+    write.resolve();
+    await oldCommit;
+    expect(logs).toHaveLength(1);
+    expect(dumps).toHaveLength(0);
+    if (lifecycle === "replacement") {
+      expect((await simulate.hook(stub, "session_before_compact", event()))[0]).toEqual({ cancel: true });
+    }
+  });
+}
 
 test("a cancelled native attempt must not wedge later native compactions", async () => {
   const { stub } = fixture();
@@ -269,19 +324,19 @@ test("a native abort after a returned result releases the dead reservation", asy
   const { stub } = fixture();
   await simulate.hook(stub, "session_start", {});
   const [prepared] = await simulate.hook(stub, "session_before_compact", event());
-  expect(prepared).toHaveProperty("compaction.details.version", 13);
+  expect(prepared).toHaveProperty("compaction.details.version", 14);
   // Host aborted after the hook returned its result but before appending it.
   await simulate.hook(stub, "session_compact_failed",
     { reason: "threshold", aborted: true, willRetry: false, fromExtension: false });
   const [retried] = await simulate.hook(stub, "session_before_compact", event());
-  expect(retried).toHaveProperty("compaction.details.version", 13);
+  expect(retried).toHaveProperty("compaction.details.version", 14);
 });
 
 test("an anonymous non-aborted failure still preserves the ambiguous reservation", async () => {
   const { stub } = fixture();
   await simulate.hook(stub, "session_start", {});
   const [prepared] = await simulate.hook(stub, "session_before_compact", event());
-  expect(prepared).toHaveProperty("compaction.details.version", 13);
+  expect(prepared).toHaveProperty("compaction.details.version", 14);
   await simulate.hook(stub, "session_compact_failed",
     { reason: "threshold", aborted: false, errorMessage: "Auto-compaction failed: native summary error", fromExtension: false });
   const [retried] = await simulate.hook(stub, "session_before_compact", event());
@@ -332,7 +387,7 @@ describe("matching terminal commit rejection", () => {
           if (!diagnosticThrows) expect(diagnostics).toContain(`compaction commit rejected reason=${change} reservation=released`);
           stub.ctx.model = originalModel;
           const [fresh] = await simulate.hook(stub, "session_before_compact", event());
-          expect(fresh).toHaveProperty("compaction.details.version", 13);
+          expect(fresh).toHaveProperty("compaction.details.version", 14);
           // A late rejected event must not clear the newly prepared reservation.
           await simulate.hook(stub, "session_compact", committed);
           expect((await simulate.hook(stub, "session_before_compact", event()))[0]).toEqual({ cancel: true });
@@ -373,7 +428,7 @@ test("ambiguous failure reports recovery and a lifecycle reset restores admissio
     expect(dumps).toHaveLength(0);
     await simulate.hook(stub, "session_shutdown", {});
     await simulate.hook(stub, "session_start", {});
-    expect((await simulate.hook(stub, "session_before_compact", event()))[0]).toHaveProperty("compaction.details.version", 13);
+    expect((await simulate.hook(stub, "session_before_compact", event()))[0]).toHaveProperty("compaction.details.version", 14);
   } finally { diagnostic.mockRestore(); }
 });
 
@@ -390,7 +445,7 @@ test("ambiguous failure cannot block the originating callback even when diagnost
     await simulate.hook(stub, "agent_settled", {});
     expect(compactCalls(stub)).toHaveLength(1);
     callbacks.onError(new Error("originating failure"));
-    expect((await simulate.hook(stub, "session_before_compact", event()))[0]).toHaveProperty("compaction.details.version", 13);
+    expect((await simulate.hook(stub, "session_before_compact", event()))[0]).toHaveProperty("compaction.details.version", 14);
   } finally { diagnostic.mockRestore(); }
 });
 

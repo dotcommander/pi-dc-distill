@@ -88,7 +88,7 @@ Events.compact({
   tokensBefore: preparation.tokensBefore,
   details: {
     compactor: "dc-distill",
-    version: 13,
+    version: 14,
     tier: 1,
     attemptId,
     autonomous,
@@ -104,8 +104,9 @@ Events.compact({
     literalAnchors,
     inputDigest,
     summaryDigest,
-    checkpoint, // validated ResumeCheckpointV1
+    checkpoint, // validated schema-v2 ResumeCheckpoint; historical v1 read-only
     checkpointDigest,
+    checkpointSections, // 17 fixed section costs and ladder outcomes
     digestScope
   }
 })
@@ -122,8 +123,9 @@ host-consistent heuristics, not measured provider prompt counts.
 `summaryDigest` hashes the exact returned wire summary. `checkpointDigest`
 separately hashes the validated checkpoint’s deterministic serialization.
 `digestScope` is `compaction-input` or `bounded-compaction-input`.
-New transactions emit details version 13 and commit only on an exact version-13
-match. Historical version-5 through version-12 entries remain readable unchanged.
+New transactions emit details version 14 and commit only when version, checkpoint
+digest, and the section ledger derived from the pending checkpoint match the host
+entry. Historical version-5 through version-13 entries remain readable unchanged.
 
 ## Bounded Structured Output
 
@@ -254,13 +256,65 @@ Pure `assessCompaction()` returns a decision plus explicit monitor state updates
 compatibility wrappers retain the existing state-update contract.
 
 Stateful hooks guard ownership before reading usage or mutating state.
-`agent_settled` reconciles outstanding continuation before considering another
-autonomous compaction, then consumes ordinary warmup there; emergency
-bypasses warmup. Opaque tickets serialize autonomous requests and manual
-interception. Cleanup can release only the captured ticket, and concurrent
+Completed persisted `turn_end` checks evaluate admission after all sibling tool
+results. A mechanical decision reserves a bounded process-local stop intent with
+a 30-second lifetime and calls `ctx.abort()` without awaiting idle; it does not take a request ticket or
+append compaction drafts. `agent_settled` validates that intent and re-assesses
+current host usage before taking an exact-leaf ticket and calling `ctx.compact()`.
+Abort may append another assistant before settlement, so the ticket anchor must
+be captured there, not at the tool boundary. User, branch, model, session,
+settings and cancellation changes fence stale stop intents. Settled continuation
+reconciliation and fallback remain; the same completed turn does not consume
+warmup twice. Emergency bypasses warmup. Opaque tickets serialize autonomous
+requests and manual interception. Cleanup can release only the captured ticket, and concurrent
 matching commits produce effects once. Initialization rechecks its lifetime lease
 after every await; compatibility handles arriving after shutdown are disposed.
 Model/tree changes revise context without restarting initialization or warmup.
+
+Stop provenance is checked before age: owner/revision, model/settings, concurrency,
+and the origin turn and boundary leaf must still match the active branch. Only
+allowed custom entries or the strictly validated owned-abort shape may follow.
+After 30 seconds, or on a backward clock, the intent loses its old authority but
+valid provenance permits one fresh assessment regardless of delay. That assessment
+requires current finite positive host usage and current admission guards, without
+consuming warmup again or inventing a baseline; only admitted work receives a new
+exact-leaf ticket. The old intent is consumed once. Duplicate settlement cannot
+retry it, and invalid or superseded intent is ignored silently.
+
+### Local compiler failure pause
+
+A still-owned autonomous attempt's non-cancelled local failure arms a separate,
+process-local Mechanical admission pause before reporting or reservation release.
+The pause records attempt identity, lease/generation, failed branch anchor,
+model/settings snapshot and failure stage/code. Source construction, compilation
+and returned-result validation, including protected capacity overflow, qualify.
+Unsuccessful local strategies carry structured failure codes; an absent code is
+normalized to `compiler_failure`, without parsing reason text. Cancellation,
+stale snapshots, generic host callback errors, storage/reporting errors and
+post-commit artifact errors retain their existing behavior and do not arm it.
+
+The pause gates both turn-end abort and settled submission across Auto,
+missed-auto pursuit, headroom floor and Emergency. Warn steering and manual
+`/compact` remain available. Each episode notifies once and reports the structured
+`compiler-paused` admission reason; repeated reports of the same local failure are
+suppressed. Diagnostics and notifications remain best effort.
+
+Only these events clear the pause:
+
+- A session lifecycle replacement establishes a new generation.
+- The effective model/context window or valid effective compaction settings
+  actually change.
+- Trustworthy branch navigation leaves the failed anchor's lineage.
+- A validated newest active-branch compaction commits successfully, including
+  manual/native recovery.
+
+Ordinary prompts, changed leaves or input digests, identical callbacks, invalid
+settings, unavailable branch evidence, failed manual attempts and mismatched
+commits do not clear it. Late or anonymous events cannot arm, reset or release
+another attempt; reservation release remains a separate ownership decision.
+There is no persistent circuit, retry timer or new command. Restart uses the
+existing startup guards; details v14, checkpoint schema v2 and band policy v3
+remain unchanged. The pause grants no pre-commit success effects or continuation.
 
 `session_compact_failed` releases an attempt only when its identity matches.
 An anonymous aborted event can release a reservation whose preparation was
@@ -310,6 +364,14 @@ data preserves conservative guards; model and branch changes require fresh
 samples; duplicate commit events cannot reset guards; manual, foreign, and
 legacy commits update admission without extension success artifacts.
 
+Sample-only bookkeeping at `tool_call` can consume the first fresh finite-positive
+host count after assistant persistence, before a long tool batch finishes. It
+never interrupts siblings, warns, compacts, consumes warmup or resets cooldown.
+Persisted turn boundaries can also sample; action admission always queries the
+host again. Null/unknown counts leave sampling pending; raw assistant usage and
+heuristic `details.tokensAfter` cannot establish the baseline. A fresh above-auto
+baseline still requires 4,000 tokens of growth and the real 120-second cooldown.
+
 `compaction.enabled: false` makes the autonomous monitor a no-op; manual
 `/compact` still enters the deterministic `session_before_compact` hook. Fixed
 small-window floors preserve ordered bands and can reduce the 20K lead. Invalid
@@ -317,7 +379,7 @@ settings block autonomous checks while manual deterministic interception remains
 available. If Pi cannot report a context window, legacy 100K/140K/160K fallbacks
 apply. The headroom floor and emergency may use a finite local estimate and
 bypass warmup, cooldown, sync, and growth guards; ownership, valid enabled
-settings, and the attempt latch still apply. Ordinary auto/warn decisions require the current finite positive host
+settings, the attempt latch, and the compiler-failure pause still apply. Ordinary auto/warn decisions require the current finite positive host
 count; unavailable, thrown, or invalid samples cannot reuse an earlier sync.
 Nonfinite local estimates cannot trigger compaction.
 
@@ -337,7 +399,7 @@ compaction never queues continuation. Notify sites require `ctx.hasUI`.
 Deferred delivery rechecks the lifetime lease and context revision, then rereads
 the active branch through the recovery reducer before sending. Session start,
 tree changes, matching commits and settlement reconcile the journal. Historical
-v8/v9/v10/v11/v12 and current v13 attempts support one unanswered resume; manual and pre-v8
+v8/v9/v10/v11/v12/v13 and current v14 attempts support one unanswered resume; manual and pre-v8
 compactions do not recover.
 
 The process registry keys possible submissions by owner session, attempt and
@@ -354,7 +416,7 @@ exactly-once execution or zero lost turns when host submission is uncertain.
 Enabled recall independently reconstructs validated committed compactions from
 the active branch at owner start, tree changes and matching commits. Recovery
 coalesces requests and revalidates owner, lease and tree revision under the recall
-publication lock. Host entry IDs, timestamps, attempt IDs and v10/v11/v12/v13 summary digests
+publication lock. Host entry IDs, timestamps, attempt IDs and v10/v11/v12/v13/v14 summary digests
 make replay idempotent and preserve original recency. Disabled recall performs no
 recall projection or storage access. Initialization and recovery failures do not
 block deterministic compaction or continuation.
@@ -379,9 +441,11 @@ metrics. Earlier presentation shims remain as historical compatibility code, not
 claim of support for those SDK versions. Unreviewed older host versions (< 0.99)
 do not receive a private presentation patch.
 
-The opt-in RPC suite under `tests/e2e` checks one extension-owned append,
-active discarded/focused content, version-13 details and checkpoint integrity, continuation recovery,
-and zero provider summarizer requests.
+The opt-in RPC suite under `tests/e2e` is excluded from this contract's gates.
+Its fixtures still assert v13/schema-v1 and need a separately authorized refresh
+before they can serve as v14 runtime evidence. Offline owner tests verify v14
+prepare/commit, active discarded/focused content, checkpoint integrity,
+continuation recovery, and zero provider summarizer requests.
 
 ## Shared recall and diagnostics
 
@@ -422,8 +486,8 @@ acceptance, not provider capacity proof.
 Committed logs distinguish observed host counts from estimates: tokenObservation
 is observed or unavailable; observedTokenDelta exists only for a valid host count.
 
-Current readers preserve versions 5–12; continuation recovery supports versions
-8–13 and wire-integrity recall projection supports versions 10–13. Recovery relies on the
+Current readers preserve versions 5–13; continuation recovery supports versions
+8–14 and wire-integrity recall projection supports versions 10–14. Recovery relies on the
 host persisting compaction details and continuation messages on the active branch.
 A same-process uncertain submission is fenced in memory; a true process restart
 can lose that fence. Delivery and persistence are not one crash-atomic transaction.
@@ -432,12 +496,19 @@ across every crash window, provider acceptance, or model attention quality.
 
 ## Checkpoint authority and lifecycle ownership
 
-Details v13 persist a validated schema-v1 checkpoint and its deterministic digest.
-Rendered tasks, readiness, files, and sections derive from that snapshot; rendering
-does not mutate status or freshness. Protected declarations and user-source pins
-survive repeated compaction; implied obligations and user authorization are not
-inferred. Other prose is attributed context. Invalid v13
-state cancels; rollback must retain a v13-aware reader or refuse carry-forward.
+Details v14 persist a validated schema-v2 checkpoint and its deterministic digest;
+historical schema-v1 checkpoints remain readable and convert in memory. Its 17-key
+`checkpointSections` ledger reports section code-point costs and final ladder
+outcomes, but cannot authorize work or change scoring. Under checkpoint pressure,
+T3 failure sources drop first, then T2 unreferenced reads, then T1 failure-display
+excerpts; T0 identity cores, declared contracts, required evidence, mutation
+frontier and predecessor are protected. The 65,536-code-point floor still cancels
+with `protected_overflow` if T0 cannot fit. Rendered tasks, readiness and files
+derive from the snapshot without mutating status or freshness. Protected
+declarations and user-source pins survive repeated compaction; implied
+obligations and user authorization are not inferred. Other prose is attributed
+context. Invalid v13/v14 state cancels; rollback must retain a v14-aware reader
+or refuse lossy carry-forward.
 
 Attempts own a ticket and session generation with branch, model, and effective
 settings snapshots. Late callbacks and host events compare that ownership before
@@ -449,8 +520,13 @@ remain independent post-commit effects.
 The summary renders once, then Pi's prospective context is rebuilt and estimated
 once. Counts are host-consistent heuristics, with capacity geometry and unknown
 capacity explicit. Metrics stay in details and committed notifications.
-`agent_settled` observes readiness and requests `ctx.compact()` separately;
-`agent_before_settle` migration is deferred.
+Completed `turn_end` admission can stop the run at a persisted tool-batch boundary;
+validated, freshly re-assessed `agent_settled` admission requests `ctx.compact()`
+separately with a settled exact-leaf ticket. `agent_before_settle` migration is
+deferred. Package version 0.1.7 includes this change; publication does not activate
+or update installed version 0.1.6. The focused opt-in runtime
+gate is described in `tests/e2e/README.md`, not established by historical suite
+receipts; no passing turn-boundary check is claimed here.
 
 Continuation intent creation, submission, and observed work are separate states.
 Later genuine user input or manual/foreign compaction supersedes older intent.

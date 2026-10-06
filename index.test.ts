@@ -14,7 +14,7 @@ import { createDistillExtension } from "./index.ts";
 import { DISTILL_HANDOFF_ENTRY_TYPE } from "./lib/handoff.ts";
 import { DISTILL_CONTINUATION_MESSAGE_TYPE } from "./lib/continuation.ts";
 import { DistillStore } from "./lib/store.ts";
-import { checkpointDigest as canonicalCheckpointDigest, type ResumeCheckpointV1 } from "./lib/compiler/checkpoint.ts";
+import { checkpointDigest as canonicalCheckpointDigest, checkpointSectionLedger, type ResumeCheckpointV1 } from "./lib/compiler/checkpoint.ts";
 
 const testRoot = mkdtempSync(join(tmpdir(), "dc-distill-index-tests-"));
 const extension = createDistillExtension({
@@ -86,7 +86,7 @@ describe("dc-distill entrypoint", () => {
     );
 
     expect(source).not.toMatch(/Notify\.user\(\s*(?:`|"|')/);
-    expect(source).toContain("runtime.assess(ctx)");
+    expect(source).toMatch(/runtime\.assess\(ctx,\s*["']agent_settled["'],\s*revalidate\)/);
   });
 
   test("does not register compact-status as a slash command", () => {
@@ -199,11 +199,15 @@ describe("dc-distill host compaction override", () => {
           tokensBefore: 120_000,
           details: {
             compactor: "dc-distill",
-            version: 13,
+            version: 14,
             tokensAfterSource: "pi-rebuilt-message-estimate",
           },
         },
       });
+      const details = (result as any).compaction.details;
+      expect(details.checkpoint.version).toBe(2);
+      expect(details.checkpointSections).toEqual(checkpointSectionLedger(details.checkpoint));
+      expect(Object.keys(details.checkpointSections.sections)).toHaveLength(17);
       expect(Array.from((result as any).compaction.summary).length).toBeLessThanOrEqual(65_536);
       await simulate.hook(stub, "session_compact_failed", { reason, aborted: true, fromExtension: true, attemptId: (result as any).compaction.details.attemptId });
     }
@@ -234,7 +238,7 @@ describe("dc-distill host compaction override", () => {
     );
 
     expect(result).toMatchObject({
-      compaction: { details: { compactor: "dc-distill", version: 13 } },
+      compaction: { details: { compactor: "dc-distill", version: 14 } },
     });
   });
 
@@ -295,6 +299,22 @@ describe("dc-distill host compaction override", () => {
     expect(result).toEqual({ cancel: true });
   });
 
+  test("compiler failure without UI logs the reason and cancels without notification or success effects", async () => {
+    const { stub, failures, root } = failureReportingFixture(false);
+    stub.ctx.hasUI = false;
+    await simulate.hook(stub, "session_start", {});
+    const event = compactEvent("overflow");
+    event.preparation.messagesToSummarize = [{ role: "unsupported", content: "filtered" }];
+    const [result] = await simulate.hook(stub, "session_before_compact", event);
+    expect(result).toEqual({ cancel: true });
+    expect(failures).toHaveLength(1);
+    expect(failures[0]?.[0]).toMatch(/^algorithmic:/);
+    expect(notificationText(stub)).toEqual([]);
+    expect(stub.calls.filter((call) => call.api === "ctx.compact" || call.api === "pi.sendMessage")).toHaveLength(0);
+    expect(existsSync(join(root, "data", "compact-log.jsonl"))).toBe(false);
+    expect(existsSync(join(root, "project", "recall.json"))).toBe(false);
+  });
+
   for (const rejectLog of [false, true]) {
     for (const failurePath of ["compiler-result", "thrown-error"] as const) {
       for (const rejectNotification of [false, true]) {
@@ -311,8 +331,10 @@ describe("dc-distill host compaction override", () => {
             event.preparation.messagesToSummarize = [circular];
           }
           let notificationAttempts = 0;
-          stub.ctx.ui.notify = () => {
+          const notifications: Array<{ message: string; level?: string }> = [];
+          stub.ctx.ui.notify = (message, level) => {
             notificationAttempts++;
+            notifications.push({ message, level });
             if (rejectNotification) throw new Error("notification unavailable");
           };
 
@@ -321,6 +343,12 @@ describe("dc-distill host compaction override", () => {
           expect(failures).toHaveLength(1);
           expect(failures[0]?.[0]).toMatch(failurePath === "compiler-result" ? /^algorithmic:/ : /cyclic|circular/i);
           expect(notificationAttempts).toBe(1);
+          expect(notifications[0]?.level).toBe("warning");
+          if (failurePath === "compiler-result") {
+            expect(notifications[0]?.message).toStartWith("Distill cancelled — deterministic compiler failed.\n");
+            expect(notifications[0]?.message).toContain(failures[0]!.join(" | "));
+          }
+          expect(stub.calls.filter((call) => call.api === "ctx.compact" || call.api === "pi.sendMessage")).toHaveLength(0);
           expect(existsSync(join(root, "data", "compact-log.jsonl"))).toBe(false);
           expect(existsSync(join(root, "project", "recall.json"))).toBe(false);
         });
@@ -392,12 +420,30 @@ describe("dc-distill host compaction override", () => {
     expect(notificationText(stub)).toHaveLength(notifications);
   });
 
-  for (const historicalVersion of [5, 6, 7, 8, 9, 10, 11]) test(`rejects a historical v${historicalVersion} append for a newly prepared v13 transaction`, async () => {
+  test("tampered v14 section ledger cannot commit or emit success artifacts", async () => {
     const { stub, root } = failureReportingFixture(false);
     await simulate.hook(stub, "session_start", {});
     const [prepared] = await simulate.hook(stub, "session_before_compact", compactEvent("manual"));
     const compaction = (prepared as any).compaction;
-    expect(compaction.details.version).toBe(13);
+    const tampered = { ...compaction, details: { ...compaction.details,
+      checkpointSections: { ...compaction.details.checkpointSections,
+        sections: { ...compaction.details.checkpointSections.sections, tasks: 99999 } } } };
+    await simulate.hook(stub, "session_compact", { fromExtension: true,
+      compactionEntry: { type: "compaction", id: "tampered-ledger", parentId: null, ...tampered } });
+    expect(existsSync(join(root, "data", "compact-log.jsonl"))).toBe(false);
+    expect(existsSync(join(root, "project", "recall.json"))).toBe(false);
+    expect((await simulate.hook(stub, "session_before_compact", compactEvent("manual")))[0]).toEqual({ cancel: true });
+    await simulate.hook(stub, "session_compact", { fromExtension: true,
+      compactionEntry: { type: "compaction", id: "matched-ledger", parentId: null, ...compaction } });
+    expect(existsSync(join(root, "data", "compact-log.jsonl"))).toBe(true);
+  });
+
+  for (const historicalVersion of [5, 6, 7, 8, 9, 10, 11, 12, 13]) test(`rejects a historical v${historicalVersion} append for a newly prepared v14 transaction`, async () => {
+    const { stub, root } = failureReportingFixture(false);
+    await simulate.hook(stub, "session_start", {});
+    const [prepared] = await simulate.hook(stub, "session_before_compact", compactEvent("manual"));
+    const compaction = (prepared as any).compaction;
+    expect(compaction.details.version).toBe(14);
 
     await simulate.hook(stub, "session_compact", {
       fromExtension: true,
@@ -419,7 +465,7 @@ describe("dc-distill host compaction override", () => {
     await simulate.hook(stub, "session_compact", { fromExtension: true,
       compactionEntry: { type: "compaction", id: "matching-current", ...compaction } });
     const [replacement] = await simulate.hook(stub, "session_before_compact", compactEvent("manual"));
-    expect(replacement).toMatchObject({ compaction: { details: { version: 13 } } });
+    expect(replacement).toMatchObject({ compaction: { details: { version: 14 } } });
     await simulate.hook(stub, "session_compact", {
       fromExtension: true,
       compactionEntry: { type: "compaction", id: "matching-v11", ...(replacement as any).compaction },
@@ -620,7 +666,7 @@ describe("dc-distill subagent safety", () => {
         },
       },
     );
-    expect(replacement).toMatchObject({ compaction: { details: { version: 13 } } });
+    expect(replacement).toMatchObject({ compaction: { details: { version: 14 } } });
   });
 });
 

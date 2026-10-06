@@ -1,6 +1,6 @@
 import { describe, expect, test } from "bun:test";
 import { compileSessionJsonl, enforceSummaryLimit } from "./local-compact.ts";
-import { checkpointDigest } from "./compiler/checkpoint.ts";
+import { checkpointDigest, type CheckpointFailureV2 } from "./compiler/checkpoint.ts";
 import { DISTILL_HANDOFF_ENTRY_TYPE } from "./handoff.ts";
 import { buildCompactionSource, canonicalizeCompactionSource } from "./compaction-source.ts";
 import { normalizeSessionJsonl } from "./compiler/normalizer.ts";
@@ -887,7 +887,10 @@ describe("compileSessionJsonl output bounds", () => {
       expect(Array.from(path).length).toBeLessThanOrEqual(512);
     }
     expect(result.checkpoint.files.read.length + result.checkpoint.files.modified.length).toBeGreaterThan(0);
-    expect(result.checkpoint.evidence.fileReads.some(read=>read.path.length>512)).toBe(true);
+    // CD3 ladder: unreferenced reads tier down (50->20->10->0) before display files;
+    // surviving reads keep whole-record paths — never sliced open.
+    expect(result.checkpoint.evidence.fileReads.length).toBeLessThanOrEqual(20);
+    for (const read of result.checkpoint.evidence.fileReads) expect(read.path.length).toBeGreaterThan(512);
   });
 
   test("rejects custom array input with no text or image signal", () => {
@@ -1887,7 +1890,7 @@ describe("failure ownership and exact invocation retries", () => {
   test("recognized failed verification has one owner and a fresh cross-compaction retry resolves it", () => {
     const first = compile([toolCall("bash", { command: "bun test" }, "v1"), toolResult("bash", "1 fail\n0 pass\nexit code 1", true, "v1")]);
     expect(first.checkpoint.failures).toHaveLength(1);
-    expect(first.checkpoint.failures[0].attemptedFix).toBe("");
+    expect((first.checkpoint.failures[0] as CheckpointFailureV2).fixExcerpt).toBe("");
     for (const [output, status] of [["no tests to run", false], ["1 pass\n0 fail", undefined]] as const) {
       const second = compileSessionJsonl([carry(first.checkpoint), toolCall("bash", { command: "bun test" }, "v2"), line({ type: "message", message: { role: "toolResult", toolCallId: "v2", toolName: "bash", isError: status, content: [{ type: "text", text: output }] } })].join("\n"), undefined, undefined, false);
       expect(second.checkpoint.failures[0].resolution).toBeNull();
@@ -1906,13 +1909,13 @@ describe("failure ownership and exact invocation retries", () => {
     const result = compileSessionJsonl(input, undefined, undefined, false);
     expect(result.checkpoint.evidence.verification.filter(receipt => receipt.status === "FAIL")).toHaveLength(1);
     expect(result.checkpoint.failures).toHaveLength(1);
-    expect(result.checkpoint.failures[0].attemptedFix).toBe("");
+    expect((result.checkpoint.failures[0] as CheckpointFailureV2).fixExcerpt).toBe("");
     expect(result.checkpoint.failures[0].resolution).toBeNull();
   });
   test("duplicate call IDs across raw names preserve verification errors without claiming receipts", () => {
     const result = compile([toolCall("bash", { command: "bun test" }, "dup"), toolCall("read", { path: "/tmp/a" }, "dup"), toolResult("bash", "1 fail", true, "dup")]);
     expect(result.checkpoint.failures).toHaveLength(1);
-    expect(result.checkpoint.failures[0].attemptedFix).toBe("unpaired tool result; attempted fix unknown");
+    expect((result.checkpoint.failures[0] as CheckpointFailureV2).fixExcerpt).toBe("unpaired tool result; attempted fix unknown");
     expect(result.checkpoint.failures[0].resolution).toBeNull();
     expect(result.checkpoint.evidence.verification.some(receipt => receipt.status === "FAIL")).toBe(false);
   });
@@ -1932,14 +1935,19 @@ describe("failure ownership and exact invocation retries", () => {
     expect(compile([records[0], records[1], toolCall("custom_tool", reordered, "b"), records[3]]).checkpoint.failures[0].resolution).toBeNull();
     expect(compile([toolCall("custom_tool", args, "a"), toolResult("custom_tool", "ok", false, "a"), toolCall("custom_tool", args, "b"), toolResult("custom_tool", "boom", true, "b")]).checkpoint.failures[0].resolution).toBeNull();
   });
-  test("validated legacy argument format can match reordered retry without changing provenance signature", () => {
+  test("carried v1 checkpoint argument format matches reordered retry after in-memory v2 conversion", () => {
     const first = compile([toolCall("custom_tool", { z: 1, a: { z: 2, a: 3 } }, "a"), toolResult("custom_tool", "boom", true, "a")]);
     const old = JSON.parse(JSON.stringify(first.checkpoint));
     const attemptedFix = 'custom_tool: {"z":1,"a":{"z":2,"a":3}}';
+    old.version = 1;
+    delete old.failures[0].fixExcerpt;
+    delete old.failures[0].invocationDigest;
     old.failures[0].attemptedFix = attemptedFix;
     old.failures[0].signature = digest(`${attemptedFix}\0boom`);
     const retry = compileSessionJsonl([carry(old), toolCall("custom_tool", { a: { a: 3, z: 2 }, z: 1 }, "b"), toolResult("custom_tool", "ok", false, "b")].join("\n"), undefined, undefined, false);
+    expect(retry.checkpoint.version).toBe(2);
     expect(retry.checkpoint.failures[0].signature).toBe(old.failures[0].signature);
+    expect((retry.checkpoint.failures[0] as CheckpointFailureV2).invocationDigest).toBe(digest('custom_tool: {"a":{"a":3,"z":2},"z":1}'));
     expect(retry.checkpoint.failures[0].resolution).toBe("resolved: later success with same invocation");
   });
   test("synthetic unexecuted tool calls from token limit or abortion are ignored and do not create checkpoint failures", () => {

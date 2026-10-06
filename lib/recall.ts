@@ -51,6 +51,7 @@ const MARKER_BLOCKS = [
   "change-impact",
   "ready-tasks",
   "graph-ready-tasks",
+  "checkpoint-v1",
 ] as const;
 
 /** Extract a `<name>...</name>` marker block from summary markdown. */
@@ -124,7 +125,7 @@ function boundedResults(results: string[]): string[] {
   // Only body lines may be omitted; never restore a close without its opening.
   const lines = retained[0].split("\n");
   const frame = lines.splice(0, 2);
-  const closing = /^<\/[a-z-]+>$/.test(lines.at(-1) ?? "") ? lines.pop()! : "";
+  const closing = /^<\/[a-z0-9-]+>$/.test(lines.at(-1) ?? "") ? lines.pop()! : "";
   const excerptNotice = (count: number) => `[Recall omitted ${count} line(s) from this result.]`;
   const renderExcerpt = (body: string[], count: number) =>
     [...frame, ...body, excerptNotice(count), ...(closing ? [closing] : [])].join("\n") + notice();

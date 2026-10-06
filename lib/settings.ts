@@ -3,11 +3,13 @@ import { LEGACY_DUMPS_ENV } from "./legacy.ts";
 export interface PiCompactionSettings {
   enabled: boolean;
   reserveTokens: number;
+  keepRecentTokens?: number;
 }
 
 export const DEFAULT_PI_COMPACTION_SETTINGS: PiCompactionSettings = {
   enabled: true,
   reserveTokens: 16_384,
+  keepRecentTokens: 20_000,
 };
 
 /** Minimum gap between autonomous compactions. Pi has no equivalent setting. */
@@ -45,7 +47,8 @@ export function resolvePiCompactionSettings(
   validate(asRecord(entry).keepRecentTokens, `compaction.modelOverrides["${key}"].keepRecentTokens`);
   const enabled = compaction.enabled ?? true;
   if (typeof enabled !== "boolean") throw new Error("Invalid compaction.enabled: expected a boolean.");
-  return { enabled, reserveTokens: (override ?? ordinary ?? 16_384) as number };
+  return { enabled, reserveTokens: (override ?? ordinary ?? 16_384) as number,
+    keepRecentTokens: (asRecord(entry).keepRecentTokens ?? compaction.keepRecentTokens ?? 20_000) as number };
 }
 
 export function resolveDistillFeatureSettings(settings: unknown): DistillFeatureSettings {

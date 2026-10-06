@@ -1,5 +1,6 @@
+import { isDeepStrictEqual } from "node:util";
 import { randomUUID } from "node:crypto";
-import type { ExtensionAPI, ExtensionContext } from "./sdk.ts";
+import type { ExtensionAPI, ExtensionContext, SessionEntry } from "./sdk.ts";
 import type { CompactionCardDedupeHandle } from "./compaction-card-dedupe.ts";
 import { Monitor } from "./monitor.ts";
 import { Diag, diagnosticSessionLabel } from "./diag-support.ts";
@@ -10,6 +11,7 @@ import {
 } from "./settings.ts";
 import { TRIGGER_POLICY_VERSION, assessCompaction, resolveTriggerThresholds, type CompactEvaluation, validateTriggerGeometry } from "./trigger.ts";
 import { Tier } from "./types.ts";
+import type { CompilerFailureCode } from "./compiler/errors.ts";
 
 export interface SessionLease { readonly sessionId: string; readonly generation: number }
 export interface AttemptTicket {
@@ -31,6 +33,22 @@ export type CommitRejectionReason = "unowned-attempt" | "commit-in-flight" | "pr
   | "context-revision-changed" | "model-changed" | "settings-changed" | "snapshot-unavailable";
 export type CommitOutcome = { accepted: true } | { accepted: false; reason: CommitRejectionReason };
 type SampleStatus = "finite-positive" | "unavailable" | "invalid" | "thrown";
+interface BoundaryStop {
+  lease: SessionLease;
+  revision: number;
+  model: string;
+  settings: PiCompactionSettings;
+  turnId: string;
+  boundaryLeaf: string;
+  createdAt: number;
+}
+export type CompilerFailureStage = "source" | "compile" | "validation";
+interface CompilerPause {
+  readonly ticket: AttemptTicket;
+  readonly contextWindow: number | undefined;
+  readonly stage: CompilerFailureStage;
+  readonly code: CompilerFailureCode;
+}
 
 /** Shared-runtime lifecycle and autonomous policy; durable transactions stay in index. */
 export class Phase1Controller {
@@ -54,6 +72,11 @@ export class Phase1Controller {
   private settingsError: string | null = null;
   private sampleStatus: SampleStatus = "unavailable";
   private ticket: AttemptTicket | null = null;
+  private boundaryStop: BoundaryStop | null = null;
+  private compilerPause: CompilerPause | null = null;
+  private stopInvalidated = false;
+  private assessedTurnId: string | null = null;
+  private assessmentSource: "turn_end" | "agent_settled" = "agent_settled";
   private preparing = false;
   private preparationCancelled = false;
   private committing = false;
@@ -93,6 +116,10 @@ export class Phase1Controller {
     this.preparing = false;
     this.preparationCancelled = false;
     this.committing = false;
+    this.boundaryStop = null;
+    this.compilerPause = null;
+    this.stopInvalidated = false;
+    this.assessedTurnId = null;
     this.monitor.reset();
     this.warmupTurnsRemaining = 1;
     this.lastWarnTime = 0;
@@ -120,6 +147,8 @@ export class Phase1Controller {
     this.generation++;
     this.contextRevision++;
     this.ownerSessionId = null;
+    this.compilerPause = null;
+    this.invalidateBoundaryStop();
     Diag.setOwnerSession(null);
     this.ticket = null;
     this.preparing = false;
@@ -144,14 +173,25 @@ export class Phase1Controller {
   contextChanged(ctx: ExtensionContext): void {
     if (!this.isOwner(ctx)) return;
     this.contextRevision++;
+    this.invalidateBoundaryStop();
     this.contextWindow = ctx.model?.contextWindow;
   }
   /** Only lifecycle branch/model changes rebase admission, never ordinary user turns. */
   admissionContextChanged(ctx: ExtensionContext, branchChanged = false): void {
     if (!this.isOwner(ctx)) return;
     const modelChanged = this.admissionModel !== this.modelIdentity(ctx);
+    if (this.compilerPause && this.compilerPause.ticket.modelIdentity !== this.modelIdentity(ctx)) this.compilerPause = null;
+    if (modelChanged || branchChanged) this.invalidateBoundaryStop();
     this.admissionModel = this.modelIdentity(ctx);
-    if (branchChanged) this.restoreAdmissionBranch(ctx, false);
+    if (branchChanged) {
+      // An unreadable/partial journal cannot prove navigation away from failure.
+      try {
+        const branch = this.trustedBranch(ctx);
+        const anchor = this.compilerPause?.ticket.branchAnchor;
+        if (anchor !== undefined && anchor !== null && !branch.some((entry) => entry.id === anchor)) this.compilerPause = null;
+      } catch { /* Preserve pause while branch provenance is unavailable. */ }
+      this.restoreAdmissionBranch(ctx, false);
+    }
     else if (modelChanged && (this.admissionCompactionId !== null
       || this.monitor.state.repeatBaselineTokens !== null || this.monitor.state.awaitingPostCompactionSample)) {
       this.monitor.state.repeatBaselineTokens = null;
@@ -195,17 +235,27 @@ export class Phase1Controller {
     }
   }
   /** Foreign/manual/legacy commits affect admission only, never extension success artifacts. */
-  observeHostCompaction(ctx: ExtensionContext, entry: { id?: string }): void {
-    if (!this.isOwner(ctx) || !entry.id || entry.id === this.admissionCompactionId) return;
+  observeHostCompaction(ctx: ExtensionContext, entry: { id?: string }, allowPauseReset = true): void {
+    if (!this.isOwner(ctx) || !entry.id) return;
+    const alreadyObserved = entry.id === this.admissionCompactionId;
+    if (!alreadyObserved) this.invalidateBoundaryStop();
     try {
       const newest = ctx.sessionManager.getBranch().filter((item) => item.type === "compaction").at(-1);
       if (!newest || newest.id !== entry.id) return;
       const time = Date.parse(newest.timestamp);
+      // Reset only on a provable active journal commit, never a mismatched event.
+      const trustedNewest = this.trustedBranch(ctx).findLast((item) => item.type === "compaction");
+      if (allowPauseReset && trustedNewest?.id === entry.id && isDeepStrictEqual(trustedNewest, entry)
+        && !((trustedNewest.details as Record<string, unknown> | undefined)?.compactor === "dc-distill"
+          && (trustedNewest.details as Record<string, unknown> | undefined)?.version === 14)
+        && Number.isFinite(time) && time >= 0 && time <= this.clock()) this.compilerPause = null;
+      if (alreadyObserved) return;
       this.startupCooldownExempt = false;
       this.admissionCompactionId = entry.id;
       this.monitor.restoreCompaction(Number.isFinite(time) && time >= 0 && time <= this.clock() ? time : this.clock());
     } catch {
       // A committed journal that cannot be inspected cannot preserve a startup exemption.
+      if (alreadyObserved) return;
       this.startupCooldownExempt = false;
       this.admissionCompactionId = entry.id;
       this.monitor.restoreCompaction(this.clock());
@@ -215,17 +265,29 @@ export class Phase1Controller {
     try {
       this.compactionSettings = this.options.loadCompactionSettings?.(ctx.cwd)
         ?? resolvePiCompactionSettings(this.pi.getSettings(), ctx.model);
+      this.compactionSettings = { ...this.compactionSettings, keepRecentTokens: this.compactionSettings.keepRecentTokens === undefined ? 20_000 : this.compactionSettings.keepRecentTokens };
       // Injected settings obey the same effective contract as host snapshots.
       if (typeof this.compactionSettings.enabled !== "boolean"
         || !Number.isSafeInteger(this.compactionSettings.reserveTokens)
-        || this.compactionSettings.reserveTokens < 0) throw new Error("Invalid effective compaction settings");
+        || this.compactionSettings.reserveTokens < 0
+        || !Number.isSafeInteger(this.compactionSettings.keepRecentTokens)
+        || this.compactionSettings.keepRecentTokens! < 0) throw new Error("Invalid effective compaction settings");
       this.settingsValid = true;
       this.settingsError = null;
+      if (this.compilerPause && (this.compilerPause.ticket.settings.enabled !== this.compactionSettings.enabled
+        || this.compilerPause.ticket.settings.reserveTokens !== this.compactionSettings.reserveTokens
+        || this.compilerPause.ticket.settings.keepRecentTokens !== this.compactionSettings.keepRecentTokens)) this.compilerPause = null;
     } catch (error) {
       this.settingsValid = false;
       try { this.settingsError = error instanceof Error ? error.message : String(error); }
       catch { this.settingsError = "unreportable settings error"; }
       this.compactionSettings = { ...DEFAULT_PI_COMPACTION_SETTINGS, enabled: false };
+    }
+    if (!this.settingsValid || !this.compactionSettings.enabled || (this.boundaryStop
+      && (this.boundaryStop.settings.enabled !== this.compactionSettings.enabled
+        || this.boundaryStop.settings.reserveTokens !== this.compactionSettings.reserveTokens
+        || this.boundaryStop.settings.keepRecentTokens !== this.compactionSettings.keepRecentTokens))) {
+      this.invalidateBoundaryStop();
     }
     return this.settingsValid;
   }
@@ -234,7 +296,7 @@ export class Phase1Controller {
   get inFlight(): boolean { return this.ticket !== null; }
   requestAttempt(ctx: ExtensionContext): AttemptTicket | null {
     const lease = this.lease(ctx);
-    if (!lease || this.ticket) return null;
+    if (!lease || this.ticket || this.boundaryStop || this.compilerPause) return null;
     this.ticket = this.createTicket(lease, ctx, true);
     this.monitor.state.lastCompactionTime = this.clock();
     return this.ticket;
@@ -242,6 +304,7 @@ export class Phase1Controller {
   beginPreparation(ctx: ExtensionContext): AttemptTicket | null {
     const lease = this.lease(ctx);
     if (!lease || this.preparing || this.preparationCancelled || this.committing) return null;
+    this.invalidateBoundaryStop();
     this.refreshSettings(ctx);
     this.ticket ??= this.createTicket(lease, ctx, false);
     this.preparing = true;
@@ -270,13 +333,44 @@ export class Phase1Controller {
       || ticket.modelIdentity !== this.modelIdentity(ctx)) return false;
     this.refreshSettings(ctx);
     if (ticket.settings.enabled !== this.compactionSettings.enabled
-      || ticket.settings.reserveTokens !== this.compactionSettings.reserveTokens) return false;
+      || ticket.settings.reserveTokens !== this.compactionSettings.reserveTokens
+      || ticket.settings.keepRecentTokens !== this.compactionSettings.keepRecentTokens) return false;
     if (!checkBranch) return true;
     try { return ticket.branchAnchor === (ctx.sessionManager.getBranch().at(-1)?.id ?? null); }
     catch { return false; }
   }
   ownsAttempt(ticket: AttemptTicket, ctx: ExtensionContext): boolean {
     return this.ticket === ticket && this.isCurrent(ticket.lease, ctx);
+  }
+  /** Arm before cancellation/reporting; only still-owned local compiler failures count. */
+  pauseCompilerFailure(ticket: AttemptTicket, ctx: ExtensionContext, stage: CompilerFailureStage, code: CompilerFailureCode,
+    contextWindow = this.contextWindow): boolean {
+    if (!ticket.autonomous || !this.snapshotMatches(ticket, ctx) || this.compilerPause) return false;
+    this.compilerPause = Object.freeze({ ticket, contextWindow, stage, code });
+    this.invalidateBoundaryStop();
+    try { this.monitor.diagnostic(`compiler-paused attempt=${ticket.attemptId} generation=${ticket.lease.generation} stage=${stage} code=${code}`); }
+    catch { /* Reporting must not disable the pause. */ }
+    return true;
+  }
+  hasCompilerPause(): boolean { return this.compilerPause !== null; }
+  failedCompilerAttempt(ticket: AttemptTicket): boolean { return this.compilerPause?.ticket === ticket; }
+  clearCompilerPauseAfterCommit(ctx: ExtensionContext, entryId: string | undefined): void {
+    if (!this.isOwner(ctx) || !entryId) return;
+    try {
+      const newest = this.trustedBranch(ctx).findLast((entry) => entry.type === "compaction");
+      if (newest?.id === entryId) this.compilerPause = null;
+    } catch { /* Unprovable commit cannot clear failure admission. */ }
+  }
+  private trustedBranch(ctx: ExtensionContext): SessionEntry[] {
+    const branch = ctx.sessionManager.getBranch().slice();
+    const ids = new Set<string>();
+    let parent: string | null = null;
+    for (const entry of branch) {
+      if (!entry.id || ids.has(entry.id) || (entry.parentId ?? null) !== parent) throw new Error("Untrusted branch lineage");
+      ids.add(entry.id);
+      parent = entry.id;
+    }
+    return branch;
   }
   beginCommit(ticket: AttemptTicket, ctx: ExtensionContext): boolean {
     return this.beginCommitOutcome(ticket, ctx).accepted;
@@ -290,7 +384,8 @@ export class Phase1Controller {
       if (ticket.modelIdentity !== this.modelIdentity(ctx)) return { accepted: false, reason: "model-changed" };
       this.refreshSettings(ctx);
       if (ticket.settings.enabled !== this.compactionSettings.enabled
-        || ticket.settings.reserveTokens !== this.compactionSettings.reserveTokens) return { accepted: false, reason: "settings-changed" };
+        || ticket.settings.reserveTokens !== this.compactionSettings.reserveTokens
+        || ticket.settings.keepRecentTokens !== this.compactionSettings.keepRecentTokens) return { accepted: false, reason: "settings-changed" };
       this.committing = true;
       return { accepted: true };
     } catch { return { accepted: false, reason: "snapshot-unavailable" }; }
@@ -312,6 +407,7 @@ export class Phase1Controller {
   recordCommittedCompaction(tokensAfter: number, entryId?: string): void {
     this.startupCooldownExempt = false;
     this.admissionCompactionId = entryId ?? this.admissionCompactionId;
+    this.invalidateBoundaryStop();
     this.monitor.recordCompaction(tokensAfter);
   }
 
@@ -323,6 +419,8 @@ export class Phase1Controller {
       this.sampleStatus = synced ? "finite-positive"
         : tokens == null ? "unavailable" : "invalid";
       this.contextWindow = usage?.contextWindow ?? ctx.model?.contextWindow ?? this.contextWindow;
+      if (this.compilerPause && typeof this.contextWindow === "number" && Number.isFinite(this.contextWindow)
+        && this.contextWindow > 0 && this.contextWindow !== this.compilerPause.contextWindow) this.compilerPause = null;
       return synced;
     } catch {
       this.sampleStatus = "thrown";
@@ -330,7 +428,115 @@ export class Phase1Controller {
       return false;
     }
   }
-  assess(ctx: ExtensionContext): CompactEvaluation | null {
+  /** Host-only fresh sampling: no admission, warmup, warning or cooldown effects. */
+  samplePostCompaction(ctx: ExtensionContext): boolean {
+    if (!this.isOwner(ctx)) return false;
+    if (this.admissionModel !== this.modelIdentity(ctx)) this.admissionContextChanged(ctx);
+    this.refreshSettings(ctx);
+    const options = { contextWindow: ctx.model?.contextWindow ?? this.contextWindow, compaction: this.compactionSettings };
+    if (!this.settingsValid || !this.compactionSettings.enabled || this.inFlight || this.boundaryStop
+      || validateTriggerGeometry(options).length > 0 || !this.monitor.state.awaitingPostCompactionSample) return false;
+    if (!this.observeUsage(ctx)) return false;
+    const sampledOptions = { ...options, contextWindow: this.contextWindow };
+    if (validateTriggerGeometry(sampledOptions).length > 0) return false;
+    const auto = resolveTriggerThresholds(sampledOptions).auto.effective;
+    const aboveAuto = this.monitor.state.tokenEstimate >= auto;
+    this.monitor.state.awaitingPostCompactionSample = false;
+    this.monitor.state.repeatBaselineTokens = aboveAuto ? this.monitor.state.tokenEstimate : null;
+    this.monitor.state.missedAuto = aboveAuto;
+    return true;
+  }
+  private invalidateBoundaryStop(): void {
+    if (this.boundaryStop) this.stopInvalidated = true;
+    this.boundaryStop = null;
+  }
+  reserveBoundaryStop(ctx: ExtensionContext, turnId: string): boolean {
+    const lease = this.lease(ctx);
+    if (!lease) return false;
+    this.refreshSettings(ctx);
+    if (!this.settingsValid || !this.compactionSettings.enabled || this.inFlight || this.boundaryStop || this.compilerPause || !turnId) return false;
+    let boundaryLeaf: string;
+    try {
+      const branch = ctx.sessionManager.getBranch();
+      if (!branch.some((entry) => entry.id === turnId)) return false;
+      boundaryLeaf = branch.at(-1)!.id;
+    } catch { return false; }
+    this.boundaryStop = { lease, revision: this.contextRevision, model: this.modelIdentity(ctx),
+      settings: { ...this.compactionSettings }, turnId, boundaryLeaf, createdAt: this.clock() };
+    this.stopInvalidated = false;
+    return true;
+  }
+  cancelBoundaryStop(): void { this.invalidateBoundaryStop(); }
+  /** Used only after an owned stop's provenance has been validated below. */
+  private isOwnedStopAbort(message: Extract<SessionEntry, { type: "message" }>["message"]): boolean {
+    if (message.role !== "assistant") return false;
+    // Reviewed pi-ai lazy setup failure (0.99.2 and 1.0.3) can wrap the
+    // native AbortError as an error-shaped assistant before invoking a stream.
+    // No error text alone proves an abort, and no produced work may pass here.
+    if ((message.stopReason !== "aborted" && (message.stopReason !== "error" || message.errorMessage !== "This operation was aborted"))
+      || !Array.isArray(message.content) || message.content.length !== 0) return false;
+    const usage = message.usage;
+    if (!usage || !usage.cost) return false;
+    const zero = (value: unknown): boolean => typeof value === "number" && Number.isFinite(value) && value === 0;
+    return [usage.input, usage.output, usage.cacheRead, usage.cacheWrite, usage.totalTokens,
+      usage.cost.input, usage.cost.output, usage.cost.cacheRead, usage.cost.cacheWrite, usage.cost.total].every(zero)
+      && (usage.reasoning === undefined || zero(usage.reasoning))
+      && (usage.cacheWrite1h === undefined || zero(usage.cacheWrite1h));
+  }
+  /** Consume atomically before reassessment; aborted host descendants are not ticket anchors. */
+  consumeBoundaryStop(ctx: ExtensionContext): "valid" | "expired" | "invalid" | "none" {
+    if (!this.isOwner(ctx)) return "none";
+    // The ordinary settled fallback owns its settings read. Only a real stop
+    // needs a snapshot refresh here; invalidated tombstones still suppress it.
+    if (this.boundaryStop) this.refreshSettings(ctx);
+    const stop = this.boundaryStop;
+    this.boundaryStop = null;
+    const invalidated = this.stopInvalidated;
+    this.stopInvalidated = false;
+    if (!stop) return invalidated ? "invalid" : "none";
+    if (!this.isCurrent(stop.lease, ctx) || stop.revision !== this.contextRevision
+      || stop.model !== this.modelIdentity(ctx) || !this.settingsValid || !this.compactionSettings.enabled
+      || this.inFlight || this.compilerPause) return "invalid";
+    try {
+      const branch = this.trustedBranch(ctx);
+      const origin = branch.findIndex((entry) => entry.id === stop.turnId);
+      const boundary = branch.findIndex((entry) => entry.id === stop.boundaryLeaf);
+      if (origin < 0 || boundary < origin || branch.slice(boundary + 1).some((entry) =>
+        entry.type !== "custom" && !(entry.type === "message" && this.isOwnedStopAbort(entry.message)))) return "invalid";
+      const now = this.clock();
+      return now < stop.createdAt || now - stop.createdAt > 30_000 ? "expired" : "valid";
+    } catch { return "invalid"; }
+  }
+  ignoreTurn(ctx: ExtensionContext, turnId: string): void {
+    if (this.isOwner(ctx) && turnId) this.assessedTurnId = turnId;
+  }
+  assessTurn(ctx: ExtensionContext, turnId: string): CompactEvaluation | null {
+    if (!this.isOwner(ctx) || !turnId || this.assessedTurnId === turnId || this.boundaryStop) return null;
+    this.assessedTurnId = turnId;
+    return this.assess(ctx, "turn_end");
+  }
+  /** An invalid stop cannot turn a later duplicate settled callback into admission. */
+  ignoreSettledTurn(ctx: ExtensionContext): void {
+    if (!this.isOwner(ctx)) return;
+    try {
+      const latest = ctx.sessionManager.getBranch().findLast((entry) => entry.type === "message" && entry.message.role === "assistant");
+      if (latest) this.assessedTurnId = latest.id;
+    } catch { /* Unavailable journal has no usable turn identity. */ }
+  }
+  shouldAssessSettled(ctx: ExtensionContext): boolean {
+    if (!this.isOwner(ctx)) return false;
+    try {
+      const latest = ctx.sessionManager.getBranch().findLast((entry) => entry.type === "message" && entry.message.role === "assistant");
+      if (latest?.type === "message" && latest.message.role === "assistant") {
+        if (latest.message.stopReason === "error" || latest.message.stopReason === "aborted") return false;
+        if (latest.id === this.assessedTurnId) return false;
+        this.assessedTurnId = latest.id;
+      }
+      return true;
+    } catch { return false; }
+  }
+  assess(ctx: ExtensionContext, source: "turn_end" | "agent_settled" = "agent_settled", revalidate = false): CompactEvaluation | null {
+    this.assessmentSource = source;
     if (!this.isOwner(ctx)) return null;
     if (this.admissionModel !== this.modelIdentity(ctx)) this.admissionContextChanged(ctx);
     this.refreshSettings(ctx);
@@ -342,14 +548,19 @@ export class Phase1Controller {
     if (!this.settingsValid) return block("invalid-settings");
     if (!this.compactionSettings.enabled) return block("disabled");
     if (validateTriggerGeometry(options).length > 0) return block("invalid-geometry");
-    if (this.inFlight) return block("in-flight");
+    if (this.inFlight || this.boundaryStop) return block("in-flight");
+    if (revalidate && !synced) return block("missing-pi-sync");
     const tokens = this.monitor.state.tokenEstimate;
     const urgent = Number.isFinite(tokens) && tokens >= thresholds.headroomFloor.effective;
-    if (!urgent && this.warmupTurnsRemaining > 0) {
+    if (!urgent && !revalidate && this.warmupTurnsRemaining > 0) {
       this.warmupTurnsRemaining--;
       return block("warmup");
     }
     const { updates, ...evaluation } = assessCompaction(this.monitor.state, synced, options, this.clock());
+    if (evaluation.decision?.tier === Tier.Mechanical && this.compilerPause) {
+      // Preserve pursuit intent rather than consuming it on a blocked decision.
+      return block("compiler-paused");
+    }
     Object.assign(this.monitor.state, updates);
     if (!evaluation.decision) {
       if (evaluation.blockedBy === "below-auto") this.diagnosticKey = null;
@@ -373,14 +584,14 @@ export class Phase1Controller {
       const line = ["auto-check decided",
         `tier=${tier}`,
         `reason=${reason}`,
-        "source=agent_settled", `policy=v${TRIGGER_POLICY_VERSION}`, `model=${model}`,
+        `source=${this.assessmentSource}`, `policy=v${TRIGGER_POLICY_VERSION}`, `model=${model}`,
         `session=${diagnosticSessionLabel(this.ownerSessionId)}`, `pid=${process.pid}`,
         `tokens=${this.monitor.state.tokenEstimate}`,
       ].join(" ");
       // Burst dedup: suppress consecutive identical decided lines within 5s,
       // then emit one (×N) summary when the burst ends (key change, window
       // expiry, or the next blocked line). Diagnostics are best effort.
-      const key = JSON.stringify([tier, reason, model, this.contextWindow, TRIGGER_POLICY_VERSION,
+      const key = JSON.stringify([tier, reason, model, this.assessmentSource, this.contextWindow, TRIGGER_POLICY_VERSION,
         Object.entries(evaluation.thresholds).map(([band, value]) => `${band}=${value.effective}`)]);
       const now = this.clock();
       if (this.decidedBurst && this.decidedBurst.key === key && now - this.decidedBurst.firstAt < 5_000) {
@@ -405,11 +616,11 @@ export class Phase1Controller {
     try {
     this.flushDecidedBurst();
     const model = ctx.model ? `${ctx.model.provider}/${ctx.model.id}` : "unknown";
-    const key = JSON.stringify([reason, model, this.compactionSettings, this.settingsError,
+    const key = JSON.stringify([reason, model, this.assessmentSource, this.compactionSettings, this.settingsError,
       this.contextWindow, thresholds, this.sampleStatus]);
     if (key === this.diagnosticKey) return;
     this.diagnosticKey = key;
-    try { this.monitor.diagnostic(["auto-check blocked", `reason=${reason}`, "source=agent_settled",
+    try { this.monitor.diagnostic(["auto-check blocked", `reason=${reason}`, `source=${this.assessmentSource}`,
       `session=${diagnosticSessionLabel(this.ownerSessionId)}`, `pid=${process.pid}`,
       `model=${model}`, `enabled=${this.compactionSettings.enabled}`,
       `reserveTokens=${this.compactionSettings.reserveTokens}`, `sample=${this.sampleStatus}`,

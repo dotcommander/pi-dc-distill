@@ -16,6 +16,15 @@ function required(receipt: VerificationReceipt, checkpoint: ResumeCheckpointV1):
   return checkpoint.preconditions.some(item => requirements.has(item.id) && item.kind === "verification-pass" &&
     item.runner === receipt.tool && item.command === receipt.command && item.cwd === receipt.cwd);
 }
+function protectedReceipt(receipt: VerificationReceipt, checkpoint: ResumeCheckpointV1): boolean {
+  return required(receipt, checkpoint) || receipt.status === "FAIL" || receipt.status === "INCOMPLETE";
+}
+/** Match required identities before display shortening; share all eviction fences. */
+export function verificationProtection(checkpoint?: ResumeCheckpointV1): (line: string) => boolean {
+  const protectedLines = new Set(checkpoint ? checkpoint.evidence.verification.filter(receipt => protectedReceipt(receipt, checkpoint))
+    .map(receipt => renderVerificationReceipt(receipt, checkpoint.evidence.mutationEpoch)) : []);
+  return line => line.startsWith("FAIL ") || line.startsWith("INCOMPLETE ") || protectedLines.has(line);
+}
 /** Only presentation changes: checkpoint retains full identity, chronology and failures. */
 export function prioritizeVerificationDisplay(checkpoint: ResumeCheckpointV1, limit = 10): string[] {
   const latest = new Map<string, VerificationReceipt>();
@@ -27,7 +36,7 @@ export function prioritizeVerificationDisplay(checkpoint: ResumeCheckpointV1, li
   }
   const newestFirst = [...latest.values()].reverse();
   const stalePasses = newestFirst.filter(receipt => receipt.status === "PASS" &&
-    (receipt.freshnessEstablished === false || receipt.mutationEpoch < checkpoint.evidence.mutationEpoch) && !required(receipt, checkpoint));
+    (receipt.freshnessEstablished === false || receipt.mutationEpoch < checkpoint.evidence.mutationEpoch) && !protectedReceipt(receipt, checkpoint));
   const skippedStale = new Set(stalePasses.slice(1));
   const recency = newestFirst.filter(receipt => !skippedStale.has(receipt));
   const selected: VerificationReceipt[] = [];
@@ -46,9 +55,6 @@ export function prioritizeVerificationDisplay(checkpoint: ResumeCheckpointV1, li
   return lines;
 }
 export function verificationEvictionIndex(lines: string[], checkpoint?: ResumeCheckpointV1): number {
-  if (!checkpoint) return 0;
-  const protectedLines = new Set(checkpoint.evidence.verification.filter(receipt => required(receipt, checkpoint) || receipt.status === "FAIL" || receipt.status === "INCOMPLETE")
-    .map(receipt => renderVerificationReceipt(receipt, checkpoint.evidence.mutationEpoch)));
-  const index = lines.findLastIndex(line => !protectedLines.has(line));
-  return index < 0 ? lines.length - 1 : index;
+  const isProtected = verificationProtection(checkpoint);
+  return lines.findLastIndex(line => !isProtected(line));
 }

@@ -74,7 +74,7 @@ describe("output compactor helpers", () => {
       },
     );
 
-    expect(result.text.length).toBeLessThan(160);
+    expect(Array.from(result.text).length).toBeLessThanOrEqual(80);
     expect(result.text).toContain("preview characters");
   });
 
@@ -94,7 +94,7 @@ describe("output compactor helpers", () => {
       const second = previewOutput(fixture.text, policy);
       expect(first).toEqual(second);
       expect(first.previewStrategy).toBe(fixture.strategy);
-      expect(first.text.length).toBeLessThanOrEqual(policy.maxChars + 100);
+      expect(Array.from(first.text).length).toBeLessThanOrEqual(policy.maxChars);
       for (const anchor of fixture.anchors) expect(first.text).toContain(anchor);
     }
   });
@@ -434,4 +434,129 @@ test("live tool-output index waits for the same destination lock as migration", 
   const rows=(await readFile(join(root,"index.jsonl"),"utf8")).trim().split("\n").map(line=>JSON.parse(line));
   expect(rows).toHaveLength(1);
   expect(rows[0].toolCallId).toBe("locked-index");
+});
+
+describe("Unicode preview budgets", () => {
+  const points = (text: string) => Array.from(text).length;
+  const validUnicode = (text: string) => {
+    // Remove valid surrogate pairs; no surrogate may remain in valid input previews.
+    expect(text.replace(/[\ud800-\udbff][\udc00-\udfff]/g, "")).not.toMatch(/[\ud800-\udfff]/);
+  };
+
+  test("thresholds and counters count code points", () => {
+    const config = { ...DEFAULT_OUTPUT_COMPACTOR_CONFIG, maxChars: 4 };
+    expect(shouldCompact("😀".repeat(4), config)).toBe(false);
+    expect(shouldCompact("😀".repeat(5), config)).toBe(true);
+    const preview = compactText("😀".repeat(4), { headLines: 1, tailLines: 0, maxChars: 4 });
+    expect(preview).toMatchObject({ originalChars: 4, previewChars: 4, text: "😀".repeat(4) });
+  });
+
+  test("first-pass frames reserve digit transitions and report actual code-point omissions", () => {
+    for (const size of [99, 100, 999, 1000]) {
+      const source = "😀".repeat(size);
+      for (const budget of [0, 1, 2, 32, 36, 37, 38, 39, 40, 80]) {
+        const preview = compactText(source, { headLines: 1, tailLines: 0, maxChars: budget });
+        expect(preview.originalChars).toBe(size);
+        expect(preview.previewChars).toBe(points(preview.text));
+        expect(points(preview.text)).toBeLessThanOrEqual(budget);
+        validUnicode(preview.text);
+        const match = /\n\n\.\.\. omitted (\d+) characters \.\.\.\n\n/.exec(preview.text);
+        if (match) {
+          const retained = preview.text.replace(match[0], "");
+          expect(Number(match[1])).toBe(size - points(retained));
+        } else expect(preview.text).toBe(budget > 0 ? "…" : "");
+      }
+    }
+  });
+
+  test("second-pass cuts keep line markers complete and truthful preview omissions", () => {
+    const source = ["😀".repeat(12), ...Array.from({ length: 100 }, () => "middle"), "𝄞".repeat(90)].join("\n");
+    const first = compactText(source, { headLines: 1, tailLines: 1, maxChars: 200 }).text;
+    expect(first).toContain("... omitted 100 lines ...");
+    for (const budget of [0, 1, 49, 50, 55, 65, 80, 100]) {
+      const preview = compactText(source, { headLines: 1, tailLines: 1, maxChars: budget });
+      expect(points(preview.text)).toBeLessThanOrEqual(budget);
+      validUnicode(preview.text);
+      const match = /\n\n\.\.\. omitted (\d+) preview characters \.\.\.\n\n/.exec(preview.text);
+      if (!match) { expect(preview.text).toBe(budget > 0 ? "…" : ""); continue; }
+      const retained = preview.text.replace(match[0], "");
+      expect(Number(match[1])).toBe(points(first) - points(retained));
+      for (const line of retained.split("\n")) {
+        if (/omitted|\.\.\.|lines/.test(line)) expect(line).toBe("... omitted 100 lines ...");
+      }
+    }
+  });
+
+  test("zero tail allocations do not accidentally retain every line", () => {
+    const preview = compactText("one\ntwo\nthree", { headLines: 1, tailLines: 0, maxChars: 100 });
+    expect(preview.text).toContain("omitted 2 lines");
+    expect(preview.text).not.toContain("two");
+    expect(preview.text).not.toContain("three");
+  });
+
+  test("diagnostic UTF-16 offsets become code-point context windows", () => {
+    const source = `${"😀".repeat(100)} FAIL: parser terminal failure ${"𝄞".repeat(200)}`;
+    const preview = previewOutput(source, { headLines: 1, tailLines: 0, maxChars: 150 }, true);
+    expect(preview.previewStrategy).toBe("diagnostic");
+    expect(preview.text).toContain(`…${"😀".repeat(19)} FAIL: parser terminal failure`);
+    expect(preview.previewChars).toBe(points(preview.text));
+    expect(points(preview.text)).toBeLessThanOrEqual(150);
+    validUnicode(preview.text);
+    expect(() => compilePreview(preview.text)).not.toThrow();
+  });
+
+  test("selected line suffixes and tiny framing budgets remain bounded", () => {
+    const source = ["diff --git a/a b/a", "--- a/a", "+++ b/a", "@@ -1 +1 @@", `+${"😀".repeat(80)}TAIL`].join("\n");
+    const preview = previewOutput(source, { headLines: 1, tailLines: 0, maxChars: 60 });
+    expect(preview.previewStrategy).toBe("diff");
+    // First selected complete record fits; exercise suffix fallback with an oversized first record.
+    const oversized = [`diff --git ${"😀".repeat(80)}TAIL`, `@@ -1 +1 @@ ${"😀".repeat(80)}`, `+${"😀".repeat(80)}`].join("\n");
+    const suffix = previewOutput(oversized, { headLines: 1, tailLines: 0, maxChars: 60 });
+    expect(suffix.text).toContain("TAIL");
+    expect(points(suffix.text)).toBeLessThanOrEqual(60);
+    validUnicode(suffix.text);
+    for (const budget of [0, 1, 2]) {
+      const tiny = previewOutput(oversized, { headLines: 1, tailLines: 0, maxChars: budget });
+      expect(points(tiny.text)).toBeLessThanOrEqual(budget);
+      validUnicode(tiny.text);
+    }
+  });
+
+  test("JSON string excerpts retain complete code points at every depth", () => {
+    const value = { top: "😀".repeat(300), a: { b: { message: "𝄞".repeat(200), c: { error: "😀".repeat(200) } } } };
+    const preview = previewOutput(JSON.stringify(value), { headLines: 100, tailLines: 0, maxChars: 2000 });
+    expect(preview.previewStrategy).toBe("json");
+    const parsed = JSON.parse(preview.text);
+    expect(parsed.preview.top).toBe("😀".repeat(256));
+    expect(parsed.preview.a.b.message).toBe("𝄞".repeat(160));
+    expect(parsed.preview.a.b.c.errorValues.error).toBe("😀".repeat(160));
+    validUnicode(preview.text);
+  });
+
+  test("generated tool receipts keep artifact bytes and hashes while bounding input and preview", async () => {
+    const source = "😀".repeat(300);
+    let stored = "";
+    let record: any;
+    const compactor = createOutputCompactor({
+      config: { enabled: true, maxChars: 80, headLines: 1, tailLines: 0 },
+      artifactRoot: () => "/tmp/preview-artifacts",
+      writeText: async (_path, text) => { stored = text; },
+      appendIndex: async (_path, text) => { record = JSON.parse(text); },
+    });
+    const patch = await compactor.onToolResult({ toolName: "bash", toolCallId: "unicode-preview", input: { command: "😀".repeat(600) }, content: [{ type: "text", text: source }] }, { cwd: "/tmp/project", hasUI: false });
+    expect(stored).toBe(source);
+    expect(record.chars).toBe(300);
+    expect(record.bytes).toBe(Buffer.byteLength(source, "utf8"));
+    expect(record.contentSha256).toBe(createHash("sha256").update(source, "utf8").digest("hex"));
+    const receipt = (patch?.details as any).dcDistillOutputCompactor;
+    expect(receipt.originalChars).toBe(300);
+    expect(receipt.previewChars).toBeLessThanOrEqual(80);
+    if (!Array.isArray(patch?.content)) throw new Error("Expected generated preview content array");
+    const wire = (patch.content.find((part: any) => part.type === "text") as { text: string }).text;
+    const input = wire.split("\n").find((line) => line.startsWith("Input: "))!.slice(7);
+    expect(points(input)).toBe(500);
+    expect(input.endsWith("...")).toBe(true);
+    validUnicode(wire);
+    expect(() => compilePreview(wire)).not.toThrow();
+  });
 });

@@ -87,6 +87,43 @@ describe("DistillStore", () => {
     await expect(store.loadRecall("all")).rejects.toMatchObject({ code: "EISDIR" });
   });
 
+  for (const [shape, value] of [
+    ["object containing historical records", { records: [entry("2025-01-01T00:00:00Z", "historical")] }],
+    ["null", null],
+    ["string", "historical"],
+    ["number", 42],
+    ["boolean", false],
+  ] as const) {
+    test(`recall reconciliation rejects a ${shape} envelope without replacing its bytes`, async () => {
+      const dataDir = root();
+      const store = new DistillStore({ dataDir, projectIdentity: "/work/valid" });
+      await mkdir(store.projectRoot, { recursive: true });
+      const path = join(store.projectRoot, "recall.json");
+      const original = `  ${JSON.stringify(value, null, 2)}\n`;
+      await writeFile(path, original);
+
+      await expect(store.reconcileRecall([entry("2026-01-01T00:00:00Z", "incoming")]))
+        .rejects.toThrow("Recall file must contain a JSON array");
+      expect(readFileSync(path, "utf8")).toBe(original);
+      await expect(store.loadRecall()).rejects.toBeInstanceOf(TypeError);
+    });
+  }
+
+  test("recall reconciliation initializes a missing file and filters invalid array rows", async () => {
+    const dataDir = root();
+    const store = new DistillStore({ dataDir, projectIdentity: "/work/valid" });
+    const path = join(store.projectRoot, "recall.json");
+    expect(await store.loadRecall()).toEqual([]);
+    await store.reconcileRecall([entry("2026-01-01T00:00:00Z", "initial")]);
+    const initial = JSON.parse(readFileSync(path, "utf8"));
+    await writeFile(path, JSON.stringify([null, { summary: "invalid" }, ...initial]));
+
+    await store.reconcileRecall([entry("2026-01-02T00:00:00Z", "incoming")]);
+
+    expect((await store.loadRecall()).map(item => item.summary)).toEqual(["incoming", "initial"]);
+    expect(JSON.parse(readFileSync(path, "utf8"))).toHaveLength(2);
+  });
+
   test("locked concurrent recall writers retain the newest ten entries", async () => {
     const dataDir = root();
     const store = new DistillStore({

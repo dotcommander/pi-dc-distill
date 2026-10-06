@@ -14,11 +14,13 @@
  *   DISTILL_FAKE_BASE    total context tokens reported on the first turn (default 4000)
  *   DISTILL_FAKE_STEP    extra tokens per assistant message in context (default 25000)
  *   DISTILL_FAKE_POST_COMPACTION_USAGE optional usage once native summary is in context
+ *   DISTILL_FAKE_USAGE_FILE optional mutable sandbox file overriding ordinary turn usage
+ *   DISTILL_FAKE_BOUNDARY_BASE optional initial tool-batch usage (default 130000)
  *   DISTILL_FAKE_OVERFLOW_ERROR emit one context-overflow error before recovery
  *   DISTILL_FAKE_HOLD_TEXT hold this exact user text until the host aborts the turn
  *   DISTILL_FAKE_TRACE   path to append a JSONL trace of every model request
  */
-import { appendFileSync } from "node:fs";
+import { appendFileSync, readFileSync } from "node:fs";
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { createAssistantMessageEventStream } from "@earendil-works/pi-ai";
 import type { AssistantMessage, Context, Model, SimpleStreamOptions } from "@earendil-works/pi-ai";
@@ -67,7 +69,8 @@ function decide(context: Context): { text: string; usageTotal: number } {
   const postCompactionUsage = process.env.DISTILL_FAKE_POST_COMPACTION_USAGE;
   const hasCompactionSummary = messages.some((message) =>
     textOf(message.content).startsWith("The conversation history before this point was compacted into the following summary:\n\n<summary>\n"));
-  const usageTotal = postCompactionUsage !== undefined && hasCompactionSummary
+  const usageFile = process.env.DISTILL_FAKE_USAGE_FILE;
+  const usageTotal = usageFile ? Number(readFileSync(usageFile, "utf8")) : postCompactionUsage !== undefined && hasCompactionSummary
     ? Number(postCompactionUsage)
     : BASE + STEP * assistantCount;
   const last = messages[messages.length - 1];
@@ -102,12 +105,45 @@ function streamScripted(model: Model<any>, context: Context, options?: SimpleStr
     timestamp: Date.now(),
   };
   const isSummary = /summariz|compaction summar/i.test(context.systemPrompt ?? "");
+  const boundaryFile = process.env.DISTILL_FAKE_BOUNDARY_FILE;
+  if (boundaryFile) trace({ kind: "invocation", aborted: options?.signal?.aborted === true });
   setTimeout(async () => {
     try {
       stream.push({ type: "start", partial: output });
       const lastMessage = context.messages[context.messages.length - 1];
       const lastText = lastMessage ? textOf((lastMessage as { content?: unknown }).content) : "";
 
+      if (boundaryFile && options?.signal?.aborted) {
+        trace({ kind: "already-aborted" });
+        output.stopReason = "aborted";
+        stream.push({ type: "error", reason: "aborted", error: output });
+        stream.end();
+        return;
+      }
+      const latestUser = context.messages.findLast((message) => message.role === "user");
+      const boundaryRun = textOf(latestUser?.content).startsWith("RUN_BOUNDARY_BATCHES");
+      if (boundaryFile && boundaryRun && !isSummary) {
+        const completed = context.messages.filter((message) => message.role === "toolResult"
+          && message.toolCallId.startsWith("boundary-")).length / 2;
+        if (completed < 4) {
+          const usageTotal = Number(env("DISTILL_FAKE_BOUNDARY_BASE", "130000")) + 5_000 * completed;
+          trace({ kind: "batch", batch: completed, usageTotal });
+          for (let sibling = 0; sibling < 2; sibling++) {
+            const call = { type: "toolCall" as const, id: `boundary-${completed}-${sibling}`, name: "read",
+              arguments: { path: boundaryFile } };
+            output.content.push(call);
+            stream.push({ type: "toolcall_start", contentIndex: sibling, partial: output });
+            stream.push({ type: "toolcall_end", contentIndex: sibling, toolCall: call, partial: output });
+          }
+          output.usage.input = usageTotal - 20;
+          output.usage.output = 20;
+          output.usage.totalTokens = usageTotal;
+          output.stopReason = "toolUse";
+          stream.push({ type: "done", reason: "toolUse", message: output });
+          stream.end();
+          return;
+        }
+      }
       if (isSummary) {
         // Only reachable if a host asks the provider to summarize — the exact
         // fallback path dc-distill must never take.

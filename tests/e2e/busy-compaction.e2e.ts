@@ -5,6 +5,7 @@ import { existsSync, readFileSync, readdirSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { makeTestDir, piEnv, scriptedArgs, latestSessionFile, REPO_ROOT } from "./harness/env.ts";
 import { RpcClient, eventsOfType } from "./harness/rpc-client.ts";
+import { assertCurrentCompaction } from "./harness/current-compaction.ts";
 
 function records(file: string): Array<Record<string, any>> {
   return existsSync(file) ? readFileSync(file, "utf8").split("\n").filter(Boolean).map((line) => JSON.parse(line)) : [];
@@ -87,7 +88,9 @@ test("busy manual compaction aborts the turn, prepares without artifacts, and co
       expect(committed.summary).toBe(result.summary);
       expect(committed.firstKeptEntryId).toBe(result.firstKeptEntryId);
       expect(committed.details).toEqual(result.details);
-      expect(committed.details).toMatchObject({ compactor: "dc-distill", version: 13, autonomous: false });
+      expect(committed.details).toMatchObject({ compactor: "dc-distill", version: 14, autonomous: false });
+      assertCurrentCompaction(committed.summary, committed.details);
+      assertCurrentCompaction(result.summary, result.details);
       expect(committed.details.attemptId).toBeString();
       expect(committed.details.summaryDigest).toBe(createHash("sha256").update(committed.summary).digest("hex"));
 

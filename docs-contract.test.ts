@@ -9,10 +9,9 @@ import setupDistill from "./index.ts";
  *
  * Compares what the documentation promises (slash commands, autonomous
  * trigger boundaries) against what the extension actually registers on a live
- * Pi API surface. Both drift classes caught here have shipped before:
- * `/compact-status` was advertised but never registered, and `turn_end` was
- * documented as the in-run boundary after the runtime moved to
- * `agent_settled` only. Runtime is authoritative; docs follow.
+ * Pi API surface. Drift has included nonexistent slash commands and stale
+ * settle-only timing claims. Sampling, batch-stop admission and settled
+ * compaction submission are distinct contracts. Runtime is authoritative.
  */
 
 const root = import.meta.dir;
@@ -101,27 +100,74 @@ describe("runtime-contract drift audit", () => {
   test("autonomous trigger boundary matches the registered hooks", async () => {
     const stub = registerExtension();
 
-    // Runtime surface: the deliberate agent_settled-only design.
-    expect(stub.registeredHooks.has("agent_settled")).toBe(true);
-    expect(stub.registeredHooks.has("session_tree")).toBe(true);
-    expect(stub.registeredHooks.has("turn_end")).toBe(false);
-
-    // Docs must not claim the unregistered turn_end boundary anywhere.
-    for (const doc of await loadDocs()) {
-      expect(
-        doc.text.includes("turn_end"),
-        `${doc.file} claims the unregistered turn_end boundary`,
-      ).toBe(false);
+    for (const hook of ["tool_call", "turn_end", "agent_settled", "session_tree"]) {
+      expect(stub.registeredHooks.has(hook), `missing timing hook ${hook}`).toBe(true);
     }
+    expect(stub.registeredHooks.has("agent_before_settle")).toBe(false);
 
-    // The active boundary must stay documented where users read about it.
+    // Source-level routing audit; behavioral ordering is covered by the
+    // boundary tests and the separately invoked scripted real-host fixture.
+    const source = await readFile(join(root, "index.ts"), "utf8");
+    const controller = await readFile(join(root, "lib", "phase1-controller.ts"), "utf8");
+    const toolCall = source.match(/tool_call: async[\s\S]*?(?=\n      turn_end:)/)?.[0];
+    const turnEnd = source.match(/turn_end: async[\s\S]*?(?=\n      \/\/ Settled submission)/)?.[0];
+    const settled = source.match(/agent_settled: async[\s\S]*?(?=\n      session_tree:)/)?.[0];
+    expect(toolCall).toBeDefined();
+    expect(turnEnd).toBeDefined();
+    expect(settled).toBeDefined();
+    expect(toolCall).toContain("runtime.samplePostCompaction(ctx)");
+    expect(toolCall).not.toMatch(/ctx\.(?:abort|compact)\(|runtime\.(?:requestAttempt|assessTurn|reserveBoundaryStop)\(/);
+    expect(turnEnd).toContain('event.outcome !== "completed"');
+    expect(turnEnd).toContain("event.toolResultEntryIds");
+    expect(turnEnd).toContain("runtime.assessTurn(ctx, event.messageEntryId)");
+    expect(turnEnd).toContain("runtime.reserveBoundaryStop(ctx, event.messageEntryId)");
+    expect(turnEnd).toContain("ctx.abort()");
+    expect(turnEnd).not.toMatch(/await\s+ctx\.abort\(|ctx\.compact\(|runtime\.requestAttempt\(|checkAutonomousCompaction\(/);
+    expect(settled).toContain("runtime.consumeBoundaryStop(ctx)");
+    expect(settled).toContain('stop === "valid"');
+    expect(settled).toContain("checkAutonomousCompaction(runtime, ctx, true)");
+    expect(settled).toContain("runtime.shouldAssessSettled(ctx)");
+    expect(source).toContain('runtime.assess(ctx, "agent_settled", revalidate)');
+    expect(source).toMatch(/runtime\.assess\(ctx, "agent_settled", revalidate\)[\s\S]*?runtime\.requestAttempt\(ctx\)[\s\S]*?ctx\.compact\(/);
+    expect(controller).toMatch(/samplePostCompaction\(ctx:[\s\S]*?if \(!this\.observeUsage\(ctx\)\) return false/);
+    expect(controller).toMatch(/assess\(ctx:[\s\S]*?const synced = this\.observeUsage\(ctx\)/);
+
     const docs = await loadDocs();
-    const usage = docs.find((doc) => doc.file.endsWith(join("docs", "usage.md")));
-    const architecture = docs.find((doc) => doc.file.endsWith(join("docs", "architecture.md")));
-    const readme = docs.find((doc) => doc.file.endsWith("README.md"));
-    expect(usage?.text).toContain("agent_settled");
-    expect(architecture?.text).toContain("agent_settled");
-    expect(readme?.text).toContain("agent_settled");
+    const usage = docs.find((doc) => doc.file.endsWith(join("docs", "usage.md")))!.text;
+    const architecture = docs.find((doc) => doc.file.endsWith(join("docs", "architecture.md")))!.text;
+    const algorithm = docs.find((doc) => doc.file.endsWith(join("docs", "algorithm.md")))!.text;
+    const agent = await readFile(join(root, "AGENTS.md"), "utf8");
+    for (const text of [usage, architecture, algorithm, agent]) {
+      for (const boundary of ["tool_call", "turn_end", "agent_settled"]) expect(text).toContain(boundary);
+      expect(text).toMatch(/sample-only|Sample-only|without interrupting tools/);
+      expect(text).toContain("exact-leaf");
+      expect(text).toMatch(/re-assess|re-check/);
+      expect(text).toContain("120-second");
+      expect(text).toContain("4,000");
+      expect(text).toMatch(/Unknown|unknown/);
+      expect(text).toMatch(/warmup twice|double warmup/);
+    }
+    expect(architecture).toContain("does not take a request ticket");
+    expect(architecture).toMatch(/30-second lifetime/);
+    expect(agent).toMatch(/agent_before_settle` is deferred/);
+    expect(docs.find((doc) => doc.file.endsWith("README.md"))?.text).toContain("agent_settled");
+  });
+
+  test("v14 docs describe the checkpoint ledger, reader ranges and protected floor", async () => {
+    const agent = await readFile(join(root, "AGENTS.md"), "utf8");
+    const docs = await loadDocs();
+    const architecture = docs.find(doc => doc.file.endsWith(join("docs", "architecture.md")))!.text;
+    const algorithm = docs.find(doc => doc.file.endsWith(join("docs", "algorithm.md")))!.text;
+    const usage = docs.find(doc => doc.file.endsWith(join("docs", "usage.md")))!.text;
+    for (const text of [agent, architecture, algorithm, usage]) {
+      expect(text).toContain("version 14");
+      expect(text).toContain("checkpointSections");
+      expect(text).toMatch(/schema-v2|checkpoint schema\s*v2/);
+      expect(text).toContain("T0");
+    }
+    expect(agent).toContain("8–14");
+    expect(architecture).toContain("10–14");
+    expect(architecture).toContain("v14-aware reader");
   });
 
   /** Settings keys the runtime actually reads; owner: lib/settings.ts normalizeDistillFeatureSettings. */

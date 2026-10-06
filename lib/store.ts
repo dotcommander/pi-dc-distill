@@ -73,8 +73,11 @@ function dumpSlug(ts: string, pid: number, attemptId: string): string {
 
 async function readRecall(path: string): Promise<StoredRecallEntry[]> {
   try {
-    const parsed = JSON.parse(await readFile(path, "utf8"));
-    return Array.isArray(parsed) ? parsed.filter(isRecallEntry) : [];
+    const parsed: unknown = JSON.parse(await readFile(path, "utf8"));
+    if (!Array.isArray(parsed)) {
+      throw new TypeError("Recall file must contain a JSON array");
+    }
+    return parsed.filter(isRecallEntry);
   } catch (error) {
     if ((error as NodeJS.ErrnoException).code === "ENOENT") return [];
     throw error;

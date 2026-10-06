@@ -8,7 +8,7 @@ function host(version = 13) {
   return {type:"compaction", id:"host-entry", timestamp:"2026-01-01T00:00:00Z",
     firstKeptEntryId:"tail", tokensBefore:100, summary:"exact wire summary 😀",
     details:{compactor:"dc-distill",version,tokensAfter:20,tokensAfterSource:"pi-rebuilt-message-estimate",
-      ...(version === 13 ? { checkpoint, checkpointDigest: checkpointDigest(checkpoint) } : {}),
+      ...(version === 13 || version === 14 ? { checkpoint, checkpointDigest: checkpointDigest(checkpoint) } : {}),
       attemptId:"attempt",summaryDigest:sha256Hex("exact wire summary 😀")}};
 }
 test("projects committed host identity, original timestamp and exact wire digest", () => {
@@ -36,7 +36,7 @@ test("historical v5-v9 compactions remain recoverable without manufacturing dige
   }
 });
 
-for (const version of [10, 11, 12, 13]) test(`v${version} recall requires wire integrity and preserves its source`, () => {
+for (const version of [10, 11, 12, 13, 14]) test(`v${version} recall requires wire integrity and preserves its source`, () => {
   const original = host(version);
   const before = JSON.stringify(original);
   expect(projectActiveBranchRecall([original], "/project", "owner")).toHaveLength(1);
@@ -50,10 +50,11 @@ for (const version of [10, 11, 12, 13]) test(`v${version} recall requires wire i
 });
 
 test("recall rejects unknown detail versions rather than reinterpreting them", () => {
-  expect(projectActiveBranchRecall([host(4), host(14)], "/project", "owner")).toEqual([]);
+  expect(projectActiveBranchRecall([host(4), host(15)], "/project", "owner")).toEqual([]);
 });
 
-test("v13 recall rejects corrupt checkpoint state", () => {
-  const entry = host();
+for (const version of [13, 14]) test(`v${version} recall rejects corrupt or missing checkpoint state`, () => {
+  const entry = host(version);
   expect(projectActiveBranchRecall([{...entry,details:{...entry.details,checkpointDigest:"f".repeat(64)}}],"/project","owner")).toEqual([]);
+  expect(projectActiveBranchRecall([{...entry,details:{...entry.details,checkpoint:undefined}}],"/project","owner")).toEqual([]);
 });

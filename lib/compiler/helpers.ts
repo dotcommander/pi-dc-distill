@@ -73,18 +73,6 @@ export function addMarkerLine(set: OrderedSet, line: string): void {
   if (normalized) set.add(sliceU16(normalized, 180));
 }
 
-export function removeMarkerLine(set: OrderedSet, line: string): void {
-  const normalized = sanitize(line).trim().split(/\s+/).filter(Boolean).join(" ");
-  if (normalized) set.remove(sliceU16(normalized, 180));
-}
-
-export function removePartialEffectsRisksForPath(set: OrderedSet, path: string): void {
-  const needle = ` for ${path} may have partial effects`;
-  for (const line of set.slice()) {
-    if (line.startsWith("Failed ") && line.includes(needle)) set.remove(line);
-  }
-}
-
 export function addExactMarkerLine(set: OrderedSet, line: string, limit = 512): void {
   const sanitized = sanitize(line).trim();
   if (sanitized) set.add(sliceU16(sanitized, limit));
