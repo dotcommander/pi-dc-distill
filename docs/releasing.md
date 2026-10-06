@@ -33,10 +33,10 @@ unpublished version and an account with maintainer access. Confirm that the
 specific version shown by `npm pkg get version` has not already been published:
 
 ```bash
-npm view pi-dc-distill@0.1.2 version --registry=https://registry.npmjs.org/
+npm view pi-dc-distill@0.1.7 version --registry=https://registry.npmjs.org/
 ```
 
-Replace `0.1.2` with the proposed version for subsequent releases. npm does not
+Replace `0.1.7` with the proposed version for subsequent releases. npm does not
 allow reuse of a published name/version pair, even after unpublishing.
 
 Run the checks and inspect the package contents:
@@ -44,6 +44,7 @@ Run the checks and inspect the package contents:
 ```bash
 bun test
 bun run typecheck
+bun run distill:architecture
 git diff --check
 npm pack --dry-run --json
 ```
@@ -51,7 +52,8 @@ npm pack --dry-run --json
 The pack listing must include `package.json`, `index.ts`, its `lib/` imports,
 `bin/dc-distill-session.ts`, `LICENSE`, `README.md`, and `docs/`. It also includes
 the synthetic comparison script and fixtures intentionally. It must exclude
-`node_modules`, `.git`, `.work`, raw sessions, credentials, and unit/e2e tests.
+`node_modules`, `.git`, `.work`, `docs/specs`, raw sessions, credentials, and
+unit/e2e tests.
 Review every listed file before publishing. The `files` allowlist in
 `package.json` owns this boundary.
 
@@ -73,8 +75,8 @@ for private source repositories.
 Verify the exact released version, then install it in Pi:
 
 ```bash
-npm view pi-dc-distill@0.1.2 version dist.integrity --registry=https://registry.npmjs.org/
-pi install npm:pi-dc-distill@0.1.2
+npm view pi-dc-distill@0.1.7 version dist.integrity --registry=https://registry.npmjs.org/
+pi install npm:pi-dc-distill@0.1.7
 ```
 
 For normal installation after publication, use `pi install npm:pi-dc-distill`.
