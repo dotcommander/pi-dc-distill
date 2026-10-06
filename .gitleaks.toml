@@ -1,0 +1,22 @@
+[extend]
+useDefault = true
+
+[[rules]]
+id = "generic-api-key"
+
+[[rules.allowlists]]
+# These two acceptance receipts record the verified SHA-256 of the source file,
+# not a credential. Keep every default rule; exempt only this exact receipt line
+# in these exact documents. All other content in the documents remains scanned.
+# Gitleaks includes the preceding newline in non-first-line findings; multiline
+# anchors preserve the complete-line match in both Git and directory scans.
+description = "Verified json-object-keys.ts source SHA-256 in acceptance receipts"
+condition = "AND"
+regexTarget = "line"
+paths = [
+  '''^docs/specs/current-compaction-acceptance\.md$''',
+  '''^docs/specs/current-compaction-acceptance-v14\.md$''',
+]
+regexes = [
+  '''(?m)^[ \t]*lib/json-object-keys\.ts: 29506e7775909619e67bf2fd6a3174a0805140671fdd3caf8ee4545d3e6bd3ab$''',
+]
