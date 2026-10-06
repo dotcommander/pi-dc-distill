@@ -45,26 +45,21 @@ child HOME, agent, session and project directories:
 ```sh
 sandbox=$(mktemp -d /tmp/dc-distill-turn-boundary.XXXXXX)
 PI_CODING_AGENT_DIR="$sandbox/agent" DISTILL_PI_PACKAGE="$PWD/node_modules/@earendil-works/pi-coding-agent" DISTILL_PI_EXPECT_VERSION=0.99.2 bun test ./tests/e2e/turn-boundary.e2e.ts
-PI_CODING_AGENT_DIR="$sandbox/agent" DISTILL_PI_PACKAGE="/Users/vampire/.bun/install/global/node_modules/@earendil-works/pi-coding-agent" DISTILL_PI_EXPECT_VERSION=1.0.3 bun test ./tests/e2e/turn-boundary.e2e.ts
+PI_CODING_AGENT_DIR="$sandbox/agent" DISTILL_PI_PACKAGE="/Users/vampire/.bun/install/global/node_modules/@earendil-works/pi-coding-agent" DISTILL_PI_EXPECT_VERSION=1.0.4 bun test ./tests/e2e/turn-boundary.e2e.ts
 ```
 
-The fixture targets sample-only fresh baseline capture after assistant persistence
-at `tool_call`, followed by completed `turn_end` admission after all sibling
-results. A process-local stop intent requests non-awaiting abort; validated,
-freshly re-assessed `agent_settled` admission then creates the exact-leaf ticket
-and requests standard host compaction. Acceptance covers stop → settle → prepare
-→ matching v14/schema-v2 commit → durable continuation, with no pre-commit success
-artifacts, orphan tool pairs, duplicate continuation or summarizer requests.
-The host may invoke the stream function with an already-aborted signal before
-settling; distinguish invocation from successful provider work. Cancellation and
-genuine user supersession must produce no stale commit or continuation.
-
-The focused fixture also advances its supported controller clock by more than
-30 seconds between the extension-owned abort and the real host settlement, and
-separately moves that clock backward. These cases require a fresh finite positive
-host sample and one new exact-leaf submission after the old intent expires; the
-committed parent must match the observed submission leaf. The clock change does
-not emit synthetic host callbacks or bypass current admission guards.
+The fixture emits four successful sibling read batches at 130,000, 135,000,
+140,000 and 145,000 tokens, then a successful final response at exactly 150,000.
+All eight results and that final response must precede the compaction submission.
+`tool_call` and completed `turn_end` callbacks sample only; `agent_settled` is the
+sole autonomous admission boundary for every band. The trace must contain no
+extension abort, already-aborted provider stream or synthetic error/aborted
+assistant. A successful scenario requires exactly one authenticated autonomous
+v14/schema-v2 commit and one matching durable continuation after the seeded
+manual commit. No pre-commit success artifacts, orphan tool pairs, duplicate
+continuation or summarizer requests are allowed. Explicit RPC cancellation and
+genuine user supersession still produce no stale commit or continuation.
+Continuing tool loops can delay compaction until natural settlement.
 
 A persistent invalid-predecessor preparation fault first establishes an
 extension-owned compiler failure below the native trigger through the real host.
@@ -85,12 +80,39 @@ fixtures; these scenarios neither install nor activate an extension.
 
 Unknown samples must not establish a baseline. Production 120-second cooldown,
 4,000-token repeat growth, owner/settings/latch and branch/model fences remain
-intact; turn-end and settled callbacks must not consume warmup twice. Scripted
+intact; sample-only callbacks must not consume warmup. Scripted
 runtime receipts on both hosts are required: historical suite receipts are not
 blanket evidence for this path. These commands are documented, not run; no passing
 check is claimed. The checkout fix does not update installed npm 0.1.6, activate
 it, or authorize a release. Selecting an installed Pi host here only reads and
 runs that host in the sandbox.
+
+## Separate interactive native-card gate
+
+Launch the reusable scripted TUI entry point from a PTY after all edits. It seeds
+three low-usage replies and one real manual compaction through RPC, then reopens
+that session interactively on the exact selected host. The test clock advances
+121 seconds; three printed low-usage prompts let the restarted runtime warm up
+before `RUN_BOUNDARY_BATCHES`. The provider remains entirely local.
+
+```sh
+sandbox=$(mktemp -d /tmp/dc-distill-settlement-tui.XXXXXX)
+PI_CODING_AGENT_DIR="$sandbox/agent" DISTILL_PI_PACKAGE="$PWD/node_modules/@earendil-works/pi-coding-agent" DISTILL_PI_EXPECT_VERSION=0.99.2 bun run tests/e2e/turn-boundary-tui.ts
+PI_CODING_AGENT_DIR="$sandbox/agent" DISTILL_PI_PACKAGE="/Users/vampire/.bun/install/global/node_modules/@earendil-works/pi-coding-agent" DISTILL_PI_EXPECT_VERSION=1.0.4 bun run tests/e2e/turn-boundary-tui.ts
+```
+
+A verifier can submit the printed prompts through the PTY, waiting for each reply.
+Capture the native successful compaction card and terminal text/screens: routine
+autonomous compaction must show no red abort row. Inspect the preserved provider
+trace, boundary trace and session journal to confirm all four batches, eight
+successful results and the 150,000-token final response precede exactly one new
+authenticated autonomous commit and its continuation, with zero extension aborts
+and zero synthetic error/aborted assistant records. The seeded manual card is
+separate. RPC receipts do not prove rendered TUI behavior; launcher exit status
+does not prove acceptance. `interactive-instructions.json` records host, paths
+and exact prompts. Ctrl+C stops the interactive child; artifacts remain. Relaunch
+the command to create a fresh isolated scenario. No release, installation or
+activation is performed.
 
 Preparation faults are injected by a sandbox-only extension preceding dc-distill.
 They alter previous-summary agreement, discarded-partition agreement, or decoded

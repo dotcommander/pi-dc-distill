@@ -15,9 +15,9 @@ the [logs](#logs). A missing log file can simply mean no attempt has been record
 | Compaction remains reserved after a native non-aborted failure | Pi's failure event has no attempt identity, so dc-distill preserves an ambiguous reservation to avoid releasing another attempt. | Inspect the failure and address its cause. The originating terminal callback or a session lifecycle reset releases the reservation; if no callback arrives, replace the session or restart Pi. |
 | `/compact status` compacted the session | Pi treats `status` as focus text. | There is no separate status command; inspect `compact-log.jsonl` and `diag.log` instead. |
 | Autonomous compaction does not fire at auto | Pi disabled auto-compaction, invalid settings, warmup, cooldown, unavailable/invalid current Pi usage, repeat-growth guard, an in-flight attempt, or the compiler-failure pause. | Inspect the latest `auto-check blocked` line in `diag.log`; it records the exact guard and effective geometry. |
-| `post-compaction-sample` delays another ordinary attempt | The first fresh host count establishes an above-auto baseline, not immediate permission to repeat. Version 0.1.6 checks only at settlement. | Version 0.1.7 samples at `tool_call` after assistant persistence and checks completed tool batches; unknown counts remain pending, and 120-second cooldown plus 4,000-token growth still apply. Publication does not activate or update the installed package. |
+| `post-compaction-sample` delays another ordinary attempt | The first fresh host count establishes an above-auto baseline, not immediate permission to repeat. Version 0.1.6 checks only at settlement. | The checkout samples at `tool_call` and completed `turn_end` after assistant persistence; autonomous admission runs only at `agent_settled`; unknown counts remain pending, and 120-second cooldown plus 4,000-token growth still apply. Publication does not activate or update the installed package. |
 | A cooperative warning appears | The context reached Pi's `contextWindow - reserveTokens` line below the headroom floor. | Finish the atomic unit; Mechanical compaction bypasses ordinary guards at `max(warn, contextWindow - 20,480)`, subject to ownership, enabled valid settings, the latch and compiler-failure pause. A missed auto window is pursued mechanically at the next unblocked warn-band check. |
-| Automatic compaction stops after a local compiler failure | An owned autonomous attempt paused Mechanical admission, including urgent bands, to prevent repeated aborts. | Inspect `compiler-paused` and the failure stage/code. Fix the cause and try manual `/compact`; manual recovery clears the pause only after a validated successful newest active-branch commit. New prompts and failed manual attempts do not reset it. |
+| Automatic compaction stops after a local compiler failure | An owned autonomous attempt paused Mechanical admission, including urgent bands, to prevent repeated submissions. | Inspect `compiler-paused` and the failure stage/code. Fix the cause and try manual `/compact`; manual recovery clears the pause only after a validated successful newest active-branch commit. New prompts and failed manual attempts do not reset it. |
 | Compaction fires at the headroom floor or emergency despite cooldown | These bands bypass warmup, cooldown, sync, and growth guards by design. | Investigate why earlier Mechanical compaction did not reduce context. |
 | Summary lacks retained-tail content | Retained content is deliberately excluded from the discarded-input summary and remains in rebuilt context. | Inspect rebuilt context rather than expecting duplication in the summary. |
 | Summary lacks abandoned-fork content | Only the active branch is authoritative. | Return to the relevant branch before compacting if that content is needed. |
@@ -30,18 +30,16 @@ the [logs](#logs). A missing log file can simply mean no attempt has been record
 | Default recall misses an older summary | It is outside the ten newest retained summaries, belongs to another project, or is ownerless legacy history. | Use `scope: "all"` for other projects/legacy entries. Evicted summaries are not recoverable through recall. |
 | Migration retries every startup | A migration operation or completion-marker write is failing. | Inspect diagnostics and permissions; fix the cause. No marker is written on failure. |
 
-The checkout's completed `turn_end` check waits for all sibling results, reserves
-only a process-local stop intent, and calls non-awaiting abort. At `agent_settled`,
-validated intent and a fresh host count precede the exact-leaf ticket and standard
-`ctx.compact()` path. User/branch/model/settings changes and cancellation fence
-stale intent; no double warmup or pre-commit continuation is allowed. An aborted
-assistant may be appended while the host settles, so do not move ticket creation
-to the earlier boundary. `agent_before_settle` migration remains deferred.
-
-An expired intent (over 30 seconds or a backward clock) is consumed once; valid
-provenance permits one fresh positive-host-usage assessment under current guards
-before a new ticket. Duplicate callbacks cannot retry it. Invalid or superseded
-intent remains silent.
+Autonomous decisions for every band occur only at `agent_settled`, which refreshes
+host usage before taking a settled exact-leaf ticket for standard `ctx.compact()`.
+Ordinary Auto/Warn requires a current finite positive host count; headroom floor
+and Emergency retain the finite local-estimate fallback when host usage is
+unavailable or invalid.
+`tool_call` and completed `turn_end` callbacks sample only; they never abort a run
+for compaction. Continuing tool loops can delay compaction until settlement,
+even above the headroom floor or Emergency. Native host compaction and genuine
+errors/cancellations remain active. Success artifacts and continuation still
+require a matching commit; `agent_before_settle` migration is deferred.
 
 The compiler pause also clears on a new lifecycle generation, actual effective
 model/context-window or valid settings change, or trustworthy navigation outside
@@ -118,8 +116,8 @@ The full unit suite is `bun test`. The opt-in `bun run distill:e2e` suite needs
 an installed Pi runtime and includes a 120-second autonomous startup cooldown.
 `bun run distill:demo` runs one offline manual lifecycle. Neither runs as part of
 the normal unit suite. The separate opt-in `turn-boundary.e2e.ts` gate targets
-safe stop → settle → prepare → matching v14 commit → durable continuation with
-a scripted provider on Pi 0.99.2 and installed 1.0.3. See `tests/e2e/README.md`
+complete tool batches → final response → settle → prepare → matching v14 commit → durable continuation with
+a scripted provider on Pi 0.99.2 and installed 1.0.4. See `tests/e2e/README.md`
 for its isolated-parent invocation; historical suite
 receipts do not prove this timing fix, and no passing gate is claimed here.
 See [development](../README.md#development-and-documentation).

@@ -171,7 +171,7 @@ export class RpcClient {
 }
 
 /** Select an already installed host; never install or modify either runtime. */
-function selectedHost(options: RpcClientOptions): { executable: string; prefix: string[]; version?: string } {
+export function selectedHost(options: RpcClientOptions): { executable: string; prefix: string[]; version?: string } {
   const environment = { ...process.env, ...options.env };
   const root = environment.DISTILL_PI_PACKAGE;
   const expected = environment.DISTILL_PI_EXPECT_VERSION;

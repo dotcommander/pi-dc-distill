@@ -1,5 +1,5 @@
 /** Opt-in real-host turn-boundary ordering; scripted provider, no paid calls.
- * DISTILL_PI_PACKAGE / DISTILL_PI_EXPECT_VERSION select dev 0.99.2 or installed 1.0.3.
+ * DISTILL_PI_PACKAGE / DISTILL_PI_EXPECT_VERSION select dev 0.99.2 or installed 1.0.4.
  */
 import { expect, test } from "bun:test";
 import { existsSync, readFileSync, unlinkSync, writeFileSync } from "node:fs";
@@ -63,13 +63,13 @@ test("owned compiler failure pauses later urgent turns until a validated manual 
     const failure = await client.waitFor((event) => event.type === "compaction_end", 30_000, { since });
     expect(failure.aborted).toBe(true);
     await waitUntil(() => existsSync(diagnosticFile) && readFileSync(diagnosticFile, "utf8").includes("compiler-paused"));
-    expect(records(boundaryTrace).filter((entry) => entry.kind === "abort")).toHaveLength(1);
+    expect(records(boundaryTrace).filter((entry) => entry.kind === "abort")).toHaveLength(0);
     expect(records(boundaryTrace).filter((entry) => entry.kind === "compact")).toHaveLength(1);
     writeFileSync(usage, "190000"); // genuine urgent usage, above the resolved floor183616
     for (let turn = 0; turn < 3; turn++) await settle(`New ordinary user prompt ${turn}: acknowledge only.`);
     // Changed user entries and fresh urgent usage leave the pause armed. The
-    // assistant settles normally: no repeated extension abort or submission.
-    expect(records(boundaryTrace).filter((entry) => entry.kind === "abort")).toHaveLength(1);
+    // assistant settles normally: no extension abort or repeated submission.
+    expect(records(boundaryTrace).filter((entry) => entry.kind === "abort")).toHaveLength(0);
     expect(records(boundaryTrace).filter((entry) => entry.kind === "compact")).toHaveLength(1);
     const pausedDiagnostics = readFileSync(diagnosticFile, "utf8").split("\n")
       .filter((line) => line.includes("auto-check blocked reason=compiler-paused"));
@@ -82,7 +82,7 @@ test("owned compiler failure pauses later urgent turns until a validated manual 
     // Manual compaction stays reachable; its failure cannot clear the pause.
     expect((await client.request({ type: "compact" }, 45_000)).success).toBe(false);
     await settle("New prompt after failed manual compaction: acknowledge only.");
-    expect(records(boundaryTrace).filter((entry) => entry.kind === "abort")).toHaveLength(1);
+    expect(records(boundaryTrace).filter((entry) => entry.kind === "abort")).toHaveLength(0);
     expect(records(boundaryTrace).filter((entry) => entry.kind === "compact")).toHaveLength(1);
     expect(records(session).filter((entry) => entry.type === "compaction")).toHaveLength(1);
     expect(successLogs(logFile)).toHaveLength(baselineLogs);
@@ -112,7 +112,7 @@ test("owned compiler failure pauses later urgent turns until a validated manual 
     expect(final).toHaveLength(3);
     assertCurrentCompaction(final[2].summary, final[2].details);
     expect(final[2].details.autonomous).toBe(true);
-    expect(records(boundaryTrace).filter((entry) => entry.kind === "abort")).toHaveLength(2);
+    expect(records(boundaryTrace).filter((entry) => entry.kind === "abort")).toHaveLength(0);
     expect(records(boundaryTrace).filter((entry) => entry.kind === "compact")).toHaveLength(2);
     expect(records(t.traceFile).filter((entry) => entry.kind === "summary")).toHaveLength(0);
     passed = true;
@@ -122,9 +122,9 @@ test("owned compiler failure pauses later urgent turns until a validated manual 
   }
 }, 90_000);
 
-for (const scenario of ["commit", "cancel", "supersede", "expired", "backward-clock"] as const) {
-  const mode = scenario === "expired" || scenario === "backward-clock" ? "commit" : scenario;
-  test(`persisted tool batches stop before final settlement: ${scenario}`, async () => {
+for (const scenario of ["commit", "cancel", "supersede"] as const) {
+  const mode = scenario;
+  test(`all persisted tool batches finish before settled compaction: ${scenario}`, async () => {
     const t = makeTestDir(`turn-boundary-${scenario}`, { keepRecentTokens: 1024 });
     let passed = false;
     const control = join(t.dir, "boundary-barrier");
@@ -139,8 +139,6 @@ for (const scenario of ["commit", "cancel", "supersede", "expired", "backward-cl
     const client = new RpcClient({ args, cwd: t.dir, logFile: t.logFile,
       env: piEnv(t, { DISTILL_TEST_CLOCK_OFFSET: offset, DISTILL_COMPACTION_BARRIER: control,
         DISTILL_TEST_BOUNDARY_TRACE: boundaryTrace,
-        ...(scenario === "expired" ? { DISTILL_TEST_SETTLEMENT_CLOCK_SHIFT: "31001" } : {}),
-        ...(scenario === "backward-clock" ? { DISTILL_TEST_SETTLEMENT_CLOCK_SHIFT: "-1000" } : {}),
         DISTILL_FAKE_BOUNDARY_FILE: toolFile, DISTILL_FAKE_BASE: "4000", DISTILL_FAKE_STEP: "500",
         DISTILL_FAKE_POST_COMPACTION_USAGE: "5000" }) });
     try {
@@ -169,31 +167,38 @@ for (const scenario of ["commit", "cancel", "supersede", "expired", "backward-cl
       expect(records(logFile)).toHaveLength(baselineLogs);
       expect(before.filter(isContinuation)).toHaveLength(0);
       const batches = records(t.traceFile).filter((entry) => entry.kind === "batch");
-      expect(batches.map((entry) => entry.batch)).toEqual([0, 1]); // no wait for natural four-batch completion
-      expect(batches.every((entry) => entry.usageTotal < 183_616)).toBe(true); // native warn line
+      expect(batches.map((entry) => entry.batch)).toEqual([0, 1, 2, 3]);
+      expect(batches.map((entry) => entry.usageTotal)).toEqual([130000, 135000, 140000, 145000]);
+      expect(records(t.traceFile).filter((entry) => entry.kind === "boundary-final"))
+        .toMatchObject([{ usageTotal: 150000 }]);
+      const finalIndex = before.findIndex((entry) => entry.message?.role === "assistant"
+        && entry.message.content?.some((block: any) => block.type === "text"
+          && block.text === "Completed all four boundary batches."));
+      expect(finalIndex).toBeGreaterThanOrEqual(0);
+      expect(before[finalIndex].message.stopReason).toBe("stop");
+      expect(before[finalIndex].message.usage.totalTokens).toBe(150000);
+      const successfulResults = before.filter((entry) => entry.message?.role === "toolResult"
+        && entry.message.toolCallId.startsWith("boundary-"));
+      expect(successfulResults).toHaveLength(8);
+      expect(successfulResults.every((entry) => entry.message.isError === false)).toBe(true);
+      expect(successfulResults.every((entry) => before.indexOf(entry) < finalIndex)).toBe(true);
+      expect(before.filter((entry) => entry.message?.role === "assistant"
+        && ["error", "aborted"].includes(entry.message.stopReason))).toHaveLength(0);
       const diagnostics = readFileSync(join(t.agentHome, "data", "dc-distill", "diag.log"), "utf8");
-      expect(diagnostics).toContain("source=turn_end");
       expect(diagnostics).toContain("source=agent_settled");
+      expect(diagnostics).not.toContain("source=turn_end");
       const observations = records(boundaryTrace);
-      const abortIndex = observations.findIndex((entry) => entry.kind === "abort");
-      const submissionIndex = observations.findIndex((entry, index) => index > abortIndex && entry.kind === "compact");
-      expect(abortIndex).toBeGreaterThanOrEqual(0);
-      expect(submissionIndex).toBeGreaterThan(abortIndex);
-      expect(observations.filter((entry) => entry.kind === "abort")).toHaveLength(1);
+      const submissionIndex = observations.findIndex((entry) => entry.kind === "compact");
+      expect(submissionIndex).toBeGreaterThanOrEqual(0);
+      expect(observations.filter((entry) => entry.kind === "abort")).toHaveLength(0);
       expect(observations.filter((entry) => entry.kind === "compact")).toHaveLength(1);
       const submission = observations[submissionIndex];
-      const freshSamples = observations.slice(abortIndex + 1, submissionIndex)
+      expect(submission.source).toBe("agent_settled");
+      expect(submission.leaf).toBe(before[finalIndex].id);
+      const freshSamples = observations.slice(0, submissionIndex)
         .filter((entry) => entry.kind === "getContextUsage" && entry.source === "agent_settled");
       expect(freshSamples.some((entry) => Number.isFinite(entry.tokens) && entry.tokens > 0
         && entry.leaf === submission.leaf)).toBe(true);
-      if (scenario === "expired" || scenario === "backward-clock") {
-        const shiftIndex = observations.findIndex((entry) => entry.kind === "settlement-clock-shift");
-        expect(shiftIndex).toBeGreaterThan(abortIndex);
-        expect(shiftIndex).toBeLessThan(submissionIndex);
-        const age = submission.at - observations[abortIndex].at;
-        if (scenario === "expired") expect(age).toBeGreaterThan(30_000);
-        else expect(age).toBeLessThan(0);
-      }
       if (mode !== "commit") expect((await client.request({ type: "abort" })).success).toBe(true);
       writeFileSync(`${control}.release`, "release\n");
       const end = await client.waitFor((event) => event.type === "compaction_end", 30_000, { since });
@@ -217,6 +222,8 @@ for (const scenario of ["commit", "cancel", "supersede", "expired", "backward-cl
         }
       }
       const ledger = records(session);
+      expect(ledger.filter((entry) => entry.message?.role === "assistant"
+        && ["error", "aborted"].includes(entry.message.stopReason))).toHaveLength(0);
       const committed = ledger.filter((entry) => entry.type === "compaction");
       expect(committed).toHaveLength(mode === "commit" ? 2 : 1);
       const continuations = ledger.filter(isContinuation);
@@ -227,10 +234,12 @@ for (const scenario of ["commit", "cancel", "supersede", "expired", "backward-cl
         assertCurrentCompaction(current.summary, current.details);
         expect(current.details).toMatchObject({ version: 14, autonomous: true, checkpoint: { version: 2 } });
         expect(continuations[0].details.attemptId).toBe(current.details.attemptId);
-        // The standard preparation hook must anchor after any aborted assistant.
+        // Standard preparation anchors after the successful final response.
         const parent = ledger.find((entry) => entry.id === current.parentId);
         expect(parent).toBeDefined();
         expect(current.parentId).toBe(submission.leaf);
+        expect(ledger.indexOf(current)).toBeGreaterThan(finalIndex);
+        expect(ledger.indexOf(continuations[0])).toBeGreaterThan(ledger.indexOf(current));
       }
       const calls = new Map<string, number>();
       const results = new Map<string, number>();
@@ -242,11 +251,13 @@ for (const scenario of ["commit", "cancel", "supersede", "expired", "backward-cl
           results.set(entry.message.toolCallId, (results.get(entry.message.toolCallId) ?? 0) + 1);
         }
       }
+      expect(calls.size).toBe(8);
       expect([...results].sort()).toEqual([...calls].sort());
       expect([...results.values()].every((count) => count === 1)).toBe(true);
       expect(records(t.traceFile).filter((entry) => entry.kind === "summary")).toHaveLength(0);
-      // Invocation != actual work: an already-aborted next stream is permitted.
-      expect(records(t.traceFile).filter((entry) => entry.kind === "batch")).toHaveLength(2);
+      expect(records(t.traceFile).filter((entry) => entry.kind === "batch")).toHaveLength(4);
+      expect(records(t.traceFile).filter((entry) => entry.kind === "already-aborted")).toHaveLength(0);
+      expect(records(boundaryTrace).filter((entry) => entry.kind === "abort")).toHaveLength(0);
       passed = true;
     } finally {
       writeFileSync(`${control}.release`, "cleanup\n");

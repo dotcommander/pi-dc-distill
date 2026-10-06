@@ -166,7 +166,13 @@ function streamScripted(model: Model<any>, context: Context, options?: SimpleStr
         output.usage.totalTokens = 1050;
         output.stopReason = "stop";
       } else {
-        const plan = decide(context);
+        // Four successful sibling batches must finish naturally before the
+        // terminal response. Keep settlement above Auto without reaching the
+        // host's native threshold; ordinary low-usage replies would mask it.
+        const plan = boundaryFile && boundaryRun
+          ? { text: "Completed all four boundary batches.", usageTotal: 150_000 }
+          : decide(context);
+        if (boundaryFile && boundaryRun) trace({ kind: "boundary-final", usageTotal: plan.usageTotal });
         const record: TraceTurn = {
           kind: "turn",
           usageTotal: plan.usageTotal,

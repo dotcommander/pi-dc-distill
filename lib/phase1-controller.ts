@@ -33,15 +33,6 @@ export type CommitRejectionReason = "unowned-attempt" | "commit-in-flight" | "pr
   | "context-revision-changed" | "model-changed" | "settings-changed" | "snapshot-unavailable";
 export type CommitOutcome = { accepted: true } | { accepted: false; reason: CommitRejectionReason };
 type SampleStatus = "finite-positive" | "unavailable" | "invalid" | "thrown";
-interface BoundaryStop {
-  lease: SessionLease;
-  revision: number;
-  model: string;
-  settings: PiCompactionSettings;
-  turnId: string;
-  boundaryLeaf: string;
-  createdAt: number;
-}
 export type CompilerFailureStage = "source" | "compile" | "validation";
 interface CompilerPause {
   readonly ticket: AttemptTicket;
@@ -72,11 +63,8 @@ export class Phase1Controller {
   private settingsError: string | null = null;
   private sampleStatus: SampleStatus = "unavailable";
   private ticket: AttemptTicket | null = null;
-  private boundaryStop: BoundaryStop | null = null;
   private compilerPause: CompilerPause | null = null;
-  private stopInvalidated = false;
   private assessedTurnId: string | null = null;
-  private assessmentSource: "turn_end" | "agent_settled" = "agent_settled";
   private preparing = false;
   private preparationCancelled = false;
   private committing = false;
@@ -116,9 +104,7 @@ export class Phase1Controller {
     this.preparing = false;
     this.preparationCancelled = false;
     this.committing = false;
-    this.boundaryStop = null;
     this.compilerPause = null;
-    this.stopInvalidated = false;
     this.assessedTurnId = null;
     this.monitor.reset();
     this.warmupTurnsRemaining = 1;
@@ -148,7 +134,6 @@ export class Phase1Controller {
     this.contextRevision++;
     this.ownerSessionId = null;
     this.compilerPause = null;
-    this.invalidateBoundaryStop();
     Diag.setOwnerSession(null);
     this.ticket = null;
     this.preparing = false;
@@ -173,7 +158,9 @@ export class Phase1Controller {
   contextChanged(ctx: ExtensionContext): void {
     if (!this.isOwner(ctx)) return;
     this.contextRevision++;
-    this.invalidateBoundaryStop();
+    // Input may reach message_end without an input hook, before persistence.
+    // The preceding assistant cannot authorize a settlement in the new context.
+    this.ignoreSettledTurn(ctx);
     this.contextWindow = ctx.model?.contextWindow;
   }
   /** Only lifecycle branch/model changes rebase admission, never ordinary user turns. */
@@ -181,7 +168,6 @@ export class Phase1Controller {
     if (!this.isOwner(ctx)) return;
     const modelChanged = this.admissionModel !== this.modelIdentity(ctx);
     if (this.compilerPause && this.compilerPause.ticket.modelIdentity !== this.modelIdentity(ctx)) this.compilerPause = null;
-    if (modelChanged || branchChanged) this.invalidateBoundaryStop();
     this.admissionModel = this.modelIdentity(ctx);
     if (branchChanged) {
       // An unreadable/partial journal cannot prove navigation away from failure.
@@ -238,7 +224,6 @@ export class Phase1Controller {
   observeHostCompaction(ctx: ExtensionContext, entry: { id?: string }, allowPauseReset = true): void {
     if (!this.isOwner(ctx) || !entry.id) return;
     const alreadyObserved = entry.id === this.admissionCompactionId;
-    if (!alreadyObserved) this.invalidateBoundaryStop();
     try {
       const newest = ctx.sessionManager.getBranch().filter((item) => item.type === "compaction").at(-1);
       if (!newest || newest.id !== entry.id) return;
@@ -283,12 +268,6 @@ export class Phase1Controller {
       catch { this.settingsError = "unreportable settings error"; }
       this.compactionSettings = { ...DEFAULT_PI_COMPACTION_SETTINGS, enabled: false };
     }
-    if (!this.settingsValid || !this.compactionSettings.enabled || (this.boundaryStop
-      && (this.boundaryStop.settings.enabled !== this.compactionSettings.enabled
-        || this.boundaryStop.settings.reserveTokens !== this.compactionSettings.reserveTokens
-        || this.boundaryStop.settings.keepRecentTokens !== this.compactionSettings.keepRecentTokens))) {
-      this.invalidateBoundaryStop();
-    }
     return this.settingsValid;
   }
   get activeAttempt(): AttemptTicket | null { return this.ticket; }
@@ -296,7 +275,7 @@ export class Phase1Controller {
   get inFlight(): boolean { return this.ticket !== null; }
   requestAttempt(ctx: ExtensionContext): AttemptTicket | null {
     const lease = this.lease(ctx);
-    if (!lease || this.ticket || this.boundaryStop || this.compilerPause) return null;
+    if (!lease || this.ticket || this.compilerPause) return null;
     this.ticket = this.createTicket(lease, ctx, true);
     this.monitor.state.lastCompactionTime = this.clock();
     return this.ticket;
@@ -304,7 +283,6 @@ export class Phase1Controller {
   beginPreparation(ctx: ExtensionContext): AttemptTicket | null {
     const lease = this.lease(ctx);
     if (!lease || this.preparing || this.preparationCancelled || this.committing) return null;
-    this.invalidateBoundaryStop();
     this.refreshSettings(ctx);
     this.ticket ??= this.createTicket(lease, ctx, false);
     this.preparing = true;
@@ -347,7 +325,6 @@ export class Phase1Controller {
     contextWindow = this.contextWindow): boolean {
     if (!ticket.autonomous || !this.snapshotMatches(ticket, ctx) || this.compilerPause) return false;
     this.compilerPause = Object.freeze({ ticket, contextWindow, stage, code });
-    this.invalidateBoundaryStop();
     try { this.monitor.diagnostic(`compiler-paused attempt=${ticket.attemptId} generation=${ticket.lease.generation} stage=${stage} code=${code}`); }
     catch { /* Reporting must not disable the pause. */ }
     return true;
@@ -407,7 +384,6 @@ export class Phase1Controller {
   recordCommittedCompaction(tokensAfter: number, entryId?: string): void {
     this.startupCooldownExempt = false;
     this.admissionCompactionId = entryId ?? this.admissionCompactionId;
-    this.invalidateBoundaryStop();
     this.monitor.recordCompaction(tokensAfter);
   }
 
@@ -434,11 +410,12 @@ export class Phase1Controller {
     if (this.admissionModel !== this.modelIdentity(ctx)) this.admissionContextChanged(ctx);
     this.refreshSettings(ctx);
     const options = { contextWindow: ctx.model?.contextWindow ?? this.contextWindow, compaction: this.compactionSettings };
-    if (!this.settingsValid || !this.compactionSettings.enabled || this.inFlight || this.boundaryStop
-      || validateTriggerGeometry(options).length > 0 || !this.monitor.state.awaitingPostCompactionSample) return false;
+    if (!this.settingsValid || !this.compactionSettings.enabled || this.inFlight
+      || validateTriggerGeometry(options).length > 0) return false;
     if (!this.observeUsage(ctx)) return false;
     const sampledOptions = { ...options, contextWindow: this.contextWindow };
     if (validateTriggerGeometry(sampledOptions).length > 0) return false;
+    if (!this.monitor.state.awaitingPostCompactionSample) return true;
     const auto = resolveTriggerThresholds(sampledOptions).auto.effective;
     const aboveAuto = this.monitor.state.tokenEstimate >= auto;
     this.monitor.state.awaitingPostCompactionSample = false;
@@ -446,76 +423,10 @@ export class Phase1Controller {
     this.monitor.state.missedAuto = aboveAuto;
     return true;
   }
-  private invalidateBoundaryStop(): void {
-    if (this.boundaryStop) this.stopInvalidated = true;
-    this.boundaryStop = null;
-  }
-  reserveBoundaryStop(ctx: ExtensionContext, turnId: string): boolean {
-    const lease = this.lease(ctx);
-    if (!lease) return false;
-    this.refreshSettings(ctx);
-    if (!this.settingsValid || !this.compactionSettings.enabled || this.inFlight || this.boundaryStop || this.compilerPause || !turnId) return false;
-    let boundaryLeaf: string;
-    try {
-      const branch = ctx.sessionManager.getBranch();
-      if (!branch.some((entry) => entry.id === turnId)) return false;
-      boundaryLeaf = branch.at(-1)!.id;
-    } catch { return false; }
-    this.boundaryStop = { lease, revision: this.contextRevision, model: this.modelIdentity(ctx),
-      settings: { ...this.compactionSettings }, turnId, boundaryLeaf, createdAt: this.clock() };
-    this.stopInvalidated = false;
-    return true;
-  }
-  cancelBoundaryStop(): void { this.invalidateBoundaryStop(); }
-  /** Used only after an owned stop's provenance has been validated below. */
-  private isOwnedStopAbort(message: Extract<SessionEntry, { type: "message" }>["message"]): boolean {
-    if (message.role !== "assistant") return false;
-    // Reviewed pi-ai lazy setup failure (0.99.2 and 1.0.3) can wrap the
-    // native AbortError as an error-shaped assistant before invoking a stream.
-    // No error text alone proves an abort, and no produced work may pass here.
-    if ((message.stopReason !== "aborted" && (message.stopReason !== "error" || message.errorMessage !== "This operation was aborted"))
-      || !Array.isArray(message.content) || message.content.length !== 0) return false;
-    const usage = message.usage;
-    if (!usage || !usage.cost) return false;
-    const zero = (value: unknown): boolean => typeof value === "number" && Number.isFinite(value) && value === 0;
-    return [usage.input, usage.output, usage.cacheRead, usage.cacheWrite, usage.totalTokens,
-      usage.cost.input, usage.cost.output, usage.cost.cacheRead, usage.cost.cacheWrite, usage.cost.total].every(zero)
-      && (usage.reasoning === undefined || zero(usage.reasoning))
-      && (usage.cacheWrite1h === undefined || zero(usage.cacheWrite1h));
-  }
-  /** Consume atomically before reassessment; aborted host descendants are not ticket anchors. */
-  consumeBoundaryStop(ctx: ExtensionContext): "valid" | "expired" | "invalid" | "none" {
-    if (!this.isOwner(ctx)) return "none";
-    // The ordinary settled fallback owns its settings read. Only a real stop
-    // needs a snapshot refresh here; invalidated tombstones still suppress it.
-    if (this.boundaryStop) this.refreshSettings(ctx);
-    const stop = this.boundaryStop;
-    this.boundaryStop = null;
-    const invalidated = this.stopInvalidated;
-    this.stopInvalidated = false;
-    if (!stop) return invalidated ? "invalid" : "none";
-    if (!this.isCurrent(stop.lease, ctx) || stop.revision !== this.contextRevision
-      || stop.model !== this.modelIdentity(ctx) || !this.settingsValid || !this.compactionSettings.enabled
-      || this.inFlight || this.compilerPause) return "invalid";
-    try {
-      const branch = this.trustedBranch(ctx);
-      const origin = branch.findIndex((entry) => entry.id === stop.turnId);
-      const boundary = branch.findIndex((entry) => entry.id === stop.boundaryLeaf);
-      if (origin < 0 || boundary < origin || branch.slice(boundary + 1).some((entry) =>
-        entry.type !== "custom" && !(entry.type === "message" && this.isOwnedStopAbort(entry.message)))) return "invalid";
-      const now = this.clock();
-      return now < stop.createdAt || now - stop.createdAt > 30_000 ? "expired" : "valid";
-    } catch { return "invalid"; }
-  }
   ignoreTurn(ctx: ExtensionContext, turnId: string): void {
     if (this.isOwner(ctx) && turnId) this.assessedTurnId = turnId;
   }
-  assessTurn(ctx: ExtensionContext, turnId: string): CompactEvaluation | null {
-    if (!this.isOwner(ctx) || !turnId || this.assessedTurnId === turnId || this.boundaryStop) return null;
-    this.assessedTurnId = turnId;
-    return this.assess(ctx, "turn_end");
-  }
-  /** An invalid stop cannot turn a later duplicate settled callback into admission. */
+  /** Native input supersedes admission for the preceding assistant turn. */
   ignoreSettledTurn(ctx: ExtensionContext): void {
     if (!this.isOwner(ctx)) return;
     try {
@@ -532,11 +443,12 @@ export class Phase1Controller {
         if (latest.id === this.assessedTurnId) return false;
         this.assessedTurnId = latest.id;
       }
-      return true;
+      // A queued native input or continuation owns the next run. Consume this
+      // settlement identity so a duplicate cannot submit after the queue drains.
+      return !ctx.hasPendingMessages();
     } catch { return false; }
   }
-  assess(ctx: ExtensionContext, source: "turn_end" | "agent_settled" = "agent_settled", revalidate = false): CompactEvaluation | null {
-    this.assessmentSource = source;
+  assess(ctx: ExtensionContext): CompactEvaluation | null {
     if (!this.isOwner(ctx)) return null;
     if (this.admissionModel !== this.modelIdentity(ctx)) this.admissionContextChanged(ctx);
     this.refreshSettings(ctx);
@@ -548,11 +460,10 @@ export class Phase1Controller {
     if (!this.settingsValid) return block("invalid-settings");
     if (!this.compactionSettings.enabled) return block("disabled");
     if (validateTriggerGeometry(options).length > 0) return block("invalid-geometry");
-    if (this.inFlight || this.boundaryStop) return block("in-flight");
-    if (revalidate && !synced) return block("missing-pi-sync");
+    if (this.inFlight) return block("in-flight");
     const tokens = this.monitor.state.tokenEstimate;
     const urgent = Number.isFinite(tokens) && tokens >= thresholds.headroomFloor.effective;
-    if (!urgent && !revalidate && this.warmupTurnsRemaining > 0) {
+    if (!urgent && this.warmupTurnsRemaining > 0) {
       this.warmupTurnsRemaining--;
       return block("warmup");
     }
@@ -584,14 +495,14 @@ export class Phase1Controller {
       const line = ["auto-check decided",
         `tier=${tier}`,
         `reason=${reason}`,
-        `source=${this.assessmentSource}`, `policy=v${TRIGGER_POLICY_VERSION}`, `model=${model}`,
+        "source=agent_settled", `policy=v${TRIGGER_POLICY_VERSION}`, `model=${model}`,
         `session=${diagnosticSessionLabel(this.ownerSessionId)}`, `pid=${process.pid}`,
         `tokens=${this.monitor.state.tokenEstimate}`,
       ].join(" ");
       // Burst dedup: suppress consecutive identical decided lines within 5s,
       // then emit one (×N) summary when the burst ends (key change, window
       // expiry, or the next blocked line). Diagnostics are best effort.
-      const key = JSON.stringify([tier, reason, model, this.assessmentSource, this.contextWindow, TRIGGER_POLICY_VERSION,
+      const key = JSON.stringify([tier, reason, model, "agent_settled", this.contextWindow, TRIGGER_POLICY_VERSION,
         Object.entries(evaluation.thresholds).map(([band, value]) => `${band}=${value.effective}`)]);
       const now = this.clock();
       if (this.decidedBurst && this.decidedBurst.key === key && now - this.decidedBurst.firstAt < 5_000) {
@@ -616,11 +527,11 @@ export class Phase1Controller {
     try {
     this.flushDecidedBurst();
     const model = ctx.model ? `${ctx.model.provider}/${ctx.model.id}` : "unknown";
-    const key = JSON.stringify([reason, model, this.assessmentSource, this.compactionSettings, this.settingsError,
+    const key = JSON.stringify([reason, model, "agent_settled", this.compactionSettings, this.settingsError,
       this.contextWindow, thresholds, this.sampleStatus]);
     if (key === this.diagnosticKey) return;
     this.diagnosticKey = key;
-    try { this.monitor.diagnostic(["auto-check blocked", `reason=${reason}`, `source=${this.assessmentSource}`,
+    try { this.monitor.diagnostic(["auto-check blocked", `reason=${reason}`, "source=agent_settled",
       `session=${diagnosticSessionLabel(this.ownerSessionId)}`, `pid=${process.pid}`,
       `model=${model}`, `enabled=${this.compactionSettings.enabled}`,
       `reserveTokens=${this.compactionSettings.reserveTokens}`, `sample=${this.sampleStatus}`,

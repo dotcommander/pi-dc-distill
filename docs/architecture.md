@@ -256,30 +256,28 @@ Pure `assessCompaction()` returns a decision plus explicit monitor state updates
 compatibility wrappers retain the existing state-update contract.
 
 Stateful hooks guard ownership before reading usage or mutating state.
-Completed persisted `turn_end` checks evaluate admission after all sibling tool
-results. A mechanical decision reserves a bounded process-local stop intent with
-a 30-second lifetime and calls `ctx.abort()` without awaiting idle; it does not take a request ticket or
-append compaction drafts. `agent_settled` validates that intent and re-assesses
-current host usage before taking an exact-leaf ticket and calling `ctx.compact()`.
-Abort may append another assistant before settlement, so the ticket anchor must
-be captured there, not at the tool boundary. User, branch, model, session,
-settings and cancellation changes fence stale stop intents. Settled continuation
-reconciliation and fallback remain; the same completed turn does not consume
-warmup twice. Emergency bypasses warmup. Opaque tickets serialize autonomous
-requests and manual interception. Cleanup can release only the captured ticket, and concurrent
-matching commits produce effects once. Initialization rechecks its lifetime lease
-after every await; compatibility handles arriving after shutdown are disposed.
-Model/tree changes revise context without restarting initialization or warmup.
-
-Stop provenance is checked before age: owner/revision, model/settings, concurrency,
-and the origin turn and boundary leaf must still match the active branch. Only
-allowed custom entries or the strictly validated owned-abort shape may follow.
-After 30 seconds, or on a backward clock, the intent loses its old authority but
-valid provenance permits one fresh assessment regardless of delay. That assessment
-requires current finite positive host usage and current admission guards, without
-consuming warmup again or inventing a baseline; only admitted work receives a new
-exact-leaf ticket. The old intent is consumed once. Duplicate settlement cannot
-retry it, and invalid or superseded intent is ignored silently.
+`tool_call` and completed persisted `turn_end` callbacks only sample the first
+fresh post-compaction host count after assistant persistence. They do not consume
+warmup, reset cooldown, decide admission, or interrupt tools. `agent_settled` is
+the sole autonomous decision boundary for every band, including headroom floor
+and Emergency. It refreshes host usage and validates current ownership,
+settings, branch/model and concurrency guards before capturing the exact settled
+leaf and requesting standard `ctx.compact()`. Ordinary Auto/Warn admission
+requires a current finite positive host count. Headroom floor and Emergency
+preserve the existing finite local-estimate fallback when host usage is
+unavailable or invalid, and bypass ordinary admission guards. The request and
+matching host commit remain separate operations. Continuing tool loops can delay
+compaction until the agent naturally settles; the extension never aborts a run
+for compaction. Native host compaction and genuine errors/cancellations retain
+their existing paths. Unknown samples cannot establish a baseline. Ordinary
+120-second cooldown and 4,000-token growth remain intact; only a matching
+transactional host commit authorizes success effects and continuation.
+`agent_before_settle` migration is deferred.
+Opaque tickets serialize autonomous requests and manual interception. Cleanup can
+release only the captured ticket, and matching commits produce effects once.
+Initialization rechecks its lifetime lease after every await; compatibility
+handles arriving after shutdown are disposed. Model/tree changes revise context
+without restarting initialization or warmup.
 
 ### Local compiler failure pause
 
@@ -293,7 +291,7 @@ normalized to `compiler_failure`, without parsing reason text. Cancellation,
 stale snapshots, generic host callback errors, storage/reporting errors and
 post-commit artifact errors retain their existing behavior and do not arm it.
 
-The pause gates both turn-end abort and settled submission across Auto,
+The pause gates settled submission across Auto,
 missed-auto pursuit, headroom floor and Emergency. Warn steering and manual
 `/compact` remain available. Each episode notifies once and reports the structured
 `compiler-paused` admission reason; repeated reports of the same local failure are
@@ -520,13 +518,12 @@ remain independent post-commit effects.
 The summary renders once, then Pi's prospective context is rebuilt and estimated
 once. Counts are host-consistent heuristics, with capacity geometry and unknown
 capacity explicit. Metrics stay in details and committed notifications.
-Completed `turn_end` admission can stop the run at a persisted tool-batch boundary;
-validated, freshly re-assessed `agent_settled` admission requests `ctx.compact()`
-separately with a settled exact-leaf ticket. `agent_before_settle` migration is
-deferred. Package version 0.1.7 includes this change; publication does not activate
-or update installed version 0.1.6. The focused opt-in runtime
-gate is described in `tests/e2e/README.md`, not established by historical suite
-receipts; no passing turn-boundary check is claimed here.
+Completed `turn_end` and `tool_call` callbacks sample only. Autonomous decisions
+and exact-leaf tickets belong exclusively to `agent_settled`; compaction requests
+never abort the run. Continuing tool loops can delay compaction. The focused
+opt-in runtime gate in `tests/e2e/README.md` requires all tools and the successful
+final response before matching v14 commit and continuation. Historical suite
+receipts do not establish this behavior.
 
 Continuation intent creation, submission, and observed work are separate states.
 Later genuine user input or manual/foreign compaction supersedes older intent.

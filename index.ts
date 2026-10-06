@@ -143,8 +143,8 @@ function cancellation(error: unknown): boolean {
     || (error instanceof Error && ["AbortError", "LoaderAbortError"].includes(error.name)); } catch { return false; }
 }
 
-function checkAutonomousCompaction(runtime: DistillRuntime, ctx: ExtensionContext, revalidate = false): void {
-  const evaluation = runtime.assess(ctx, "agent_settled", revalidate);
+function checkAutonomousCompaction(runtime: DistillRuntime, ctx: ExtensionContext): void {
+  const evaluation = runtime.assess(ctx);
   const decision = evaluation?.decision;
   if (!decision) return;
   if (decision.tier === Tier.Warn) {
@@ -633,7 +633,7 @@ function createExtension(pi: ExtensionAPI, options: DistillExtensionOptions = {}
       },
 
       input: async (event, ctx) => {
-        if (isOwner(runtime, ctx) && event.source !== "extension") runtime.cancelBoundaryStop();
+        if (isOwner(runtime, ctx) && event.source !== "extension") runtime.ignoreSettledTurn(ctx);
       },
 
       tool_call: async (event, ctx) => {
@@ -666,33 +666,13 @@ function createExtension(pi: ExtensionAPI, options: DistillExtensionOptions = {}
           return;
         }
         runtime.samplePostCompaction(ctx);
-        const decision = runtime.assessTurn(ctx, event.messageEntryId)?.decision;
-        if (!decision) return;
-        if (decision.tier === Tier.Warn) {
-          Notify.toLLM(runtime.pi, WARN_STEER_PROMPT, { customType: "dc-distill-warn",
-            details: { reason: decision.reason }, deliverAs: "steer", triggerTurn: false });
-          return;
-        }
-        if (!runtime.reserveBoundaryStop(ctx, event.messageEntryId)) return;
-        // Do not await idle here, and do not capture a request ticket until
-        // settlement: the host may append an aborted assistant after this turn.
-        try { ctx.abort(); } catch { runtime.cancelBoundaryStop(); }
       },
 
-      // Settled submission is a separate host operation, with its own fresh
-      // sample and exact leaf anchor. Only the journal owns continuation sends.
+      // All autonomous bands are decided after the host run settles, using
+      // current usage and an exact leaf anchor. Only the journal owns continuation sends.
       agent_settled: async (_event, ctx) => {
-        const stop = runtime.consumeBoundaryStop(ctx);
-        if (stop === "invalid") {
-          runtime.ignoreSettledTurn(ctx);
-          return;
-        }
         if (reconcileContinuation(runtime, ctx)) return;
-        if (stop === "valid" || stop === "expired") {
-          runtime.ignoreSettledTurn(ctx);
-          checkAutonomousCompaction(runtime, ctx, true);
-        }
-        else if (runtime.shouldAssessSettled(ctx)) checkAutonomousCompaction(runtime, ctx);
+        if (runtime.shouldAssessSettled(ctx)) checkAutonomousCompaction(runtime, ctx);
       },
 
       session_tree: async (_event, ctx) => {

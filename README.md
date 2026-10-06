@@ -95,7 +95,11 @@ Expand the compaction card to inspect the summary. A manual compaction
 leaves choosing the next action to you. Automatic compaction runs on its
 own: as context approaches Pi's limits, the monitor checks after each turn
 settles (Pi's `agent_settled` boundary) and can queue a continuation
-message once the summary commits. The observer and `ctx.compact()` are separate operations. A later user turn or manual/foreign compaction supersedes an older continuation.
+message once the summary commits. `tool_call` and completed `turn_end` callbacks
+sample usage only. Every autonomous band waits for natural settlement, so
+continuing tool loops can delay compaction. The extension never aborts a run for
+compaction; native success cards and genuine errors/cancellations remain.
+The observer and `ctx.compact()` are separate operations. A later user turn or manual/foreign compaction supersedes an older continuation.
 
 ## Optional features
 

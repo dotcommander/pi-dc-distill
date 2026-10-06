@@ -32,16 +32,16 @@ Pi appends the matching compaction.
 
 ## Automatic compaction
 
-The monitor checks completed persisted `turn_end` boundaries after every sibling
-tool result in the batch. A mechanical decision requests a non-awaiting stop;
-`agent_settled` validates it and re-checks fresh host usage before requesting Pi's
-standard compaction with a settled exact-leaf ticket. The settled fallback remains
-without consuming warmup twice; tools are never interrupted mid-batch.
-An expired stop (over 30 seconds or a backward clock) loses its prior authority.
-If ownership and active-branch provenance still match, settlement consumes it
-once and makes a fresh assessment requiring current finite positive host usage
-and current guards before taking a new ticket. Duplicate settlement cannot retry;
-superseded or unprovable stops remain silent.
+Automatic admission runs only at Pi's `agent_settled` boundary, for every band
+including headroom floor and Emergency. All tool batches and the final assistant
+response finish naturally before settled admission can authorize the exact-leaf
+ticket and standard compaction request. Ordinary Auto/Warn requires current
+finite positive host usage; headroom floor and Emergency preserve the existing
+finite local-estimate fallback when host usage is unavailable or invalid.
+Continuing tool loops can
+delay compaction until settlement; dc-distill never aborts a run for compaction.
+`tool_call` and completed `turn_end` callbacks are sample-only bookkeeping.
+Native host compaction and genuine errors/cancellations keep their normal paths.
 
 It normally attempts compaction at the lower of 120,000 tokens or 20,000 tokens
 before Pi's native trigger. A startup warmup, 120-second cooldown, in-flight
@@ -60,13 +60,13 @@ the first fresh host count after assistant persistence, before long tools finish
 it does not reset cooldown, consume warmup or trigger compaction. Unknown counts
 leave sampling pending; neither raw assistant usage nor `details.tokensAfter`
 establishes the baseline. User, branch, model, settings and cancellation changes
-invalidate stale stop intents. See
+fence autonomous submissions. See
 [trigger policy](settings.md#trigger-policy) for exact geometry and small-window
 fallbacks. Above the auto boundary, blocked attempts are recorded in `diag.log`.
 
 A non-cancelled local compiler failure in an owned autonomous attempt pauses all
 Mechanical admission, including headroom floor, Emergency and missed-auto
-pursuit. It prevents repeated automatic stops and submissions; Warn steering and
+pursuit. It prevents repeated automatic submissions; Warn steering and
 manual `/compact` remain available. The pause notifies once and records
 `compiler-paused` in diagnostics. Ordinary prompts, new input, failed manual
 attempts, invalid settings, missing branch evidence and mismatched commits do not
@@ -82,8 +82,8 @@ hidden `dc-distill-continuation` turn while idle. Its delivery state is recorded
 in the session ledger so startup and tree changes can recover an unanswered
 continuation. Manual compaction leaves the next move to you.
 
-Package version 0.1.7 includes this timing change; installed version 0.1.6 retains
-the earlier settlement-only checks. Publication does not update an installed
+Package version 0.1.8 includes the natural-settlement timing described above.
+Publication does not update an installed
 package or activate it in an existing session. The focused opt-in
 scripted-host gate is documented in `tests/e2e/README.md`; no passing runtime
 check is claimed.

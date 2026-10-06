@@ -86,7 +86,7 @@ describe("dc-distill entrypoint", () => {
     );
 
     expect(source).not.toMatch(/Notify\.user\(\s*(?:`|"|')/);
-    expect(source).toMatch(/runtime\.assess\(ctx,\s*["']agent_settled["'],\s*revalidate\)/);
+    expect(source).toContain("runtime.assess(ctx)");
   });
 
   test("does not register compact-status as a slash command", () => {

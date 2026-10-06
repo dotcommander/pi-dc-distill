@@ -33,10 +33,10 @@ unpublished version and an account with maintainer access. Confirm that the
 specific version shown by `npm pkg get version` has not already been published:
 
 ```bash
-npm view pi-dc-distill@0.1.7 version --registry=https://registry.npmjs.org/
+npm view pi-dc-distill@0.1.8 version --registry=https://registry.npmjs.org/
 ```
 
-Replace `0.1.7` with the proposed version for subsequent releases. npm does not
+Replace `0.1.8` with the proposed version for subsequent releases. npm does not
 allow reuse of a published name/version pair, even after unpublishing.
 
 Run the checks and inspect the package contents:
@@ -75,8 +75,8 @@ for private source repositories.
 Verify the exact released version, then install it in Pi:
 
 ```bash
-npm view pi-dc-distill@0.1.7 version dist.integrity --registry=https://registry.npmjs.org/
-pi install npm:pi-dc-distill@0.1.7
+npm view pi-dc-distill@0.1.8 version dist.integrity --registry=https://registry.npmjs.org/
+pi install npm:pi-dc-distill@0.1.8
 ```
 
 For normal installation after publication, use `pi install npm:pi-dc-distill`.

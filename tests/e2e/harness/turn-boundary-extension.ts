@@ -1,5 +1,5 @@
 /** Test-only clock/input seams and observations; no admission or host-event bypass. */
-import { appendFileSync, existsSync, readFileSync, writeFileSync } from "node:fs";
+import { appendFileSync, existsSync, readFileSync } from "node:fs";
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { createDistillExtension } from "../../../index.ts";
 
@@ -12,8 +12,6 @@ export default function turnBoundaryExtension(pi: ExtensionAPI): void {
   const record = (entry: object) => {
     if (trace) appendFileSync(trace, `${JSON.stringify({ at: clock(), ...entry })}\n`);
   };
-  let stopped = false;
-  let shifted = false;
   // Register before the real extension, as in the preparation-fault harness.
   // A replaced predecessor is an actual typed source failure; projection
   // agreement can reject this input before its malformed Unicode is decoded.
@@ -28,20 +26,12 @@ export default function turnBoundaryExtension(pi: ExtensionAPI): void {
       if (property !== "on") return Reflect.get(target, property);
       return ((type: string, handler: (event: any, ctx: any) => unknown) => {
         (target.on as any)(type, async (event: any, ctx: any) => {
-          if (type === "agent_settled" && stopped && !shifted
-            && process.env.DISTILL_TEST_SETTLEMENT_CLOCK_SHIFT !== undefined) {
-            shifted = true;
-            const shift = Number(process.env.DISTILL_TEST_SETTLEMENT_CLOCK_SHIFT);
-            writeFileSync(file, String(Number(readFileSync(file, "utf8")) + shift));
-            record({ kind: "settlement-clock-shift", shift });
-          }
           const instrumented = new Proxy(ctx, {
             get(context, key) {
               const value = Reflect.get(context, key);
               if (key === "abort" || key === "compact" || key === "getContextUsage") {
                 return (...args: unknown[]) => {
                   const result = value.apply(context, args);
-                  if (key === "abort") stopped = true;
                   record({ kind: String(key), source: type, leaf: context.sessionManager.getLeafId(),
                     ...(key === "getContextUsage" ? { tokens: result?.tokens } : {}) });
                   return result;

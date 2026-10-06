@@ -45,19 +45,23 @@ retained fields, not general semantic equivalence.
 
 ## Triggering is separate from interception
 
-The early monitor evaluates completed persisted `turn_end` boundaries after all
-sibling tool results. A mechanical decision reserves a process-local stop intent
-and requests non-awaiting abort. `agent_settled` validates the intent and
-re-assesses fresh host usage before taking the existing exact-leaf ticket and
-requesting `ctx.compact()`; settled fallback remains without double warmup.
-A stop older than 30 seconds or affected by a backward clock loses its old
-authority. Valid owner/revision, model/settings, concurrency and active-branch
-provenance still permit one fresh assessment regardless of delay. The origin turn
-and boundary leaf must remain, followed only by allowed custom entries or a
-strictly validated owned abort. Current finite positive host usage and admission
-guards are required; no new baseline or second warmup is inferred. Admission
-precedes a new exact-leaf ticket, and the consumed intent cannot be retried by
-duplicate settlement. Superseded or unprovable intent remains silent.
+`tool_call` and completed persisted `turn_end` callbacks only sample the first
+fresh post-compaction host count after assistant persistence. They do not consume
+warmup, reset cooldown, decide admission, or interrupt tools. `agent_settled` is
+the sole autonomous decision boundary for every band, including headroom floor
+and Emergency. It refreshes host usage and validates current ownership,
+settings, branch/model and concurrency guards before capturing the exact settled
+leaf and requesting standard `ctx.compact()`. Ordinary Auto/Warn admission
+requires a current finite positive host count. Headroom floor and Emergency
+preserve the existing finite local-estimate fallback when host usage is
+unavailable or invalid, and bypass ordinary admission guards. The request and
+matching host commit remain separate operations. Continuing tool loops can delay
+compaction until the agent naturally settles; the extension never aborts a run
+for compaction. Native host compaction and genuine errors/cancellations retain
+their existing paths. Unknown samples cannot establish a baseline. Ordinary
+120-second cooldown and 4,000-token growth remain intact; only a matching
+transactional host commit authorizes success effects and continuation.
+`agent_before_settle` migration is deferred.
 The before-compact hook decides **what replaces** the default summary when Pi
 prepares an attempt: manual, native threshold or native overflow. Early
 triggering is not required for native-summary replacement.
@@ -81,13 +85,13 @@ assistant persistence, without interrupting tools or deciding admission. Unknown
 counts leave the baseline pending; raw assistant usage and `details.tokensAfter`
 are not substitutes. Ordinary admission still requires the 120-second cooldown
 and 4,000-token growth from an above-auto baseline. Ownership, settings/latch,
-user/branch/model changes and cancellation invalidate stale stop intents. Only
+user/branch/model changes and cancellation fence autonomous submissions. Only
 a matching host commit authorizes success effects and durable continuation;
 `agent_before_settle` migration remains deferred. See
 [settings](settings.md) for host geometry and optional features.
 
 A non-cancelled local compiler failure during an owned autonomous attempt pauses
-Mechanical admission before further turn-end aborts or settled submissions,
+Mechanical admission before further settled submissions,
 including urgent bands and missed-auto pursuit. Source construction, compilation
 and result validation (including protected overflow) qualify; cancellation and
 host, storage or reporting failures do not. Warn steering and manual `/compact`

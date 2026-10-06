@@ -172,7 +172,7 @@ continuation only for an autonomous attempt. Continuation delivery is durable: t
 released in `finally`. Historical v8–v13 autonomous continuations remain readable alongside v14.
 
 A non-cancelled local compiler failure in a still-owned autonomous attempt pauses
-Mechanical admission process-locally before both turn-end abort and settled
+Mechanical admission process-locally before settled
 submission, including Auto, missed-auto pursuit, headroom floor and Emergency.
 Source construction, compilation and returned-result validation (including
 protected capacity overflow) carry structured stage/code identity; an untyped
@@ -378,30 +378,26 @@ retains v5–14 entries (integrity checks for v10–14), and continuation recove
 accepts v8–14. Rollback requires a v14-aware reader or must refuse lossy
 carry-forward.
 
-`tool_call` samples the first fresh post-compaction host count after the
-assistant is persisted, without interrupting tools, consuming warmup, or resetting
-cooldown. Completed persisted `turn_end` checks run after all sibling results;
-a mechanical decision reserves a bounded process-local stop intent with a
-30-second lifetime and requests non-awaiting `ctx.abort()`, not a compaction ticket. `agent_settled` validates the
-intent and re-assesses current host usage before taking the existing exact-leaf
-ticket and requesting `ctx.compact()` as a separate operation. Ownership,
-settings/latch, user/branch/model changes and cancellation fence stale intents;
-turn-end plus settled fallback must not consume warmup twice. Validate ownership,
-revision, model/settings, concurrency and active-branch provenance before age:
-the origin turn and boundary leaf must remain on the branch, followed only by
-allowed custom entries or the strictly validated owned-abort shape. A stop older
-than 30 seconds or affected by a backward clock loses its old authority. Consume
-it once; if provenance remains valid, make one fresh assessment regardless of
-delay, requiring a current finite positive host count and current admission
-guards, with no second warmup consumption or invented baseline. Only successful
-admission can obtain a new exact-leaf ticket. Unknown usage cannot compact;
-invalid or superseded stops remain silent and duplicate settlement cannot retry.
-Unknown samples cannot establish a baseline; ordinary 120-second cooldown and 4,000-token growth
-remain intact. Only a matching transactional host commit authorizes continuation.
-The settled fallback remains; migration to `agent_before_settle` is deferred.
-Package version 0.1.7 includes this fix; publication does not update installed npm
-0.1.6 or activate it in an existing session. The opt-in turn-boundary runtime gate is
-documented in `tests/e2e/README.md`; no passing receipt is implied.
+`tool_call` and completed persisted `turn_end` callbacks only sample the first
+fresh post-compaction host count after assistant persistence. They do not consume
+warmup, reset cooldown, decide admission, or interrupt tools. `agent_settled` is
+the sole autonomous decision boundary for every band, including headroom floor
+and Emergency. It refreshes host usage and validates current ownership,
+settings, branch/model and concurrency guards before capturing the exact settled
+leaf and requesting standard `ctx.compact()`. Ordinary Auto/Warn admission
+requires a current finite positive host count. Headroom floor and Emergency
+preserve the existing finite local-estimate fallback when host usage is
+unavailable or invalid, and bypass ordinary admission guards. The request and
+matching host commit remain separate operations. Continuing tool loops can delay
+compaction until the agent naturally settles; the extension never aborts a run
+for compaction. Native host compaction and genuine errors/cancellations retain
+their existing paths. Unknown samples cannot establish a baseline. Ordinary
+120-second cooldown and 4,000-token growth remain intact; only a matching
+transactional host commit authorizes success effects and continuation.
+`agent_before_settle` migration is deferred.
+The opt-in natural-settlement runtime gate is documented in
+`tests/e2e/README.md`; historical receipts do not establish this behavior.
+
 Trigger policy version 3 names
 the 120,000 cap, 20,000 lead, headroom floor, and missed-auto pursuit.
 Positive ordered boundaries are required;

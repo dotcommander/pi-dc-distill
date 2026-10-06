@@ -76,85 +76,8 @@ describe("Phase 1 current-sample policy", () => {
   });
 });
 
-describe("sample-only and boundary-stop admission", () => {
-  test("owned native setup-abort errors are accepted only with empty content and finite zero usage", () => {
-    const abortMessage = () => ({ role: "assistant", content: [], stopReason: "error",
-      errorMessage: "This operation was aborted", usage: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0,
-        totalTokens: 0, cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 } } });
-    const mutations: Array<[string, (message: any) => void]> = [
-      ["native shape", () => {}],
-      ["arbitrary error", (m) => { m.errorMessage = "Provider failed"; }],
-      ["similar abort text", (m) => { m.errorMessage = "This operation was aborted."; }],
-      ["text", (m) => { m.content = [{ type: "text", text: "work" }]; }],
-      ["empty text block", (m) => { m.content = [{ type: "text", text: "" }]; }],
-      ["thinking", (m) => { m.content = [{ type: "thinking", thinking: "work" }]; }],
-      ["tool call", (m) => { m.content = [{ type: "toolCall", id: "x", name: "read", arguments: {} }]; }],
-      ["missing usage", (m) => { delete m.usage; }],
-      ["missing output", (m) => { delete m.usage.output; }],
-      ["unknown output", (m) => { m.usage.output = null; }],
-      ["NaN output", (m) => { m.usage.output = NaN; }],
-      ["infinite output", (m) => { m.usage.output = Infinity; }],
-      ...["input", "output", "cacheRead", "cacheWrite", "totalTokens", "reasoning", "cacheWrite1h"].map((key): [string, (m: any) => void] =>
-        [`positive ${key}`, (m) => { m.usage[key] = 1; }]),
-      ["missing cost", (m) => { delete m.usage.cost; }],
-      ["positive cost", (m) => { m.usage.cost.total = 1; }],
-    ];
-    for (const [name, mutate] of mutations) {
-      const f = fixture();
-      const branch: any[] = [{ type: "message", id: "turn", message: { role: "assistant", stopReason: "toolUse" } }];
-      f.stub.ctx.sessionManager.getBranch = () => branch;
-      expect(f.controller.reserveBoundaryStop(f.stub.ctx, "turn")).toBe(true);
-      const message = abortMessage();
-      mutate(message);
-      branch.push({ type: "message", id: "native-abort", parentId: "turn", message });
-      expect(f.controller.consumeBoundaryStop(f.stub.ctx)).toBe(name === "native shape" ? "valid" : "invalid");
-      expect(f.controller.consumeBoundaryStop(f.stub.ctx)).toBe("none");
-      if (name === "native shape") {
-        const ticket = f.controller.requestAttempt(f.stub.ctx)!;
-        expect(ticket.branchAnchor).toBe("native-abort");
-        branch.push({ type: "custom", id: "changed-leaf" });
-        expect(f.controller.snapshotMatches(ticket, f.stub.ctx)).toBe(false);
-      }
-    }
-    const noStop = fixture();
-    noStop.stub.ctx.sessionManager.getBranch = () => [{ type: "message", id: "native-abort", message: abortMessage() }] as any;
-    expect(noStop.controller.consumeBoundaryStop(noStop.stub.ctx)).toBe("none");
-  });
-  test("stop consumption reads settings only for a real intent and preserves mismatch/tombstone fencing", () => {
-    const f = fixture();
-    const branch: any[] = [{ type: "message", id: "turn", message: { role: "assistant", stopReason: "toolUse" } }];
-    f.stub.ctx.sessionManager.getBranch = () => branch;
-    let reads = 0;
-    let selected = 0;
-    let reserveTokens = 16_384;
-    f.stub.pi.getSettings = () => {
-      reads++;
-      return { compaction: { enabled: true, modelOverrides: {
-        get "fake/one"() { selected++; return { reserveTokens }; },
-      } } } as any;
-    };
-    expect(f.controller.consumeBoundaryStop(f.stub.ctx)).toBe("none");
-    expect(reads).toBe(0);
-    expect(selected).toBe(0);
-    expect(f.controller.reserveBoundaryStop(f.stub.ctx, "turn")).toBe(true);
-    const reservedReads = reads;
-    const reservedSelections = selected;
-    reserveTokens = 20_000;
-    expect(f.controller.consumeBoundaryStop(f.stub.ctx)).toBe("invalid");
-    expect(reads).toBe(reservedReads + 1);
-    expect(selected).toBe(reservedSelections + 1);
-    expect(f.controller.consumeBoundaryStop(f.stub.ctx)).toBe("none");
-    expect(reads).toBe(reservedReads + 1);
-    expect(f.controller.reserveBoundaryStop(f.stub.ctx, "turn")).toBe(true);
-    const cancelledReads = reads;
-    const cancelledSelections = selected;
-    f.controller.cancelBoundaryStop();
-    expect(f.controller.consumeBoundaryStop(f.stub.ctx)).toBe("invalid");
-    expect(f.controller.consumeBoundaryStop(f.stub.ctx)).toBe("none");
-    expect(reads).toBe(cancelledReads);
-    expect(selected).toBe(cancelledSelections);
-  });
-  test("fresh sampling is once-only, preserves warmup/time and requires real growth and cooldown", () => {
+describe("sample-only admission", () => {
+  test("sampling refreshes usage, captures baseline once and preserves warmup and cooldown", () => {
     const f = fixture();
     f.controller.recordCommittedCompaction(1);
     const time = f.controller.monitor.state.lastCompactionTime;
@@ -172,8 +95,11 @@ describe("sample-only and boundary-stop admission", () => {
     expect(f.controller.warmupTurnsRemaining).toBe(1);
     expect(f.controller.monitor.state.lastCompactionTime).toBe(time);
     f.usage(134_000);
-    expect(f.controller.samplePostCompaction(f.stub.ctx)).toBe(false);
+    expect(f.controller.samplePostCompaction(f.stub.ctx)).toBe(true);
     expect(f.controller.monitor.state.repeatBaselineTokens).toBe(130_000);
+    expect(f.controller.monitor.state.tokenEstimate).toBe(134_000);
+    expect(f.controller.warmupTurnsRemaining).toBe(1);
+    expect(f.controller.monitor.state.lastCompactionTime).toBe(time);
     f.controller.assess(f.stub.ctx); // warmup
     expect(f.controller.assess(f.stub.ctx)?.blockedBy).toBe("cooldown");
     f.advance();
@@ -198,45 +124,6 @@ describe("sample-only and boundary-stop admission", () => {
     expect(f.controller.monitor.state.repeatBaselineTokens).toBeNull();
     expect(f.controller.monitor.state.missedAuto).toBe(false);
   });
-  test("a stopped boundary consumes once and leaves exact settled ticket identity intact", () => {
-    const f = fixture();
-    const branch: any[] = [{ type: "message", id: "turn", message: { role: "assistant", stopReason: "toolUse" } }];
-    f.stub.ctx.sessionManager.getBranch = () => branch;
-    expect(f.controller.reserveBoundaryStop(f.stub.ctx, "turn")).toBe(true);
-    expect(f.controller.reserveBoundaryStop(f.stub.ctx, "turn")).toBe(false);
-    expect(f.controller.requestAttempt(f.stub.ctx)).toBeNull();
-    branch.push({ type: "message", id: "aborted", parentId: "turn", message: { role: "assistant", stopReason: "aborted", content: [],
-      usage: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, totalTokens: 0,
-        cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 } } } });
-    expect(f.controller.consumeBoundaryStop(f.stub.ctx)).toBe("valid");
-    expect(f.controller.consumeBoundaryStop(f.stub.ctx)).toBe("none");
-    const ticket = f.controller.requestAttempt(f.stub.ctx)!;
-    expect(ticket.branchAnchor).toBe("aborted");
-    branch.push({ type: "custom", id: "later" });
-    expect(f.controller.snapshotMatches(ticket, f.stub.ctx)).toBe(false);
-  });
-  for (const invalidation of ["user", "model", "tree", "disabled", "invalid", "reserve", "cancel", "manual", "foreign"]) {
-    test(`${invalidation} prevents stale stop admission`, () => {
-      const f = fixture();
-      const branch: any[] = [{ type: "message", id: "turn", timestamp: new Date(500_000).toISOString(),
-        parentId: null, message: { role: "assistant", stopReason: "toolUse" } }];
-      f.stub.ctx.sessionManager.getBranch = () => branch;
-      expect(f.controller.reserveBoundaryStop(f.stub.ctx, "turn")).toBe(true);
-      if (invalidation === "user") f.controller.contextChanged(f.stub.ctx);
-      if (invalidation === "model") f.stub.ctx.model = { ...f.stub.ctx.model!, id: "changed" };
-      if (invalidation === "tree") f.controller.admissionContextChanged(f.stub.ctx, true);
-      if (invalidation === "disabled") f.setSettings({ compaction: { enabled: false } });
-      if (invalidation === "invalid") f.setSettings({ compaction: { reserveTokens: -1 } });
-      if (invalidation === "reserve") f.setSettings({ compaction: { enabled: true, reserveTokens: 20_000 } });
-      if (invalidation === "cancel") f.controller.cancelBoundaryStop();
-      if (invalidation === "manual") f.controller.beginPreparation(f.stub.ctx);
-      if (invalidation === "foreign") {
-        branch.push({ type: "compaction", id: "foreign", timestamp: new Date(900_000).toISOString() });
-        f.controller.observeHostCompaction(f.stub.ctx, { id: "foreign" });
-      }
-      expect(f.controller.consumeBoundaryStop(f.stub.ctx)).toBe("invalid");
-    });
-  }
 });
 
 describe("Phase 1 lifecycle and tickets", () => {
@@ -557,47 +444,36 @@ describe("policy v3 restored admission", () => {
   });
 });
 
-describe("expired stops retain provenance, never stale admission authority", () => {
-  for (const time of [1_030_001, 1_900_000, 999_999]) {
-    test(`clock ${time} consumes an expired intent once and captures a fresh leaf ticket`, () => {
-      const f = fixture();
-      const branch: any[] = [{ type: "message", id: "origin", parentId: null, message: { role: "assistant" } }];
-      f.stub.ctx.sessionManager.getBranch = () => branch;
-      expect(f.controller.reserveBoundaryStop(f.stub.ctx, "origin")).toBe(true);
-      branch.push({ type: "custom", id: "settled-marker", parentId: "origin" });
-      f.clock(time);
-      expect(f.controller.consumeBoundaryStop(f.stub.ctx)).toBe("expired");
-      expect(f.controller.consumeBoundaryStop(f.stub.ctx)).toBe("none");
-      f.usage(200_000);
-      const warmup = f.controller.warmupTurnsRemaining;
-      expect(f.controller.assess(f.stub.ctx, "agent_settled", true)?.decision?.tier).toBe(Tier.Mechanical);
-      expect(f.controller.warmupTurnsRemaining).toBe(warmup);
-      expect(f.controller.requestAttempt(f.stub.ctx)?.branchAnchor).toBe("settled-marker");
-    });
-  }
-  for (const corruption of ["missing-origin", "missing-boundary", "broken-link", "duplicate-id", "new-user", "partial-abort"]) {
-    test(`expired ${corruption} is invalid before age is considered`, () => {
-      const f = fixture();
-      const branch: any[] = [{ type: "message", id: "origin", parentId: null, message: { role: "assistant" } },
-        { type: "custom", id: "boundary", parentId: "origin" }];
-      f.stub.ctx.sessionManager.getBranch = () => branch;
-      expect(f.controller.reserveBoundaryStop(f.stub.ctx, "origin")).toBe(true);
-      f.advance();
-      if (corruption === "missing-origin") branch[0].id = "other";
-      if (corruption === "missing-boundary") branch.pop();
-      if (corruption === "broken-link") branch.push({ type: "custom", id: "next", parentId: "other" });
-      if (corruption === "duplicate-id") branch.push({ type: "custom", id: "boundary", parentId: "boundary" });
-      if (corruption === "new-user") branch.push({ type: "message", id: "next", parentId: "boundary", message: { role: "user", content: "new request" } });
-      if (corruption === "partial-abort") branch.push({ type: "message", id: "next", parentId: "boundary", message: { role: "assistant", stopReason: "aborted", content: [{ type: "text", text: "work" }] } });
-      expect(f.controller.consumeBoundaryStop(f.stub.ctx)).toBe("invalid");
-    });
-  }
-  test("even an urgent stale estimate cannot replace a positive current sample on reassessment", () => {
+describe("settlement identity and exact-leaf tickets", () => {
+  test("one completed assistant is assessed once after all sibling results", () => {
     const f = fixture();
-    f.controller.monitor.state.tokenEstimate = 250_000;
-    f.usage(null);
-    expect(f.controller.assess(f.stub.ctx, "agent_settled", true)).toBeNull();
-    expect(f.diagnostics.at(-1)).toContain("reason=missing-pi-sync");
+    const branch: any[] = [{ type: "message", id: "assistant", parentId: null, message: { role: "assistant", stopReason: "toolUse" } },
+      { type: "message", id: "first-result", parentId: "assistant", message: { role: "toolResult" } },
+      { type: "message", id: "last-result", parentId: "first-result", message: { role: "toolResult" } }];
+    f.stub.ctx.sessionManager.getBranch = () => branch;
+    f.usage(200_000);
+    expect(f.controller.shouldAssessSettled(f.stub.ctx)).toBe(true);
+    expect(f.controller.assess(f.stub.ctx)?.decision?.tier).toBe(Tier.Mechanical);
+    expect(f.controller.shouldAssessSettled(f.stub.ctx)).toBe(false);
+    const ticket = f.controller.requestAttempt(f.stub.ctx)!;
+    expect(ticket.branchAnchor).toBe("last-result");
+    branch.push({ type: "custom", id: "later", parentId: "last-result" });
+    expect(f.controller.snapshotMatches(ticket, f.stub.ctx)).toBe(false);
+  });
+  for (const stopReason of ["error", "aborted"]) {
+    test(stopReason + " assistant cannot authorize settlement admission", () => {
+      const f = fixture();
+      f.stub.ctx.sessionManager.getBranch = () => [{ type: "message", id: "failed", message: { role: "assistant", stopReason, content: [], errorMessage: "This operation was aborted" } }] as any;
+      f.usage(250_000);
+      expect(f.controller.shouldAssessSettled(f.stub.ctx)).toBe(false);
+      expect(f.controller.shouldAssessSettled(f.stub.ctx)).toBe(false);
+    });
+  }
+  test("a failed completion fences an otherwise normal assistant identity", () => {
+    const f = fixture();
+    f.stub.ctx.sessionManager.getBranch = () => [{ type: "message", id: "failed", message: { role: "assistant", stopReason: "toolUse" } }] as any;
+    f.controller.ignoreTurn(f.stub.ctx, "failed");
+    expect(f.controller.shouldAssessSettled(f.stub.ctx)).toBe(false);
   });
 });
 
@@ -646,14 +522,13 @@ describe("local automatic compiler pause", () => {
     expect(f.controller.hasCompilerPause()).toBe(false);
   });
   for (const band of [130_000, 180_000, 200_000, 250_000, 185_000]) {
-    test(`pause gates mechanical ${band} before both stop and submission`, () => {
+    test(`pause gates mechanical ${band} at settlement and submission`, () => {
       const f = pausedFixture();
       f.advance();
       f.controller.warmupTurnsRemaining = 0;
       f.controller.monitor.state.missedAuto = true;
       f.usage(band);
       expect(f.controller.assess(f.stub.ctx)).toBeNull();
-      expect(f.controller.reserveBoundaryStop(f.stub.ctx, "anchor")).toBe(false);
       expect(f.controller.requestAttempt(f.stub.ctx)).toBeNull();
       expect(f.controller.monitor.state.missedAuto).toBe(true);
       expect(f.diagnostics.at(-1)).toContain("reason=compiler-paused");

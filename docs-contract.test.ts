@@ -10,8 +10,8 @@ import setupDistill from "./index.ts";
  * Compares what the documentation promises (slash commands, autonomous
  * trigger boundaries) against what the extension actually registers on a live
  * Pi API surface. Drift has included nonexistent slash commands and stale
- * settle-only timing claims. Sampling, batch-stop admission and settled
- * compaction submission are distinct contracts. Runtime is authoritative.
+ * timing claims. Sampling and settlement admission are distinct contracts.
+ * Runtime is authoritative.
  */
 
 const root = import.meta.dir;
@@ -110,7 +110,7 @@ describe("runtime-contract drift audit", () => {
     const source = await readFile(join(root, "index.ts"), "utf8");
     const controller = await readFile(join(root, "lib", "phase1-controller.ts"), "utf8");
     const toolCall = source.match(/tool_call: async[\s\S]*?(?=\n      turn_end:)/)?.[0];
-    const turnEnd = source.match(/turn_end: async[\s\S]*?(?=\n      \/\/ Settled submission)/)?.[0];
+    const turnEnd = source.match(/turn_end: async[\s\S]*?(?=\n      (?:\/\/[^\n]*\n      )*agent_settled:)/)?.[0];
     const settled = source.match(/agent_settled: async[\s\S]*?(?=\n      session_tree:)/)?.[0];
     expect(toolCall).toBeDefined();
     expect(turnEnd).toBeDefined();
@@ -119,16 +119,13 @@ describe("runtime-contract drift audit", () => {
     expect(toolCall).not.toMatch(/ctx\.(?:abort|compact)\(|runtime\.(?:requestAttempt|assessTurn|reserveBoundaryStop)\(/);
     expect(turnEnd).toContain('event.outcome !== "completed"');
     expect(turnEnd).toContain("event.toolResultEntryIds");
-    expect(turnEnd).toContain("runtime.assessTurn(ctx, event.messageEntryId)");
-    expect(turnEnd).toContain("runtime.reserveBoundaryStop(ctx, event.messageEntryId)");
-    expect(turnEnd).toContain("ctx.abort()");
-    expect(turnEnd).not.toMatch(/await\s+ctx\.abort\(|ctx\.compact\(|runtime\.requestAttempt\(|checkAutonomousCompaction\(/);
-    expect(settled).toContain("runtime.consumeBoundaryStop(ctx)");
-    expect(settled).toContain('stop === "valid"');
-    expect(settled).toContain("checkAutonomousCompaction(runtime, ctx, true)");
+    expect(turnEnd).toContain("runtime.samplePostCompaction(ctx)");
+    expect(turnEnd).not.toMatch(/ctx\.(?:abort|compact)\(|runtime\.(?:requestAttempt|assess|assessTurn|reserveBoundaryStop)\(|checkAutonomousCompaction\(/);
+    expect(settled).toContain("checkAutonomousCompaction(runtime, ctx)");
     expect(settled).toContain("runtime.shouldAssessSettled(ctx)");
-    expect(source).toContain('runtime.assess(ctx, "agent_settled", revalidate)');
-    expect(source).toMatch(/runtime\.assess\(ctx, "agent_settled", revalidate\)[\s\S]*?runtime\.requestAttempt\(ctx\)[\s\S]*?ctx\.compact\(/);
+    expect(source).toMatch(/runtime\.assess\(ctx\)[\s\S]*?runtime\.requestAttempt\(ctx\)[\s\S]*?ctx\.compact\(/);
+    expect(source).not.toContain("ctx.abort()");
+    expect(controller).not.toMatch(/BoundaryStop|boundaryStop|isOwnedStopAbort|revalidate/);
     expect(controller).toMatch(/samplePostCompaction\(ctx:[\s\S]*?if \(!this\.observeUsage\(ctx\)\) return false/);
     expect(controller).toMatch(/assess\(ctx:[\s\S]*?const synced = this\.observeUsage\(ctx\)/);
 
@@ -139,17 +136,17 @@ describe("runtime-contract drift audit", () => {
     const agent = await readFile(join(root, "AGENTS.md"), "utf8");
     for (const text of [usage, architecture, algorithm, agent]) {
       for (const boundary of ["tool_call", "turn_end", "agent_settled"]) expect(text).toContain(boundary);
-      expect(text).toMatch(/sample-only|Sample-only|without interrupting tools/);
-      expect(text).toContain("exact-leaf");
-      expect(text).toMatch(/re-assess|re-check/);
+      expect(text).toMatch(/sample-only|Sample-only|do not consume/);
+      expect(text).toMatch(/exact-leaf|exact\s+settled\s+leaf/);
+      expect(text).toContain("agent_settled");
       expect(text).toContain("120-second");
       expect(text).toContain("4,000");
       expect(text).toMatch(/Unknown|unknown/);
-      expect(text).toMatch(/warmup twice|double warmup/);
+      expect(text).toMatch(/warmup/);
     }
-    expect(architecture).toContain("does not take a request ticket");
-    expect(architecture).toMatch(/30-second lifetime/);
-    expect(agent).toMatch(/agent_before_settle` is deferred/);
+    expect(architecture).toMatch(/sole\s+autonomous\s+decision\s+boundary/);
+    expect(architecture).not.toMatch(/30-second lifetime|owned-abort shape|stop intent/);
+    expect(agent).toMatch(/agent_before_settle\x60\s+(?:migration\s+)?is\s+deferred/);
     expect(docs.find((doc) => doc.file.endsWith("README.md"))?.text).toContain("agent_settled");
   });
 
