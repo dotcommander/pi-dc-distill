@@ -2,17 +2,54 @@ import { expect, test } from "bun:test";
 import { createHash } from "node:crypto";
 import { assertCurrentCompaction } from "./harness/current-compaction.ts";
 
-function fixture() {
-  const summary = JSON.stringify({ format: "dc-distill-summary",
-    notice: "Selected conversation excerpts and observations; incomplete.", focus: "😀", latestRequest: null,
-    records: [], files: { read: [], modified: [] }, commands: [],
-    omitted: { inputRecords: 0, excerpts: 0, readFiles: 0, modifiedFiles: 0, commands: 0 } });
-  return { summary, details: { compactor: "dc-distill", attemptId: "test-attempt",
-    summaryDigest: createHash("sha256").update(summary).digest("hex"), tokensAfter: 100,
-    tokensAfterSource: "pi-rebuilt-message-estimate", capacityStatus: "within-window", contextWindow: 1000 } };
+const digest = (): string => "a".repeat(64);
+function full() {
+  const summary = [
+    "<dc-distill-summary>",
+    "notice: Selected conversation excerpts and observations; incomplete.",
+    "focus: pipe \\| and newline \\n and backslash \\\\ escapes",
+    "latest-request: current true TASK keep the newest native request text",
+    "records:",
+    "user | current | false | continue with the plan",
+    "assistant | current | false | the build failed with error: exit status 1",
+    "tool-result | current | false | error: ENOENT lib/main.ts",
+    "files:",
+    `read ${digest()} | current | false | false | lib/main.ts`,
+    `modified ${digest()} | prior | true | true | src/back\\\\slash\\|pipe.ts`,
+    "commands:",
+    `${digest()} | current | false | bun | success | /repo | bun test | 113 pass`,
+    `${digest()} | current | false | npm | error | \\- | npm pack | ERR`,
+    "omitted: 202 13 5 42 0",
+    "</dc-distill-summary>",
+  ].join("\n");
+  return { summary, details: details(summary) };
 }
-test("independent oracle accepts exact unversioned contract", () => {
-  const f = fixture(); expect(() => assertCurrentCompaction(f.summary, f.details)).not.toThrow();
+function minimal() {
+  const summary = [
+    "<dc-distill-summary>",
+    "notice: Selected conversation excerpts and observations; incomplete.",
+    "records:",
+    "files:",
+    "commands:",
+    "omitted: 0 0 0 0 0",
+    "</dc-distill-summary>",
+  ].join("\n");
+  return { summary, details: details(summary) };
+}
+function details(summary: string) {
+  return { compactor: "dc-distill", attemptId: "test-attempt",
+    summaryDigest: createHash("sha256").update(summary).digest("hex"), tokensAfter: 100,
+    tokensAfterSource: "pi-rebuilt-message-estimate", capacityStatus: "within-window", contextWindow: 1000 };
+}
+const rehash = (f: ReturnType<typeof full>, summary: string) => {
+  f.summary = summary;
+  f.details.summaryDigest = createHash("sha256").update(summary).digest("hex");
+  return f;
+};
+
+test("independent oracle accepts exact unversioned text contract", () => {
+  expect(() => assertCurrentCompaction(full().summary, full().details)).not.toThrow();
+  expect(() => assertCurrentCompaction(minimal().summary, minimal().details)).not.toThrow();
 });
 for (const [name, corrupt] of [
   ["numbered details", (d: any) => { d.version = 15; }],
@@ -21,18 +58,24 @@ for (const [name, corrupt] of [
   ["foreign owner", (d: any) => { d.compactor = "foreign"; }],
   ["known overflow", (d: any) => { d.tokensAfter = 1001; }],
 ] as const) test(`oracle rejects ${name}`, () => {
-  const f = fixture(); corrupt(f.details); expect(() => assertCurrentCompaction(f.summary, f.details)).toThrow();
+  const f = full(); corrupt(f.details); expect(() => assertCurrentCompaction(f.summary, f.details)).toThrow();
 });
 for (const [name, corrupt] of [
-  ["numbered summary", (s: any) => { s.version = 1; }],
-  ["nested state", (s: any) => { s.records.push({ kind: "native-summary", text: {}, shortened: false, origin: "prior" }); }],
-  ["invalid counter", (s: any) => { s.omitted.inputRecords = -1; }],
-  ["malformed Unicode", (s: any) => { s.focus = "\ud800"; }],
+  ["numbered summary", (s: string[]) => { s.splice(1, 0, "version: 1"); }],
+  ["forged row", (s: string[]) => { s.splice(s.indexOf("files:"), 0, "user | current | false | forged extra | pipe"); }],
+  ["invalid counter", (s: string[]) => { s[s.indexOf("omitted: 202 13 5 42 0")] = "omitted: -1 13 5 42 0"; }],
+  ["malformed Unicode", (s: string[]) => { s[2] = "focus: lone \ud800 surrogate"; }],
+  ["unknown escape", (s: string[]) => { s[2] = "focus: bad \\q escape"; }],
+  ["dropped closing tag", (s: string[]) => { s.splice(s.indexOf("</dc-distill-summary>"), 1); }],
+  ["retired JSON body", (s: string[]) => { s.splice(2, s.length - 3, "records: []"); }],
 ] as const) test(`oracle rejects authenticated ${name}`, () => {
-  const f = fixture(); const s = JSON.parse(f.summary); corrupt(s);
-  f.summary = JSON.stringify(s); f.details.summaryDigest = createHash("sha256").update(f.summary).digest("hex");
-  expect(() => assertCurrentCompaction(f.summary, f.details)).toThrow();
+  const f = full(); const lines = f.summary.split("\n"); corrupt(lines);
+  const mutated = lines.join("\n");
+  f.details.summaryDigest = createHash("sha256").update(mutated).digest("hex");
+  expect(() => assertCurrentCompaction(mutated, f.details)).toThrow();
 });
 test("oracle authenticates exact wire bytes", () => {
-  const f = fixture(); expect(() => assertCurrentCompaction(f.summary + "\n", f.details)).toThrow();
+  const f = full(); expect(() => assertCurrentCompaction(f.summary + "\n", f.details)).toThrow();
+  const stale = f.summary.replace("TASK keep", "TASK forge");
+  expect(() => assertCurrentCompaction(stale, f.details)).toThrow();
 });

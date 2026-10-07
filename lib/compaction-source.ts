@@ -1,10 +1,10 @@
 import { isDeepStrictEqual } from "node:util";
 import { buildSessionProjection, type SessionEntry } from "./sdk.ts";
-import { decodeSummary } from "./compiler/budget-formatter.ts";
+import { decodeSummary, salvageSummary } from "./compiler/budget-formatter.ts";
 import { normalizeMessage } from "./compiler/normalizer.ts";
 import { certifyIdlessPairs } from "./compiler/tool-tracker.ts";
 import { CompactionInputError } from "./compiler/errors.ts";
-import { checkAbort, digest, isRecord, MAX_INPUT_BYTES, MAX_SOURCE_MESSAGES, validateStructuralInput } from "./compiler/helpers.ts";
+import { checkAbort, digest, isRecord, MAX_INPUT_BYTES, MAX_SOURCE_MESSAGES, MAX_TEXT_CODE_POINTS, shorten, validateStructuralInput } from "./compiler/helpers.ts";
 import type { CompactionSource, NormalizedRecord } from "./compiler/types.ts";
 
 export type { CompactionSource } from "./compiler/types.ts";
@@ -60,10 +60,8 @@ export function buildCompactionSource(input: CompactionSourceInput): CompactionS
     if (count === messages.length) partitionExists = true;
   }
   if (!partitionExists) throw new CompactionInputError("inconsistent_projection: partition splits a projected entry");
-  for (const { sourceEntry } of projected) {
-    if (sourceEntry.type === "custom" && (sourceEntry.customType === "dc-distill-handoff" || sourceEntry.customType === "dc-shrink-handoff"))
-      throw new CompactionInputError("active legacy handoff requires the old extension or a fresh session", "incompatible_summary");
-  }
+  // Legacy handoff custom entries are state-only: they project no messages and
+  // simply contribute nothing, never blocking compaction.
   const session = { id: input.sessionId, cwd: input.cwd, timestamp: input.timestamp ?? new Date(0).toISOString() };
   validateStructuralInput(session);
   let predecessor: CompactionSource["predecessor"] = null;
@@ -71,16 +69,31 @@ export function buildCompactionSource(input: CompactionSourceInput): CompactionS
   if (prior?.type === "compaction") {
     validateStructuralInput(prior);
     const details = isRecord(prior.details) ? prior.details : undefined;
-    if (details?.compactor === "dc-distill" || details?.compactor === "dc-shrink") {
-      if (details.compactor !== "dc-distill" || "version" in details || typeof details.summaryDigest !== "string" || digest(prior.summary) !== details.summaryDigest)
-        throw new CompactionInputError("incompatible or unauthenticated owned predecessor", "incompatible_summary");
-      predecessor = decodeSummary(prior.summary);
-    } else nativePrior.push({ kind: "native-summary", text: prior.summary });
+    // Admission is opportunistic and never required: an exactly authenticated
+    // current-template summary carries full structured state; a damaged owned
+    // summary is row-mined so partial corruption drops rows, not the compaction;
+    // everything else degrades to attributed text without historical decoding.
+    if (details?.compactor === "dc-distill" && !("version" in details)
+      && typeof details.summaryDigest === "string" && digest(prior.summary) === details.summaryDigest) {
+      try { predecessor = decodeSummary(prior.summary); } catch { predecessor = null; }
+    }
+    if (predecessor === null && details?.compactor === "dc-distill") predecessor = salvageSummary(prior.summary);
+    if (predecessor === null) nativePrior.push({ kind: "native-summary", text: prior.summary });
   }
   const groups = [...messages, ...prefix].map(message => {
     checkAbort(input.signal);
-    if (!isRecord(message)) throw new CompactionInputError("invalid preparation message");
-    return normalizeMessage(message);
+    try {
+      if (!isRecord(message)) throw new CompactionInputError("invalid preparation message");
+      return normalizeMessage(message);
+    } catch (error) {
+      if (!(error instanceof CompactionInputError)) throw error;
+      // Resilience: a malformed message degrades to bounded attributed text
+      // mined from whatever is recoverable instead of cancelling compaction.
+      let mined = "";
+      try { mined = JSON.stringify(message) ?? ""; } catch { mined = ""; }
+      const reduced = shorten(mined || String(message), MAX_TEXT_CODE_POINTS);
+      return [{ kind: "custom", text: reduced.text }] as NormalizedRecord[];
+    }
   });
   certifyIdlessPairs(groups.flat());
   // Count ambiguity before admitting whole messages. Dropping one occurrence

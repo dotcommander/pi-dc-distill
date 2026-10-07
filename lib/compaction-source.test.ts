@@ -1,4 +1,5 @@
 import { describe, expect, test } from "bun:test";
+import { encodeSummary } from "./compiler/budget-formatter.ts";
 import { buildCompactionSource, type CompactionSourceInput } from "./compaction-source.ts";
 import { digest, MAX_INPUT_BYTES, SUMMARY_FORMAT, SUMMARY_NOTICE } from "./compiler/helpers.ts";
 import type { DcDistillSummary } from "./compiler/types.ts";
@@ -61,13 +62,20 @@ describe("preparation-owned typed input", () => {
       { role: "compactionSummary", summary: "native" }];
     expect(buildCompactionSource(packet(messages)).records.map(record => record.kind)).toEqual(["custom", "branch-summary", "native-summary"]);
   });
-  test("only current authenticated owned predecessor shape is admitted", () => {
-    const summary = JSON.stringify(document());
+  test("owned predecessor admission is opportunistic and never blocks", () => {
+    const summary = encodeSummary(document());
     expect(buildCompactionSource(withPrior(summary, { compactor: "dc-distill", summaryDigest: digest(summary) })).predecessor).toEqual(document());
-    expect(() => buildCompactionSource(withPrior(summary, { compactor: "dc-distill", summaryDigest: "0".repeat(64) }))).toThrow("unauthenticated");
-    expect(() => buildCompactionSource(withPrior(summary, { compactor: "dc-distill", version: 15, summaryDigest: digest(summary) }))).toThrow("incompatible");
-    const incompatible = JSON.stringify({ ...document(), version: 1 });
-    expect(() => buildCompactionSource(withPrior(incompatible, { compactor: "dc-distill", summaryDigest: digest(incompatible) }))).toThrow("shape");
+    // Digest mismatch on well-formed template text: rows are still mined, never fatal.
+    expect(buildCompactionSource(withPrior(summary, { compactor: "dc-distill", summaryDigest: "0".repeat(64) })).predecessor).toEqual(document());
+    // Damaged owned template text: valid rows survive, damaged rows drop.
+    const damaged = summary.split("\n").slice(0, 5).join("\n");
+    const salvaged = buildCompactionSource(withPrior(damaged, { compactor: "dc-distill", version: 15 }));
+    expect(salvaged.predecessor?.records.map(row => row.text)).toEqual(["prior observation"]);
+    // Old JSON formats mine nothing and degrade to attributed text.
+    const legacy = JSON.stringify(document());
+    const degraded = buildCompactionSource(withPrior(legacy, { compactor: "dc-distill", version: 15 }));
+    expect(degraded.predecessor).toBeNull();
+    expect(degraded.records[0]).toEqual({ kind: "native-summary", text: legacy });
   });
   test("native and foreign summaries remain attributed text", () => {
     const native = buildCompactionSource(withPrior("native prose"));
@@ -75,12 +83,12 @@ describe("preparation-owned typed input", () => {
     expect(native.records[0]).toEqual({ kind: "native-summary", text: "native prose" });
     expect(buildCompactionSource(withPrior("foreign prose", { compactor: "other" })).records[0].text).toBe("foreign prose");
   });
-  test("refuses active old handoffs including retained entries", () => {
+  test("active old handoffs contribute nothing and never block", () => {
     for (const customType of ["dc-distill-handoff", "dc-shrink-handoff"]) {
       const input = packet([{ role: "user", content: "discarded" }]);
       (input.branchEntries as unknown as Record<string, unknown>[]).push({ type: "custom", id: "handoff", parentId: "entry-1",
         timestamp: "2026-01-01", customType, data: { handoff: "legacy" } });
-      expect(() => buildCompactionSource(input)).toThrow("active legacy handoff");
+      expect(buildCompactionSource(input).records.map(record => record.text)).toEqual(["discarded"]);
     }
   });
   test("superseded incompatible state and handoffs outside projection do not block", () => {

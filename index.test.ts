@@ -3,6 +3,7 @@ import { createDistillExtension } from "./index.ts";
 import { createStubCtx, simulate } from "./tests/harness/fake-pi.ts";
 import { withPreparationBranch } from "./tests/harness/preparation-fixture.ts";
 import { buildSessionContext, estimateTokens } from "./lib/sdk.ts";
+import { decodeSummary } from "./lib/compiler/budget-formatter.ts";
 import { sha256Hex } from "./lib/sha256.ts";
 
 type Stub = ReturnType<typeof createStubCtx>;
@@ -40,7 +41,7 @@ describe("single deterministic host compiler", () => {
       const event = request(stub, reason);
       const result = await prepare(stub, event);
       expect(result.cancel).toBeUndefined();
-      expect(JSON.parse(result.compaction.summary).latestRequest.text).toBe("Latest native request");
+      expect(decodeSummary(result.compaction.summary).latestRequest!.text).toBe("Latest native request");
       expect(Object.keys(result.compaction.details).sort()).toEqual([
         "attemptId", "capacityStatus", "compactor", "summaryDigest", "tokensAfter", "tokensAfterSource",
       ].sort());
@@ -144,14 +145,14 @@ describe("single deterministic host compiler", () => {
       { ...oldTail, parentId: "assistant" });
     baseline.sessionBranch.splice(0, baseline.sessionBranch.length, ...event.branchEntries);
     const original = await prepare(baseline, event);
-    expect(JSON.parse(original.compaction.summary).records.length).toBeGreaterThan(0);
+    expect(decodeSummary(original.compaction.summary).records.length).toBeGreaterThan(0);
     const tight = await host();
     tight.sessionBranch.splice(0, tight.sessionBranch.length, ...event.branchEntries);
     (tight.ctx as any).model = { provider: "fixture", id: "fixture", contextWindow: original.compaction.details.tokensAfter - 50 };
     const reduced = await prepare(tight, event);
     expect(reduced.compaction).toBeDefined();
-    expect(JSON.parse(reduced.compaction.summary).records).toEqual([]);
-    expect(JSON.parse(reduced.compaction.summary).omitted.excerpts).toBe(1);
+    expect(decodeSummary(reduced.compaction.summary).records).toEqual([]);
+    expect(decodeSummary(reduced.compaction.summary).omitted.excerpts).toBe(1);
     expect(reduced.compaction.details.tokensAfter).toBeLessThanOrEqual((tight.ctx as any).model.contextWindow);
     const impossible = await host();
     (impossible.ctx as any).model = { provider: "fixture", id: "fixture", contextWindow: 1 };
@@ -269,7 +270,7 @@ describe("single deterministic host compiler", () => {
     const event = request(stub);
     event.customInstructions = "Native focus";
     const result = await prepare(stub, event);
-    expect(JSON.parse(result.compaction.summary).focus).toBe("Native focus");
+    expect(decodeSummary(result.compaction.summary).focus).toBe("Native focus");
     const malformed = request(stub);
     malformed.customInstructions = "\ud800";
     expect(await prepare(stub, malformed)).toEqual({ cancel: true });

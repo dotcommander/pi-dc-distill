@@ -2,7 +2,7 @@
 
 Deterministic local context compaction for [Pi](https://github.com/earendil-works/pi), with no LLM calls.
 
-Pi owns compaction triggering, cut selection, entry append, and context rebuilding. dc-distill intercepts every Pi compaction request, including manual, threshold, overflow, and unfamiliar request reasons. It returns selected conversation excerpts, file observations, and recorded command outcomes as bounded JSON. These observations are incomplete: they do not establish task readiness, verification, or authorization, and they do not describe current filesystem truth.
+Pi owns compaction triggering, cut selection, entry append, and context rebuilding. dc-distill intercepts every Pi compaction request, including manual, threshold, overflow, and unfamiliar request reasons. It returns selected conversation excerpts, file observations, and recorded command outcomes as a bounded text summary. These observations are incomplete: they do not establish task readiness, verification, or authorization, and they do not describe current filesystem truth.
 
 ## Install and cut over
 
@@ -20,7 +20,7 @@ Use Pi's native command:
 /compact preserve the parser discussion and command outcomes
 ```
 
-Pi's native compaction card contains the JSON summary. Compaction instructions become the summary's bounded focus. The extension registers no commands or tools and has no extension configuration.
+Pi's native compaction card contains the compaction summary. Compaction instructions become the summary's bounded focus. The extension registers no commands or tools and has no extension configuration.
 
 ## Summary contract
 

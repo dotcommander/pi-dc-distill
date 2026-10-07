@@ -10,16 +10,16 @@ An owned predecessor is accepted only when the current shape and exact summary d
 
 ## One current summary
 
-The compact JSON has these fixed keys, in this order:
+The summary is one text document framed by `<dc-distill-summary>` and `</dc-distill-summary>`, with fixed sections in this order:
 
 ```text
-format, notice, focus, latestRequest, records, files, commands, omitted
+notice, focus, latest-request, records, files, commands, omitted
 ```
 
-`format` is `dc-distill-summary`. `notice` is `Selected conversation excerpts and observations; incomplete.` There is no schema version or historical format ladder.
+Each section renders escaped single-line rows; `\`, `|`, carriage returns, and newlines are escaped so a row never breaks. There is no schema version or historical format ladder.
 
-- `focus`: current native compaction instructions, or null.
-- `latestRequest`: newest admitted native user text, otherwise the predecessor field, or null. Its duplicate excerpt is excluded. It remains attributed context.
+- `focus`: current native compaction instructions, or absent.
+- `latest-request`: newest admitted native user text, otherwise the predecessor field, or absent. Its duplicate excerpt is excluded. It remains attributed context.
 - `records`: chronological selected excerpts with `kind`, `text`, `shortened`, and `origin`. Kinds are user, assistant, tool-call, tool-result, bash, custom, branch-summary, and native-summary.
 - `files`: `read` and `modified` arrays. Each fact has `identityDigest`, `path`, `shortened`, `createCapable`, and `origin`.
 - `commands`: facts with `identityDigest`, `runner`, `command`, `cwd`, `status`, `result`, `shortened`, and `origin`.
@@ -48,7 +48,7 @@ No numbered hash domains remain. Display shortening cannot change identity or pa
 
 ## Serialized budgets
 
-The operating target is 8,192 Unicode code points; the hard serialized limit is 65,536. Count JSON escaping and framing. Never truncate completed JSON or split Unicode code points.
+The operating target is 8,192 Unicode code points; the hard serialized limit is 65,536. Count text escaping and framing. Never truncate a completed row or split Unicode code points.
 
 | Field | Display bound |
 | --- | --- |

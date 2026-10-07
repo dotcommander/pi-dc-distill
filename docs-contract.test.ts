@@ -41,6 +41,23 @@ describe("current product documentation contract", () => {
     expect(usage).toContain("| `/compact [instructions]` | Pi's native");
   });
 
+  test("package publication files cover the documented production allowlist", async () => {
+    const architecture = await readFile(join(root, "docs/architecture.md"), "utf8");
+    const sentence = architecture.split("\n").find((line) => line.startsWith("The production allowlist is"));
+    expect(sentence).toBeDefined();
+    const modules: string[] = [];
+    for (const match of sentence!.matchAll(/`([^`]+)`/g)) {
+      const part = match[1]!;
+      const brace = part.match(/^(.*)\/\{([^}]+)\}\.ts$/);
+      if (brace) for (const name of brace[2]!.split(",")) modules.push(`${brace[1]}/${name}.ts`);
+      else if (part.endsWith(".ts")) modules.push(part);
+    }
+    expect(modules.length).toBeGreaterThan(0);
+    const pkg = JSON.parse(await readFile(join(root, "package.json"), "utf8"));
+    for (const module of modules)
+      expect(pkg.files as string[], `${module} missing from package.json files`).toContain(module);
+  });
+
   test("active docs cannot promise retired public entrypoints or numbered schemas", async () => {
     for (const doc of await documents()) {
       expect(doc.text, doc.file).not.toMatch(/details\.version|checkpointSections|compileSessionJsonl\(|compileSessionFile\(|request-candidate-v\d|schema-v\d/);

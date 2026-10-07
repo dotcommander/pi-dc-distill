@@ -4,9 +4,9 @@ One deterministic compiler serves every Pi compaction request. Pi owns triggerin
 
 ## Production graph
 
-The production allowlist is `index.ts`, `lib/{compaction-source,local-compact,sdk,unicode,sha256}.ts`, and `lib/compiler/{types,normalizer,tool-tracker,budget-formatter,helpers,errors}.ts`.
+The production allowlist is `index.ts`, `lib/{compaction-source,local-compact,sdk,unicode,sha256}.ts`, and `lib/compiler/{types,normalizer,tool-tracker,budget-formatter,helpers,signal,errors}.ts`.
 
-`compaction-source` validates the active projection and builds typed normalized records from `event.preparation` and active `event.branchEntries`. `normalizer` preserves structural and Unicode checks. `tool-tracker` extracts full-identity observations with exact pairing before display shortening. `budget-formatter` builds and evicts complete JSON rows. `local-compact` provides the single current codec and compiler. SDK and digest helpers support the host boundary. No live session-file reads or diagnostic file compiler remain.
+`compaction-source` validates the active projection and builds typed normalized records from `event.preparation` and active `event.branchEntries`. `normalizer` preserves structural and Unicode checks. `tool-tracker` extracts full-identity observations with exact pairing before display shortening. `budget-formatter` builds and evicts complete text rows. `local-compact` provides the single current codec and compiler. SDK and digest helpers support the host boundary. No live session-file reads or diagnostic file compiler remain.
 
 The architecture check traverses the surviving entrypoint and preserves compiler purity. Root-only package exports and the explicit publication allowlist keep retired modules and internal APIs out of the published surface. SDK pins and dependency versions remain unchanged.
 
@@ -22,7 +22,7 @@ Pi 1.0.4 routes informational notifications through chat, which its later `compa
 
 ## Boundaries and cutover
 
-There is one unversioned fixed-key JSON format. Only current-shape, exact-digest owned predecessor state is admitted; active legacy handoffs and incompatible owned summaries cancel. There are no compatibility ladders or migrations. Native and foreign summaries remain attributed text; superseded history outside the effective projection does not block. Predecessor records flatten with prior origin and are never reparsed as fresh tools.
+There is one unversioned fixed-section text format. Only current-shape, exact-digest owned predecessor state is admitted; active legacy handoffs and incompatible owned summaries cancel. There are no compatibility ladders or migrations. Native and foreign summaries remain attributed text; superseded history outside the effective projection does not block. Predecessor records flatten with prior origin and are never reparsed as fresh tools.
 
 Use fresh sessions for this extension. Existing incompatible sessions use the old extension. Preserve historical session files, receipts, stored data, and `.work`. Protected task/evidence preservation is deliberately retired; observations are incomplete and establish no readiness, verification, or authorization.
 

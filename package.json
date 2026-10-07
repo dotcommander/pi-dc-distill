@@ -35,6 +35,7 @@
     "lib/compiler/tool-tracker.ts",
     "lib/compiler/budget-formatter.ts",
     "lib/compiler/helpers.ts",
+    "lib/compiler/signal.ts",
     "lib/compiler/errors.ts",
     "README.md",
     "LICENSE"
