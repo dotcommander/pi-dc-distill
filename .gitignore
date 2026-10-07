@@ -2,4 +2,3 @@ node_modules
 .DS_Store
 .work/
 out/
-!docs/assets/distill-before-after.svg

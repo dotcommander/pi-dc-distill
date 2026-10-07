@@ -71,8 +71,11 @@ describe("current product documentation contract", () => {
     expect(readme).toContain("Existing incompatible sessions must use the old extension");
     expect(readme).toContain("Stored data and existing session files are preserved");
     const index = await readFile(join(root, "docs/README.md"), "utf8");
-    for (const archive of ["docs/specs/", "docs/adr/", "docs/compiler-benchmark.md", "docs/assets/"]) expect(index).toContain(archive);
+    expect(index).toContain(".work/docs-archive/");
+    for (const moved of ["docs/specs/", "docs/adr/", "docs/compiler-benchmark.md", "docs/assets/"]) expect(index).not.toContain(moved);
     expect(index).toContain("excluded from the current product contract and package publication");
+    const archivedAdr = await readFile(join(root, ".work/docs-archive/adr/0002-remove-vendored-framework.md"), "utf8");
+    expect(archivedAdr).toContain("# ADR 0002");
     expect(await readlink(join(root, "CLAUDE.md"))).toBe("AGENTS.md");
   });
 });
