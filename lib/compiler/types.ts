@@ -37,30 +37,38 @@ export interface DcDistillSummary {
   commands: CommandFact[];
   omitted: OmissionCounts;
 }
-/** Full observations before display shortening. Never reconstruct calls from prior display text. */
-export interface NormalizedRecord {
-  kind: RecordKind;
-  text: string;
-  nativeUserText?: boolean;
-  name?: string;
+/** Full observations before display shortening. Tool pairing is certified before bounding. */
+export type ToolPairing =
+  | { state: "identified"; id: string }
+  | { state: "certified-idless"; key: number }
+  | { state: "unpairable" };
+interface RecordText { text: string; textShortened?: boolean }
+export interface ToolCallRecord extends RecordText {
+  kind: "tool-call";
+  name: string;
+  args: Record<string, unknown>;
   callId?: string;
-  /** Full-input ID-less pairing certificate; null forbids pairing, undefined permits direct-source fallback. */
-  idlessPairingKey?: number | null;
-  args?: Record<string, unknown>;
-  isError?: boolean;
-  command?: string;
-  output?: string;
-  exitCode?: number;
-  cancelled?: boolean;
-  cwd?: string;
+  pairing: ToolPairing;
 }
+export interface ToolResultRecord extends RecordText {
+  kind: "tool-result";
+  name: string;
+  callId?: string;
+  pairing: ToolPairing;
+  isError?: boolean;
+}
+export type NormalizedRecord =
+  | (RecordText & { kind: "user"; nativeUserText?: boolean })
+  | (RecordText & { kind: "assistant" | "custom" | "branch-summary" | "native-summary" })
+  | ToolCallRecord | ToolResultRecord
+  | (RecordText & { kind: "bash"; command: string; output: string; exitCode?: number; cancelled?: boolean; cwd?: string });
 export interface CompactionSource {
   records: NormalizedRecord[];
   predecessor: DcDistillSummary | null;
   /** Includes ambiguity in validated records dropped by whole-record input bounding. */
   duplicateCallIds: readonly string[];
   omittedInputRecords: number;
-  session: { id: string; cwd: string; timestamp: string };
+  session: { cwd: string };
 }
 export interface ObservationFacts {
   files: { read: FileFact[]; modified: FileFact[] };
@@ -70,7 +78,6 @@ export interface CompileOptions { focus?: string | null; signal?: AbortSignal }
 export interface LocalCompileResult { summary: string; document: DcDistillSummary }
 export interface CompactionDetails {
   compactor: "dc-distill";
-  attemptId: string;
   summaryDigest: string;
   tokensAfter: number;
   tokensAfterSource: "pi-rebuilt-message-estimate";

@@ -1,48 +1,70 @@
 # pi-dc-distill
 
-Deterministic local context compaction for [Pi](https://github.com/earendil-works/pi), with no LLM calls.
+Deterministic local context compaction for [Pi](https://github.com/earendil-works/pi): one extension that replaces Pi's LLM compactor with a compiler, so every compaction request is answered with zero model calls. If anything inside the extension fails, the compaction cancels instead of falling back to an LLM summarizer — that failure boundary is the first thing to know. The first run is two commands away, below.
 
-Pi owns compaction triggering, cut selection, entry append, and context rebuilding. dc-distill intercepts every Pi compaction request, including manual, threshold, overflow, and unfamiliar request reasons. It returns selected conversation excerpts, file observations, and recorded command outcomes as a bounded text summary. These observations are incomplete: they do not establish task readiness, verification, or authorization, and they do not describe current filesystem truth.
+## Install and first compaction
 
-## Install and cut over
+Prerequisite: Pi with Node.js 22.19.0 or newer (the package's `engines` floor). Pi packages execute extension code, so review the source before installing. Then:
 
 ```bash
 pi install npm:pi-dc-distill
 ```
 
-Pi loads the TypeScript extension directly. Node.js 22.19.0 or newer is required; Bun is used for development only. Do not load the old and new extensions together.
+Pi loads the TypeScript source directly (`"pi": { "extensions": ["./index.ts"] }`); there is nothing to build. Start a fresh session with this extension. Existing incompatible sessions must use the old extension — there is no migration or historical format decoder. Stored data and existing session files are preserved; this extension writes no state of its own.
 
-**Start a fresh session with this extension.** Existing incompatible sessions must use the old extension. Owned summaries with an incompatible shape or digest and active legacy handoffs cancel compaction; there is no historical decoder or migration. Stored data and existing session files are preserved.
-
-Use Pi's native command:
+With some conversation in the session, run Pi's native command:
 
 ```text
-/compact preserve the parser discussion and command outcomes
+/compact keep the parser discussion and command outcomes
 ```
 
-Pi's native compaction card contains the compaction summary. Compaction instructions become the summary's bounded focus. The extension registers no commands or tools and has no extension configuration.
+Expected observable result: Pi replaces the summarized prefix with its native compaction card containing a `dc-distill-summary` text block. For a discarded window holding a plain user message, an assistant note about a failed build, two identical `read` calls of `lib/parser.ts` with successful results, one successful `bun test` execution, and a newest user request, the current compiler emits exactly:
 
-## Summary contract
+```text
+<dc-distill-summary>
+notice: Selected conversation excerpts and observations; incomplete.
+columns: records=kind|origin|cut|text ; files=section id|origin|cut|create|path ; commands=cmd id|origin|cut|runner|status|cwd|command|result
+focus: keep the parser discussion and command outcomes
+latest-request: current full "Fix the failing parser tests in lib/parser.ts"
+records:
+user | current | full | continue with the plan
+assistant | current | full | the build failed with error: exit status 1
+tool-call | current | full | read {"path":"lib/parser.ts"}
+tool-result | current | full | export function parse() {}
+tool-call | current | full | read {"path":"lib/parser.ts"}
+tool-result | current | full | export function parse() {}
+bash | current | full | bun test\n113 pass
+files:
+read EjC6jKHybk-5dxtBRcSGEk | current | full | no | lib/parser.ts
+commands:
+cmd xy3YsSXQ0D945QQBsxKqQo | current | full | bash | success | =/repo | bun test | 113 pass
+omitted: input=0 excerpts=0 reads=0 modified=0 commands=0
+</dc-distill-summary>
+```
 
-There is one unversioned format, `dc-distill-summary`. Its fixed keys are `format`, `notice`, `focus`, `latestRequest`, `records`, `files`, `commands`, and `omitted`. The notice is always `Selected conversation excerpts and observations; incomplete.`
+(Exact output of the current compiler pipeline, executed locally on that representative input.)
 
-Current observations come only from Pi's discarded input; carried predecessor observations are marked `prior`. `latestRequest` is the newest admitted native user text, or the predecessor request when none is admitted. It is attributed context, and its duplicate excerpt is excluded. Predecessor records are flattened; summaries never recursively nest.
+How to read it: the `columns:` line is a fixed legend for every summary. Rows are escaped single lines — the `\n` in the bash row is two literal characters, never a line break. Flags are words, not booleans (`full`/`cut`, `yes`/`no`), the request text is quoted, command rows carry a `cmd` prefix with cwd as `none` or `=`-prefixed, and row identities are 22-character base64url SHA-256 prefixes. `origin: "current"` means observed in this compaction's discarded input — not current filesystem truth.
 
-The compiler targets 8,192 serialized Unicode code points, with a 65,536-code-point hard limit. It shortens individual display fields safely and drops whole optional rows. Input is bounded to 20 MiB using complete records. Pi's rebuilt-context estimate checks the exact summary with the retained tail; if mandatory content cannot fit known capacity, compaction cancels. Unknown capacity is explicitly reported.
+Mechanism: the `session_before_compact` hook compiles Pi's discarded messages deterministically and returns the summary with token estimates Pi computes from its own rebuilt-context functions; Pi then appends the compaction entry and rebuilds the context. Pi's native compaction card is the sole success display; the extension emits no success notification.
 
-File facts require an unambiguous paired successful tool result. Command status is the recorded outcome, including `unknown` for missing outcome information. Create-capable writes are observations, not proof that a file was newly created. See [algorithm](docs/algorithm.md) for identities, pairing, bounds, and omission accounting.
+Next safe variation: `/compact` again later in the same session. The previous summary is carried flat — its rows return marked `origin: prior`, its facts merge with newer observations, and summaries never nest. Carrying is opportunistic and never blocks: a prior summary whose recorded digest matches and decodes in the current shape carries full structured state; all other predecessors — including damaged summaries, old JSON formats, foreign or native summaries — degrade to bounded attributed text. Fallback text does not preserve a dedicated latest-request field or structured observations. Selection rules, pairing, identities, and budgets are specified in [algorithm](docs/algorithm.md).
 
-## Runtime boundary
+The `omitted:` counters count candidates lost before or during selection, not failures: a summary with no visible error is not proof that every command passed, and command status can be `unknown` when no outcome was recorded. File writes flagged create-capable (`yes`) do not prove a file was created. The summary remembers what was said — it does not establish readiness, verification, or authorization.
 
-Live input comes only from `event.preparation` and active `event.branchEntries`; the extension never reads the session file. Source, compiler, and capacity failures cancel interception so Pi's default LLM compactor cannot take over. Child sessions cancel interception.
+## Configuration and state
 
-Only an independently validated newest active primary-session commit matching the full pending receipt permits a synchronous best-effort UI notification. Pi's native compaction card is the persistent success display; the notification is not guaranteed to remain visible. There are no extension-owned triggers, aborts, timers, continuation sends, storage writes, dumps, recall, focus injection, tool-output previews, checkpoints, pins, task graphs, signatures, custom cards, replay CLI, or migration machinery. Protected task and evidence preservation has been retired.
+There is no extension configuration. Pi owns compaction triggering, cut selection, and rebuilt context; the extension registers no commands or tools and reads no settings. The compiler's fixed bounds are policy, not knobs: a 20 MiB whole-record input envelope, an 8,192-code-point operating target, and a 65,536-code-point hard serialized limit. Live input comes only from `event.preparation` and the active branch entries — the extension never reads the session file.
 
-## Development
+## Verification and development
 
-Install the checkout's existing pinned dependencies with `bun install --frozen-lockfile`; do not share another project's node_modules. The Pi development SDK remains pinned to 0.99.2. Host peer ranges remain `*`.
+Development uses Bun (1.4.0) with project-local dependencies; the Pi SDK development pins stay at 0.99.2 and host peer ranges stay `*`:
 
-After implementation and semantic review, the verifier runs:
+```bash
+bun install --frozen-lockfile
+```
+
+After implementation and semantic review, the verifier runs the gate list once:
 
 ```bash
 bun test
@@ -53,6 +75,14 @@ npm pack --dry-run --json
 bun run distill:e2e
 ```
 
-The full suite runs once under the user's approval; repairs require affected gates only. The isolated scripted-provider e2e suite uses the available installed Pi and is separate from unit-test discovery. No paid provider is needed to verify the deterministic compiler. Fixtures and source inspection do not prove installed-host behavior. See [runtime acceptance](tests/e2e/README.md), [architecture](docs/architecture.md), and [documentation index](docs/README.md).
+Repairs rerun affected gates only. The e2e suite drives an installed Pi through a local scripted provider — no paid provider is needed to verify the deterministic compiler — and fixtures alone do not prove installed-host behavior; see [runtime acceptance](tests/e2e/README.md). Publication is a separately authorized operation; the package ships only the extension entry, its runtime modules, README, and license.
 
-Package publication exposes only the root extension and its required runtime modules, plus README and license. There is no replay binary or supported internal import API. Publication is a separate authorized operation.
+## Limits and non-goals
+
+- No LLM calls anywhere in the extension. Source, compiler, cancellation, and capacity failures cancel the compaction; Pi's default LLM compactor never takes over.
+- One primary session owns the runtime; child sessions cancel interception.
+- Pi’s native compaction card is the sole success display. There are no extension notifications, timers, retries, continuation sends, storage writes, dumps, recall, checkpoints, pins, task graphs, or custom cards.
+- No replay CLI and no supported import API beyond the extension entry itself.
+- Existing incompatible sessions keep the old extension; never load both together.
+
+More: [documentation index](docs/index.md), [usage](docs/usage.md), [troubleshooting](docs/troubleshooting.md).

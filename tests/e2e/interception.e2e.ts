@@ -50,7 +50,7 @@ for (const scenario of [
         const committed = records(session).filter((entry) => entry.type === "compaction");
         expect(committed).toHaveLength(1);
         expect(committed[0]?.details?.compactor).toBe("dc-distill");
-        expect(committed[0]?.details?.attemptId).toBe(result.details?.attemptId);
+        expect(committed[0]?.details).toEqual(result.details);
         assertCurrentCompaction(committed[0]?.summary, committed[0]?.details);
         expect(existsSync(join(t.agentHome, "data", "dc-distill"))).toBe(false);
 

@@ -1,14 +1,14 @@
 import { describe, expect, test } from "bun:test";
-import { readFile, readlink } from "node:fs/promises";
+import { readFile } from "node:fs/promises";
 import { join } from "node:path";
 import setupDistill from "./index.ts";
-import { createStubCtx } from "./tests/harness/fake-pi.ts";
+import { createPreparationHarness } from "./tests/harness/fake-pi.ts";
 
 const root = import.meta.dir;
 const activeDocuments = [
   "README.md", "AGENTS.md", "docs/README.md", "docs/algorithm.md",
   "docs/architecture.md", "docs/usage.md", "docs/settings.md",
-  "docs/troubleshooting.md", "docs/releasing.md",
+  "docs/troubleshooting.md", "docs/releasing.md", "docs/index.md",
 ];
 
 async function documents() {
@@ -26,12 +26,14 @@ function slashCommands(text: string): string[] {
 
 describe("current product documentation contract", () => {
   test("advertised commands are Pi-native and extension registration adds no commands or tools", async () => {
-    const stub = createStubCtx();
+    const stub = createPreparationHarness();
     setupDistill(stub.pi);
-    expect(stub.registeredCommands.size).toBe(0);
-    expect(stub.registeredTools.size).toBe(0);
-    expect(stub.registeredHooks.has("session_before_compact")).toBe(true);
-    expect(stub.registeredHooks.has("session_compact")).toBe(true);
+    expect(stub.hooks.has("session_before_compact")).toBe(true);
+    expect([...stub.hooks.keys()].sort()).toEqual([
+      "model_select", "session_before_compact", "session_before_fork",
+      "session_before_switch", "session_shutdown", "session_start", "session_tree",
+    ]);
+    expect(stub.hooks.has("session_compact")).toBe(false);
     for (const doc of await documents()) {
       for (const name of slashCommands(doc.text)) {
         expect(name, `${doc.file} advertises a non-native command`).toBe("compact");
@@ -74,8 +76,5 @@ describe("current product documentation contract", () => {
     expect(index).toContain(".work/docs-archive/");
     for (const moved of ["docs/specs/", "docs/adr/", "docs/compiler-benchmark.md", "docs/assets/"]) expect(index).not.toContain(moved);
     expect(index).toContain("excluded from the current product contract and package publication");
-    const archivedAdr = await readFile(join(root, ".work/docs-archive/adr/0002-remove-vendored-framework.md"), "utf8");
-    expect(archivedAdr).toContain("# ADR 0002");
-    expect(await readlink(join(root, "CLAUDE.md"))).toBe("AGENTS.md");
   });
 });

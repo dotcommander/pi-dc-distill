@@ -1,13 +1,14 @@
 import { describe, expect, test } from "bun:test";
-import { buildSummary, decodeSummary, encodeSummary, evictOldestOptional, salvageSummary } from "./budget-formatter.ts";
-import { emptyOmissions, SUMMARY_FORMAT, SUMMARY_NOTICE } from "./helpers.ts";
+import { buildSummary, decodeSummary, encodeSummary, evictOldestOptional } from "./budget-formatter.ts";
+import { certifyToolPairs, extractObservations } from "./tool-tracker.ts";
+import { emptyOmissions, SUMMARY_COLUMNS, SUMMARY_FORMAT, SUMMARY_NOTICE, TARGET_RESUME_SUMMARY_CODE_POINTS } from "./helpers.ts";
 import { codePointLength } from "../unicode.ts";
 import type { CompactionSource, DcDistillSummary, ObservationFacts } from "./types.ts";
 
-const source = (): CompactionSource => ({ records: [], predecessor: null, duplicateCallIds: [], omittedInputRecords: 0, session: { id: "s", cwd: "/project", timestamp: "now" } });
+const source = (): CompactionSource => ({ records: [], predecessor: null, duplicateCallIds: [], omittedInputRecords: 0, session: { cwd: "/project" } });
 const facts = (): ObservationFacts => ({ files: { read: [], modified: [] }, commands: [] });
 const document = (): DcDistillSummary => ({ format: SUMMARY_FORMAT, notice: SUMMARY_NOTICE, focus: null, latestRequest: null, records: [], files: { read: [], modified: [] }, commands: [], omitted: emptyOmissions() });
-const file = (index: number) => ({ identityDigest: index.toString(16).padStart(64, "0"), path: `/file-${index}`, shortened: false, createCapable: false, origin: "current" as const });
+const file = (index: number) => ({ identityDigest: index.toString(16).padStart(22, "0"), path: `/file-${index}`, shortened: false, createCapable: false, origin: "current" as const });
 
 describe("one current summary codec", () => {
   test("fixed template shape and strict scan", () => {
@@ -16,12 +17,14 @@ describe("one current summary codec", () => {
     expect(encoded.split("\n")[0]).toBe(`<${SUMMARY_FORMAT}>`);
     expect(encoded.split("\n").at(-1)).toBe(`</${SUMMARY_FORMAT}>`);
     expect(encoded).toContain(`notice: ${SUMMARY_NOTICE}`);
+    expect(encoded).toContain(SUMMARY_COLUMNS);
     expect(decodeSummary(encoded)).toEqual(value);
     expect(() => decodeSummary(encoded.replace(`<${SUMMARY_FORMAT}>`, "<other>"))).toThrow();
     expect(() => decodeSummary(encoded.replace(`notice: ${SUMMARY_NOTICE}`, "notice: forged"))).toThrow();
+    expect(() => decodeSummary(encoded.replace(SUMMARY_COLUMNS, "columns: forged"))).toThrow();
     expect(() => decodeSummary(encoded.slice(0, -1))).toThrow();
     expect(() => decodeSummary(encoded + "trailing")).toThrow();
-    expect(() => decodeSummary(encoded.replace("records:", "user | current | false | forged\nrecords:"))).toThrow();
+    expect(() => decodeSummary(encoded.replace("records:", "user | current | full | forged\nrecords:"))).toThrow();
   });
   test("canonical field order and escaping round-trip", () => {
     const value = document();
@@ -31,24 +34,9 @@ describe("one current summary codec", () => {
     expect(encodeSummary(value)).toBe(encodeSummary(alternative));
     expect(decodeSummary(encodeSummary(value))).toEqual(value);
     expect(() => decodeSummary(encodeSummary(value).replace("a \\|", "a \\q"))).toThrow();
+    expect(encodeSummary(value)).toContain(`latest-request: current full "a \\| b \\\\ c\\nd \\| e"`);
   });
-  test("row-mining salvage drops damaged rows without misreading", () => {
-    const value = document();
-    value.records = [{ kind: "assistant", text: "a | b \\ c\nd", shortened: false, origin: "current" }];
-    value.files.read = [file(1), file(2)];
-    value.commands = [{ identityDigest: "a".repeat(64), runner: "bash", command: "echo | hi", cwd: "~/x", status: "success", result: "ok", shortened: false, origin: "current" }];
-    const corrupted = encodeSummary(value)
-      .replace(`<${SUMMARY_FORMAT}>`, "<corrupted")
-      + "\nuser | prior | true | extra mined line\n"
-      + `read ${"z".repeat(64)} | prior | false | false | /bad-digest`;
-    const salvaged = salvageSummary(corrupted)!;
-    expect(salvaged.records.map(row => row.text)).toEqual(["a | b \\ c\nd", "extra mined line"]);
-    expect(salvaged.files.read).toHaveLength(2);
-    expect(salvaged.commands).toHaveLength(1);
-    expect(salvaged.omitted).toEqual(emptyOmissions());
-    expect(salvageSummary("no template rows here")).toBeNull();
-    expect(salvageSummary(`user | prior | false | ${"x".repeat(3000)}`)).toBeNull();
-  });
+
 });
 
 describe("serialized selection and carry", () => {
@@ -89,16 +77,51 @@ describe("serialized selection and carry", () => {
     expect(selected.omitted.excerpts).toBe(5 - selected.records.length);
     expect(decodeSummary(encodeSummary(selected))).toEqual(selected);
   });
-  test("identical adjacent retries collapse to one marker plus newest outcome", () => {
+  test("admission accounting stays exact at the operating boundary", () => {
     const input = source();
-    const call = (id: string) => ({ kind: "tool-call" as const, name: "read", text: 'read {"path":"lib/main.ts"}', args: { path: "lib/main.ts" }, callId: id });
-    const result = (id: string, error: boolean) => ({ kind: "tool-result" as const, text: error ? "error: ENOENT" : "module contents", isError: error, callId: id });
+    input.records = [
+      ...Array.from({ length: 40 }, (_, index) => ({ kind: "assistant" as const, text: index % 3 === 0 ? `diff --git a/x${index} b/x${index}\n--- a/x${index}\n+++ b/x${index}\n@@ -1 +1 @@\n-old\n+new ${index}\n context ` + "z".repeat(400) : index % 3 === 1 ? `note ${index} 😀 | \\ tail ` + "y".repeat(380) : `error: boom ${index}` })),
+      { kind: "user", text: "newest request", nativeUserText: true },
+    ];
+    const document = buildSummary(input, (certifyToolPairs(input.records), extractObservations(input)));
+    // No predecessor or facts, so the operating limit is exactly the target.
+    expect(codePointLength(encodeSummary(document))).toBeLessThanOrEqual(TARGET_RESUME_SUMMARY_CODE_POINTS);
+    const order = new Map(input.records.map((record, position) => [record.text, position]));
+    const admitted = new Set(document.records.map(row => row.text));
+    expect(admitted.size).toBeLessThan(input.records.length - 1); // rows were actually rejected
+    for (const record of input.records) {
+      if (record.kind === "user" && record.nativeUserText === true || admitted.has(record.text)) continue;
+      // Inserting any rejected row (chronologically, counter adjusted) must
+      // overflow the same target the selector accounted against.
+      const trial: DcDistillSummary = { ...document,
+        records: [...document.records, { kind: record.kind, text: record.text, shortened: false, origin: "current" as const }]
+          .sort((a, b) => (order.get(a.text) ?? 0) - (order.get(b.text) ?? 0)),
+        omitted: { ...document.omitted, excerpts: document.omitted.excerpts - 1 } };
+      expect(codePointLength(encodeSummary(trial))).toBeGreaterThan(TARGET_RESUME_SUMMARY_CODE_POINTS);
+    }
+  });
+  test("large-input excerpt timing smoke test", () => {
+    const input = source();
+    input.records = Array.from({ length: 64_000 }, (_, index) => ({ kind: "assistant" as const, text: `progress update ${index} ` + "x".repeat(100) }));
+    input.records.push({ kind: "user", text: "latest request", nativeUserText: true });
+    const start = performance.now();
+    const document = buildSummary(input, facts());
+    const elapsed = performance.now() - start;
+    expect(document.records.length).toBeGreaterThan(0);
+    expect(document.omitted.excerpts).toBe(64_000 - document.records.length);
+    expect(elapsed).toBeLessThan(10_000);
+  }, 10_000);
+  test("identical adjacent retries render as their own rows without synthesized outcomes", () => {
+    const input = source();
+    const call = (id: string) => ({ kind: "tool-call" as const, name: "read", text: 'read {"path":"lib/main.ts"}', args: { path: "lib/main.ts" }, pairing: { state: "identified" as const, id }, callId: id });
+    const result = (id: string, error: boolean) => ({ kind: "tool-result" as const, name: "read", text: error ? "error: ENOENT" : "module contents", isError: error, pairing: { state: "identified" as const, id }, callId: id });
     input.records = [
       call("c0"), result("c0", true), call("c1"), result("c1", true), call("c2"), result("c2", false),
-      { kind: "tool-call", name: "edit", text: 'edit {"path":"lib/main.ts"}', args: { path: "lib/main.ts" }, callId: "c3" },
+      { kind: "tool-call", name: "edit", text: 'edit {"path":"lib/main.ts"}', args: { path: "lib/main.ts" }, pairing: { state: "identified", id: "c3" }, callId: "c3" },
     ];
     const selected = buildSummary(input, facts());
-    expect(selected.records.map(row => row.text)).toEqual(["[repeat: read ×3 — last ok]", "module contents", 'edit {"path":"lib/main.ts"}']);
+    expect(selected.records.map(row => row.text)).toEqual(['read {"path":"lib/main.ts"}', "error: ENOENT", 'read {"path":"lib/main.ts"}', "error: ENOENT", 'read {"path":"lib/main.ts"}', "module contents", 'edit {"path":"lib/main.ts"}']);
+    expect(selected.records.map(row => row.kind)).toEqual(["tool-call", "tool-result", "tool-call", "tool-result", "tool-call", "tool-result", "tool-call"]);
     expect(selected.omitted.excerpts).toBe(0);
     expect(decodeSummary(encodeSummary(selected))).toEqual(selected);
   });
@@ -109,8 +132,8 @@ describe("serialized selection and carry", () => {
       { kind: "assistant", text: "diff --git a/x b/x\n--- a/x\n+++ b/x\n@@ -1 +1 @@\n-o\n+n", shortened: false, origin: "current" },
     ];
     value.commands = [
-      { identityDigest: "0".repeat(64), runner: "bash", command: "echo first", cwd: null, status: "success" as const, result: "", shortened: false, origin: "current" as const },
-      { identityDigest: "1".repeat(64), runner: "bash", command: "echo second", cwd: null, status: "error" as const, result: "boom", shortened: false, origin: "current" as const },
+      { identityDigest: "0".repeat(22), runner: "bash", command: "echo first", cwd: null, status: "success" as const, result: "", shortened: false, origin: "current" as const },
+      { identityDigest: "1".repeat(22), runner: "bash", command: "echo second", cwd: null, status: "error" as const, result: "boom", shortened: false, origin: "current" as const },
     ];
     value.files.read = [file(1)];
     value.files.modified = [file(2)];
@@ -141,12 +164,12 @@ describe("serialized selection and carry", () => {
     const observed = facts();
     observed.files.read = Array.from({ length: 70 }, (_, index) => file(index));
     observed.files.modified = Array.from({ length: 70 }, (_, index) => file(index + 100));
-    observed.commands = Array.from({ length: 15 }, (_, index) => ({ identityDigest: "a".repeat(64), runner: "bash", command: `echo ${index}`, cwd: null, status: "unknown" as const, result: "", shortened: false, origin: "current" as const }));
+    observed.commands = Array.from({ length: 15 }, (_, index) => ({ identityDigest: "a".repeat(22), runner: "bash", command: `echo ${index}`, cwd: null, status: "unknown" as const, result: "", shortened: false, origin: "current" as const }));
     const selected = buildSummary(source(), observed);
     const rows = [
-      ...selected.files.read.map(row => `read ${row.identityDigest} | ${row.origin} | ${row.shortened} | ${row.createCapable} | ${row.path}`),
-      ...selected.files.modified.map(row => `modified ${row.identityDigest} | ${row.origin} | ${row.shortened} | ${row.createCapable} | ${row.path}`),
-      ...selected.commands.map(row => `${row.identityDigest} | ${row.origin} | ${row.shortened} | ${row.runner} | ${row.status} | ${row.cwd === null ? "\\-" : row.cwd} | ${row.command} | ${row.result}`),
+      ...selected.files.read.map(row => `read ${row.identityDigest} | ${row.origin} | ${row.shortened ? "cut" : "full"} | ${row.createCapable ? "yes" : "no"} | ${row.path}`),
+      ...selected.files.modified.map(row => `modified ${row.identityDigest} | ${row.origin} | ${row.shortened ? "cut" : "full"} | ${row.createCapable ? "yes" : "no"} | ${row.path}`),
+      ...selected.commands.map(row => `cmd ${row.identityDigest} | ${row.origin} | ${row.shortened ? "cut" : "full"} | ${row.runner} | ${row.status} | ${row.cwd === null ? "none" : row.cwd} | ${row.command} | ${row.result}`),
     ];
     expect(codePointLength(rows.join("\n"))).toBeLessThanOrEqual(2048);
     expect(selected.files.modified.at(-1)?.path).toBe("/file-169");
@@ -191,7 +214,7 @@ describe("serialized selection and carry", () => {
     const value = document();
     value.records = [{ text: "excerpt", shortened: false, origin: "current", kind: "assistant" }];
     value.files.read = [file(1)]; value.files.modified = [file(2)];
-    value.commands = [{ identityDigest: "a".repeat(64), runner: "bash", command: "echo", cwd: null, status: "success", result: "ok", shortened: false, origin: "current" }];
+    value.commands = [{ identityDigest: "a".repeat(22), runner: "bash", command: "echo", cwd: null, status: "success", result: "ok", shortened: false, origin: "current" }];
     value.omitted.excerpts = Number.MAX_SAFE_INTEGER;
     expect(evictOldestOptional(value)).toBe(true); expect(value.records).toHaveLength(0);
     expect(value.omitted.excerpts).toBe(Number.MAX_SAFE_INTEGER);
@@ -213,4 +236,190 @@ describe("serialized selection and carry", () => {
     expect(selected.latestRequest?.text).toBe("|".repeat(2048));
     expect(selected.focus).toBe("|".repeat(2048));
   });
+});
+  test("foreign tool results keep their own rows", () => {
+    const input = source();
+    input.records = [
+      { kind: "tool-call", name: "edit", text: 'edit {"path":"a.ts"}', args: { path: "a.ts" }, pairing: { state: "identified", id: "c1" }, callId: "c1" },
+      { kind: "tool-call", name: "edit", text: 'edit {"path":"a.ts"}', args: { path: "a.ts" }, pairing: { state: "identified", id: "c2" }, callId: "c2" },
+      { kind: "tool-result", name: "read", text: "contents of UNRELATED file", isError: false, pairing: { state: "identified", id: "other" }, callId: "other" },
+      { kind: "tool-result", name: "edit", text: "error: ENOENT a.ts", isError: true, pairing: { state: "identified", id: "c2" }, callId: "c2" },
+    ];
+    const texts = buildSummary(input, facts(), {}).records.map(row => row.text);
+    // A result with an unrelated call id keeps its own row; no synthesized outcome claims exist.
+    expect(texts).toContain("contents of UNRELATED file");
+    expect(texts).toContain("error: ENOENT a.ts");
+    expect(texts.filter(text => text.startsWith("[repeat:"))).toHaveLength(0);
+    expect(texts.some(text => text.includes("last ok") || text.includes("last error") || text.includes("last unknown"))).toBe(false);
+  });
+  test("idless runs keep their own rows; foreign names never pair", () => {
+    const input = source();
+    input.records = [
+      { kind: "tool-call", name: "edit", text: 'edit {"path":"a.ts"}', args: { path: "a.ts" }, pairing: { state: "unpairable" } },
+      { kind: "tool-call", name: "edit", text: 'edit {"path":"a.ts"}', args: { path: "a.ts" }, pairing: { state: "unpairable" } },
+      { kind: "tool-result", name: "read", text: "unrelated idless read output", pairing: { state: "unpairable" } },
+    ];
+    const texts = buildSummary(input, facts(), {}).records.map(row => row.text);
+    expect(texts.filter(text => text === "unrelated idless read output")).toHaveLength(1);
+    expect(texts.filter(text => text.startsWith("[repeat:"))).toHaveLength(0);
+    const paired = source();
+    paired.records = [
+      { kind: "tool-call", name: "read", text: 'read {"path":"a.ts"}', args: { path: "a.ts" }, pairing: { state: "unpairable" } },
+      { kind: "tool-call", name: "read", text: 'read {"path":"a.ts"}', args: { path: "a.ts" }, pairing: { state: "unpairable" } },
+      { kind: "tool-result", name: "read", text: "module contents", pairing: { state: "unpairable" } },
+    ];
+    const pairedTexts = buildSummary(paired, facts(), {}).records.map(row => row.text);
+    expect(pairedTexts).toEqual(['read {"path":"a.ts"}', 'read {"path":"a.ts"}', "module contents"]);
+  });
+  test("excerpt rows never synthesize tool outcomes the fact model rejects", () => {
+    // The fact extractor refuses to pair every facet below; excerpt rows must
+    // not assert an outcome for them either: absent isError, raw-name mismatch
+    // on a matching call id, duplicate call ids, and an idless certificate that
+    // forbids pairing.
+    const absent = source();
+    absent.records = [
+      { kind: "tool-call", name: "read", text: 'read {"path":"a"}', args: { path: "a" }, pairing: { state: "identified", id: "k1" }, callId: "k1" },
+      { kind: "tool-call", name: "read", text: 'read {"path":"a"}', args: { path: "a" }, pairing: { state: "identified", id: "k2" }, callId: "k2" },
+      { kind: "tool-result", name: "read", text: "error: failed to open", pairing: { state: "identified", id: "k2" }, callId: "k2" },
+    ];
+    const mismatch = source();
+    mismatch.records = [
+      { kind: "tool-call", name: "read", text: 'read {"path":"a"}', args: { path: "a" }, pairing: { state: "identified", id: "k1" }, callId: "k1" },
+      { kind: "tool-call", name: "read", text: 'read {"path":"a"}', args: { path: "a" }, pairing: { state: "identified", id: "k2" }, callId: "k2" },
+      { kind: "tool-result", name: "view", text: "unrelated tool output", isError: false, pairing: { state: "identified", id: "k2" }, callId: "k2" },
+    ];
+    const duplicate = source();
+    duplicate.duplicateCallIds = ["d1"];
+    duplicate.records = [
+      { kind: "tool-call", name: "read", text: 'read {"path":"a"}', args: { path: "a" }, pairing: { state: "identified", id: "d1" }, callId: "d1" },
+      { kind: "tool-call", name: "read", text: 'read {"path":"a"}', args: { path: "a" }, pairing: { state: "identified", id: "d1" }, callId: "d1" },
+      { kind: "tool-result", name: "read", text: "module contents", isError: false, pairing: { state: "identified", id: "d1" }, callId: "d1" },
+    ];
+    const forbidden = source();
+    forbidden.records = [
+      { kind: "tool-call", name: "read", text: 'read {"path":"a"}', args: { path: "a" }, pairing: { state: "unpairable" } },
+      { kind: "tool-call", name: "read", text: 'read {"path":"a"}', args: { path: "a" }, pairing: { state: "unpairable" } },
+      { kind: "tool-result", name: "read", text: "module contents", isError: false, pairing: { state: "unpairable" } },
+    ];
+    for (const input of [absent, mismatch, duplicate, forbidden]) {
+      const document = buildSummary(input, (certifyToolPairs(input.records), extractObservations(input)));
+      const encoded = encodeSummary(document);
+      expect(encoded.includes("[repeat:")).toBe(false);
+      expect(encoded.includes("last ok")).toBe(false);
+      expect(document.files.read).toHaveLength(0);
+      expect(decodeSummary(encoded)).toEqual(document);
+    }
+    // Recorded error-looking text stays its own row, with no adjacent success claim.
+    expect(buildSummary(absent, extractObservations(absent)).records.map(row => row.text)).toContain("error: failed to open");
+  });
+
+
+test("user constraint survives 24 diffs, continue, and repeated current-format carry", () => {
+  const input = source();
+  const constraint = "Keep the public API unchanged.";
+  input.records = [
+    { kind: "user", text: constraint, nativeUserText: true },
+    ...Array.from({ length: 24 }, (_, index) => ({ kind: "assistant" as const,
+      text: `diff --git a/file-${index} b/file-${index}\n--- old\n+++ new\n@@ -1 +1 @@\n-removed\n+added ` + "x".repeat(1700) })),
+    { kind: "user", text: "continue", nativeUserText: true },
+  ];
+  let selected = buildSummary(input, facts());
+  expect(selected.latestRequest?.text).toBe("continue");
+  expect(selected.records[0]?.text).toBe(constraint);
+  expect(selected.omitted.excerpts).toBeGreaterThan(0);
+  for (let iteration = 0; iteration < 4; iteration++) {
+    const next = source(); next.predecessor = decodeSummary(encodeSummary(selected));
+    next.records = Array.from({ length: 24 }, (_, index) => ({ kind: "assistant" as const,
+      text: `diff --git a/new-${iteration}-${index} b/new\n@@ -1 +1 @@\n-old\n+new ` + "z".repeat(1700) }));
+    selected = buildSummary(next, facts());
+    expect(selected.records.some(row => row.kind === "user" && row.text === constraint && row.origin === "prior")).toBe(true);
+    expect(selected.latestRequest?.text).toBe("continue");
+    expect(codePointLength(encodeSummary(selected))).toBeLessThanOrEqual(8192);
+  }
+});
+
+test("user excerpts claim admission newest first, including image placeholders", () => {
+  const input = source();
+  input.records = [
+    ...Array.from({ length: 5 }, (_, index) => ({ kind: "user" as const, text: `${index} [image] ` + "x".repeat(2000) })),
+    { kind: "assistant", text: "error: evidence " + "y".repeat(2000) },
+    { kind: "user", text: "continue", nativeUserText: true },
+  ];
+  const selected = buildSummary(input, facts());
+  expect(selected.records.map(row => row.text[0])).toEqual(["2", "3", "4"]);
+  expect(selected.latestRequest?.text).toBe("continue");
+});
+
+test("capacity eviction exhausts other optional rows before user excerpts", () => {
+  const value = document();
+  value.latestRequest = { text: "continue", shortened: false, origin: "current" };
+  value.records = [
+    { kind: "user", text: "old constraint", shortened: false, origin: "prior" },
+    { kind: "assistant", text: "ok", shortened: false, origin: "current" },
+    { kind: "assistant", text: "error: preserve evidence", shortened: false, origin: "current" },
+    { kind: "user", text: "new constraint", shortened: false, origin: "current" },
+  ];
+  value.commands = [
+    { identityDigest: "a".repeat(22), runner: "bash", command: "error command", cwd: null, status: "error", result: "error", shortened: false, origin: "current" },
+    { identityDigest: "b".repeat(22), runner: "bash", command: "unknown command", cwd: null, status: "unknown", result: "", shortened: false, origin: "current" },
+  ];
+  value.files.read = [file(1)]; value.files.modified = [file(2)];
+  const remaining = () => [value.records.map(row => row.text), value.commands.map(row => row.command), value.files.read.length, value.files.modified.length];
+  expect(evictOldestOptional(value)).toBe(true);
+  expect(remaining()).toEqual([["old constraint", "error: preserve evidence", "new constraint"], ["error command", "unknown command"], 1, 1]);
+  expect(evictOldestOptional(value)).toBe(true); expect(value.commands.map(row => row.command)).toEqual(["error command"]);
+  expect(evictOldestOptional(value)).toBe(true); expect(value.records.map(row => row.text)).toEqual(["old constraint", "new constraint"]);
+  expect(evictOldestOptional(value)).toBe(true); expect(value.commands).toHaveLength(0);
+  expect(evictOldestOptional(value)).toBe(true); expect(value.files.read).toHaveLength(0);
+  expect(evictOldestOptional(value)).toBe(true); expect(value.files.modified).toHaveLength(0);
+  expect(evictOldestOptional(value)).toBe(true); expect(value.records.map(row => row.text)).toEqual(["new constraint"]);
+  expect(evictOldestOptional(value)).toBe(true); expect(value.records).toHaveLength(0);
+  expect(evictOldestOptional(value)).toBe(false);
+  expect(value.latestRequest?.text).toBe("continue");
+});
+
+test("incremental fact admission matches full serialization across escaping and counter digits", () => {
+  // Independent cost oracle: serialize every complete trial and count the
+  // actual fact lines, rather than deriving incremental costs or digit deltas.
+  for (const carried of [0, 9, 99, Number.MAX_SAFE_INTEGER - 1]) {
+    for (const focus of [null, "|".repeat(1500)]) {
+      const input = source(); input.predecessor = document();
+      input.predecessor.omitted = { inputRecords: 0, excerpts: 0, readFiles: carried, modifiedFiles: carried, commands: carried };
+      input.records = [{ kind: "user", text: "|".repeat(2048), nativeUserText: true }];
+      const observed = facts();
+      observed.files.read = Array.from({ length: 12 }, (_, index) => ({ ...file(index), path: `read${index} 😀 | \\ ` + "x".repeat(index * 5) }));
+      observed.files.modified = Array.from({ length: 12 }, (_, index) => ({ ...file(index + 20), path: `modified${index} | ` + "y".repeat(index * 8) }));
+      observed.commands = Array.from({ length: 12 }, (_, index) => ({ identityDigest: "a".repeat(22), runner: "bash", command: `echo ${index} | 😀`, cwd: "x|y", status: "unknown" as const, result: "\n", shortened: false, origin: "current" as const }));
+      observed.commands[11] = { ...observed.commands[11]!, runner: "|".repeat(128), command: "|".repeat(512), cwd: "|".repeat(512), result: "|".repeat(300) };
+      const expected = buildSummary(input, facts(), { focus });
+      const count = (category: "readFiles" | "modifiedFiles" | "commands", total: number, admitted: number) => {
+        expected.omitted[category] = Math.min(Number.MAX_SAFE_INTEGER, carried + (total - admitted));
+      };
+      count("readFiles", 12, 0); count("modifiedFiles", 12, 0); count("commands", 12, 0);
+      const limit = Math.max(8192, codePointLength(encodeSummary(expected)));
+      for (let offset = 1; offset <= 12; offset++) {
+        for (const [candidate, rows, max, counter] of [
+          [observed.files.modified.at(-offset), expected.files.modified, 50, "modifiedFiles"],
+          [observed.commands.at(-offset), expected.commands, 10, "commands"],
+          [observed.files.read.at(-offset), expected.files.read, 50, "readFiles"],
+        ] as const) {
+          if (!candidate || rows.length >= max) continue;
+          (rows as (typeof candidate)[]).unshift(candidate);
+          count(counter, 12, rows.length);
+          const trial = encodeSummary(expected);
+          const factLines = trial.split("\n").filter(line => /^(read |modified |cmd )/.test(line));
+          if (codePointLength(factLines.join("\n")) > 2048 || codePointLength(trial) > limit) {
+            rows.shift(); count(counter, 12, rows.length);
+          }
+        }
+      }
+      const selected = buildSummary(input, observed, { focus });
+      expect(selected).toEqual(expected);
+      expect(selected.commands.some(row => row.command === "|".repeat(512))).toBe(false);
+      expect(selected.commands.length).toBeGreaterThan(0);
+      expect(selected.files.modified.at(-1)?.path).toBe(observed.files.modified.at(-1)?.path);
+      expect(selected.files.read.at(-1)?.path).toBe(observed.files.read.at(-1)?.path);
+      expect(decodeSummary(encodeSummary(selected))).toEqual(selected);
+    }
+  }
 });

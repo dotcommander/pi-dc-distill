@@ -1,10 +1,10 @@
-import { sha256Hex } from "../sha256.ts";
-import { codePointLength, codePointPrefix } from "../unicode.ts";
+import { codePointPrefix } from "../unicode.ts";
 import { CompactionInputError } from "./errors.ts";
 import type { OmissionCounts } from "./types.ts";
 
 export const SUMMARY_FORMAT = "dc-distill-summary" as const;
 export const SUMMARY_NOTICE = "Selected conversation excerpts and observations; incomplete." as const;
+export const SUMMARY_COLUMNS = "columns: records=kind|origin|cut|text ; files=section id|origin|cut|create|path ; commands=cmd id|origin|cut|runner|status|cwd|command|result" as const;
 export const MAX_INPUT_BYTES = 20 * 1024 * 1024;
 export const MAX_SOURCE_MESSAGES = 50_000;
 export const MAX_STRUCTURED_SUMMARY_CODE_POINTS = 65_536;
@@ -31,9 +31,9 @@ export function argString(args: Record<string, unknown> | undefined, key: string
   const value = args?.[key];
   return typeof value === "string" ? value : undefined;
 }
-export function digest(content: string): string { return sha256Hex(content); }
 export function shorten(text: string, limit: number): { text: string; shortened: boolean } {
-  return { text: codePointPrefix(text, limit), shortened: codePointLength(text) > limit };
+  const prefix = codePointPrefix(text, limit);
+  return { text: prefix, shortened: prefix.length !== text.length };
 }
 export function saturatingAdd(left: number, right: number): number {
   return Math.min(Number.MAX_SAFE_INTEGER, left + right);

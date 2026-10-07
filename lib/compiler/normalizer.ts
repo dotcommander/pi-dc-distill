@@ -1,5 +1,5 @@
 import { CompactionInputError } from "./errors.ts";
-import { isRecord, validateStructuralInput } from "./helpers.ts";
+import { isRecord, MAX_TEXT_CODE_POINTS, shorten } from "./helpers.ts";
 import type { NormalizedRecord } from "./types.ts";
 
 function textContent(content: unknown): string {
@@ -13,9 +13,14 @@ function textContent(content: unknown): string {
   }).join("\n");
 }
 
+function toolId(value: unknown): string | undefined {
+  if (value === undefined) return undefined;
+  if (typeof value !== "string" || value.length === 0) throw new CompactionInputError("invalid tool identity");
+  return value;
+}
+
 /** Keep full tool identities and output until facts have been extracted. */
 export function normalizeMessage(message: Record<string, unknown>): NormalizedRecord[] {
-  validateStructuralInput(message);
   switch (message.role) {
     case "system": return [];
     case "user": {
@@ -36,19 +41,27 @@ export function normalizeMessage(message: Record<string, unknown>): NormalizedRe
         }
         if (block.type !== "toolCall") return [];
         if (typeof block.name !== "string" || !isRecord(block.arguments)) throw new CompactionInputError("invalid tool call");
-        return [{ kind: "tool-call", text: `${block.name} ${JSON.stringify(block.arguments)}`,
-          name: block.name, callId: typeof block.id === "string" ? block.id : undefined, args: block.arguments }];
+        // Display text is bounded here with honest truncation provenance; the
+        // full arguments stay in `args` for facts and envelope measurement, so
+        // large calls never store their content twice.
+        const callId = toolId(block.id);
+        const callText = shorten(`${block.name} ${JSON.stringify(block.arguments)}`, MAX_TEXT_CODE_POINTS);
+        return [{ kind: "tool-call", text: callText.text, textShortened: callText.shortened || undefined,
+          name: block.name, callId, pairing: callId === undefined ? { state: "unpairable" } : { state: "identified", id: callId }, args: block.arguments }];
       });
     }
     case "toolResult": {
       if (typeof message.toolName !== "string") throw new CompactionInputError("invalid tool result name");
-      return [{ kind: "tool-result", text: textContent(message.content), name: message.toolName,
-        callId: typeof message.toolCallId === "string" ? message.toolCallId : undefined,
+      const callId = toolId(message.toolCallId);
+      const resultText = shorten(textContent(message.content), MAX_TEXT_CODE_POINTS);
+      return [{ kind: "tool-result", text: resultText.text, textShortened: resultText.shortened || undefined, name: message.toolName,
+        callId, pairing: callId === undefined ? { state: "unpairable" } : { state: "identified", id: callId },
         isError: typeof message.isError === "boolean" ? message.isError : undefined }];
     }
     case "bashExecution": {
       if (typeof message.command !== "string" || typeof message.output !== "string") throw new CompactionInputError("invalid bash execution");
-      return [{ kind: "bash", text: `${message.command}\n${message.output}`, command: message.command,
+      const bashText = shorten(`${message.command}\n${message.output}`, MAX_TEXT_CODE_POINTS);
+      return [{ kind: "bash", text: bashText.text, textShortened: bashText.shortened || undefined, command: message.command,
         output: message.output, exitCode: typeof message.exitCode === "number" && Number.isInteger(message.exitCode) ? message.exitCode : undefined,
         cancelled: message.cancelled === true, cwd: typeof message.cwd === "string" ? message.cwd : undefined }];
     }

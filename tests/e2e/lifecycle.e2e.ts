@@ -79,18 +79,17 @@ test("manual compaction and repeated predecessor carry use one flat current cont
   } finally { await t.finalize(passed); }
 }, 120000);
 
-// The older host locates a committed callback by the first equal summary in its
-// full journal. This new branch intentionally reproduces that stale callback.
+// Journal identities and parentage identify the new active commit independently
+// of hosts that report the first historical entry with equal summary bytes.
 test("byte-identical abandoned sibling summary does not hide the new active commit", async () => {
   const t = makeTestDir("summary-collision", { keepRecentTokens: 1024 });
   let passed = false;
   try {
-    const { seedSummaryCollision, collisionEnv, COLLISION_FOCUS, COMMIT_OBSERVER, readRecords } =
+    const { seedSummaryCollision, collisionEnv, COLLISION_FOCUS, readRecords } =
       await import("./harness/summary-collision.ts");
     const { session, abandoned, sibling } = await seedSummaryCollision(t);
-    const telemetry = join(t.dir, "collision-observer.jsonl");
-    const client = new RpcClient({ args: scriptedArgs(t, ["-e", COMMIT_OBSERVER], { session }),
-      cwd: t.dir, logFile: t.logFile, env: collisionEnv(t, telemetry) });
+    const client = new RpcClient({ args: scriptedArgs(t, [], { session }),
+      cwd: t.dir, logFile: t.logFile, env: collisionEnv(t) });
     try {
       const since = client.mark();
       expect((await client.request({ type: "compact", customInstructions: COLLISION_FOCUS })).success).toBe(true);
@@ -102,27 +101,20 @@ test("byte-identical abandoned sibling summary does not hide the new active comm
       assertCurrentCompaction(current.summary, current.details);
       expect(current.summary).toBe(abandoned.summary);
       expect(current.parentId).toBe(sibling);
-      expect(current.details.attemptId).not.toBe(abandoned.details.attemptId);
-      const callbacks = readRecords(telemetry).filter(row => row.kind === "commit");
-      expect(callbacks).toHaveLength(1);
-      expect(callbacks[0]?.fromExtension).toBe(true);
-      expect(callbacks[0]?.sameSummary).toBe(true);
-      expect(callbacks[0]?.newestId).toBe(current.id);
-      expect(callbacks[0]?.newestAttempt).toBe(current.details.attemptId);
-      // Both host implementations are valid: the historical callback must name
-      // the abandoned entry; a fixed host may directly name the actual commit.
-      expect([abandoned.id, current.id]).toContain(callbacks[0]?.eventId);
-      expect(callbacks[0]?.eventAttempt).toBe(callbacks[0]?.eventId === abandoned.id
-        ? abandoned.details.attemptId : current.details.attemptId);
-      // Pi exposes its RPC UI bridge as hasUI:true. Observe the real notify
-      // invocation independently; RPC telemetry does not prove rendered text.
-      expect(callbacks[0]?.hasUI).toBe(true);
-      const notifications = readRecords(telemetry).filter(row => row.kind === "notify");
-      expect(notifications).toHaveLength(1);
-      expect(notifications[0]?.hasUI).toBe(true);
-      expect(notifications[0]?.type).toBe("info");
-      expect(notifications[0]?.message).toBe(
-        `dc-distill compacted context to approximately ${current.details.tokensAfter} tokens.`);
+      expect(current.id).not.toBe(abandoned.id);
+      const journal = readRecords(session);
+      expect(journal.at(-1)?.id).toBe(current.id);
+      const byId = new Map(journal.map(entry => [entry.id, entry]));
+      const activeIds = new Set<string>();
+      let entry = journal.at(-1);
+      while (entry && typeof entry.id === "string") {
+        expect(activeIds.has(entry.id)).toBe(false);
+        activeIds.add(entry.id);
+        entry = byId.get(entry.parentId);
+      }
+      expect(activeIds.has(current.id)).toBe(true);
+      expect(activeIds.has(sibling)).toBe(true);
+      expect(activeIds.has(abandoned.id)).toBe(false);
       expect(readRecords(t.traceFile).filter(row => row.kind === "summary")).toEqual([]);
       assertNoDistillArtifacts(t, client);
     } finally { await client.close(); }

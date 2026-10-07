@@ -1,9 +1,10 @@
 import { expect, test } from "bun:test";
 import { compileCompactionSource, decodeSummary } from "./local-compact.ts";
+import { certifyToolPairs } from "./compiler/tool-tracker.ts";
 import type { CompactionSource } from "./compiler/types.ts";
 
 function source(): CompactionSource {
-  return { records: [{ kind: "user", text: "Please inspect", nativeUserText: true }], predecessor: null, duplicateCallIds: [], omittedInputRecords: 0, session: { id: "s", cwd: "/project", timestamp: "now" } };
+  return { records: [{ kind: "user", text: "Please inspect", nativeUserText: true }], predecessor: null, duplicateCallIds: [], omittedInputRecords: 0, session: { cwd: "/project" } };
 }
 test("typed compile returns exact current wire document deterministically", () => {
   const input = source();
@@ -23,14 +24,15 @@ test("compiler refuses cancellation and malformed Unicode before extraction", ()
 test("facts are extracted from full input before excerpt shortening", () => {
   const input = source();
   input.records.push(
-    { kind: "tool-call", text: "display", name: "read", callId: "call", args: { path: `/long/${"x".repeat(700)}` } },
-    { kind: "tool-result", text: "ok", name: "read", callId: "call", isError: false },
+    { kind: "tool-call", text: "display", name: "read", pairing: { state: "identified", id: "call" }, callId: "call", args: { path: `/long/${"x".repeat(700)}` } },
+    { kind: "tool-result", text: "ok", name: "read", pairing: { state: "identified", id: "call" }, callId: "call", isError: false },
   );
+  certifyToolPairs(input.records);
   const result = compileCompactionSource(input);
   expect(result.document.files.read).toHaveLength(1);
   expect(result.document.files.read[0]!.path.length).toBe(512);
   expect(result.document.files.read[0]!.shortened).toBe(true);
-  expect(result.document.files.read[0]!.identityDigest).toMatch(/^[a-f0-9]{64}$/);
+  expect(result.document.files.read[0]!.identityDigest).toMatch(/^[A-Za-z0-9_-]{22}$/);
 });
 test("prior displays cannot produce fresh observations", () => {
   const input = source();

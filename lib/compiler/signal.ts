@@ -40,8 +40,9 @@ function containsDiff(text: string): boolean {
   return diffHead.test(text) || (diffAdded.test(text) && diffRemoved.test(text));
 }
 function isLongForm(text: string): boolean {
-  const lines = text.split("\n").filter(line => line.trim() !== "").length;
-  return lines >= LONG_FORM_LINES || text.length >= LONG_FORM_CHARS;
+  // Cheap length check first: skip the split/filter allocation on long texts.
+  return text.length >= LONG_FORM_CHARS
+    || text.split("\n").filter(line => line.trim() !== "").length >= LONG_FORM_LINES;
 }
 function isShortStatus(text: string): boolean {
   const trimmed = text.trim();

@@ -1,9 +1,12 @@
+import { sha256Hex } from "./sha256.ts";
 import { describe, expect, test } from "bun:test";
-import { encodeSummary } from "./compiler/budget-formatter.ts";
+import { encodeSummary, buildSummary } from "./compiler/budget-formatter.ts";
 import { buildCompactionSource, type CompactionSourceInput } from "./compaction-source.ts";
-import { digest, MAX_INPUT_BYTES, SUMMARY_FORMAT, SUMMARY_NOTICE } from "./compiler/helpers.ts";
+import { CompactionInputError } from "./compiler/errors.ts";
+import { MAX_INPUT_BYTES, SUMMARY_FORMAT, SUMMARY_NOTICE } from "./compiler/helpers.ts";
 import type { DcDistillSummary } from "./compiler/types.ts";
 import { extractObservations } from "./compiler/tool-tracker.ts";
+import { codePointLength } from "./unicode.ts";
 
 type Message = Record<string, unknown>;
 function packet(messages: Message[], split = messages.length): CompactionSourceInput {
@@ -12,7 +15,7 @@ function packet(messages: Message[], split = messages.length): CompactionSourceI
     timestamp: "2026-01-01T00:00:00.000Z", message,
   }));
   return { messagesToSummarize: messages.slice(0, split), turnPrefixMessages: messages.slice(split),
-    firstKeptEntryId: `entry-${messages.length}`, branchEntries: entries as never[], sessionId: "source", cwd: "/tmp/project" };
+    firstKeptEntryId: `entry-${messages.length}`, branchEntries: entries as never[], cwd: "/tmp/project" };
 }
 function document(): DcDistillSummary {
   return { format: SUMMARY_FORMAT, notice: SUMMARY_NOTICE, focus: null, latestRequest: null,
@@ -64,18 +67,60 @@ describe("preparation-owned typed input", () => {
   });
   test("owned predecessor admission is opportunistic and never blocks", () => {
     const summary = encodeSummary(document());
-    expect(buildCompactionSource(withPrior(summary, { compactor: "dc-distill", summaryDigest: digest(summary) })).predecessor).toEqual(document());
-    // Digest mismatch on well-formed template text: rows are still mined, never fatal.
-    expect(buildCompactionSource(withPrior(summary, { compactor: "dc-distill", summaryDigest: "0".repeat(64) })).predecessor).toEqual(document());
-    // Damaged owned template text: valid rows survive, damaged rows drop.
+    expect(buildCompactionSource(withPrior(summary, { compactor: "dc-distill", summaryDigest: sha256Hex(summary) })).predecessor).toEqual(document());
+    // Unverified or damaged owned summaries remain attributed text only.
+    const mismatched = buildCompactionSource(withPrior(summary, { compactor: "dc-distill", summaryDigest: "0".repeat(64) }));
+    expect(mismatched.predecessor).toBeNull();
+    expect(mismatched.records[0]).toEqual({ kind: "native-summary", text: summary });
     const damaged = summary.split("\n").slice(0, 5).join("\n");
-    const salvaged = buildCompactionSource(withPrior(damaged, { compactor: "dc-distill", version: 15 }));
-    expect(salvaged.predecessor?.records.map(row => row.text)).toEqual(["prior observation"]);
+    const degradedDamaged = buildCompactionSource(withPrior(damaged, { compactor: "dc-distill", summaryDigest: sha256Hex(damaged) }));
+    expect(degradedDamaged.predecessor).toBeNull();
+    expect(degradedDamaged.records[0].text).toBe(damaged);
     // Old JSON formats mine nothing and degrade to attributed text.
     const legacy = JSON.stringify(document());
     const degraded = buildCompactionSource(withPrior(legacy, { compactor: "dc-distill", version: 15 }));
     expect(degraded.predecessor).toBeNull();
     expect(degraded.records[0]).toEqual({ kind: "native-summary", text: legacy });
+  });
+  test("unverified command-status edits never create fresh observations", () => {
+    const value = document();
+    value.latestRequest = { text: "keep the original user constraint", origin: "current", shortened: false };
+    value.commands = [{ identityDigest: "A".repeat(22), runner: "bash", command: "bun test", cwd: null,
+      status: "error", result: "failed", shortened: false, origin: "current" }];
+    const verified = encodeSummary(value);
+    for (const summary of [verified.replace(" | error | ", " | success | "), verified.slice(0, -5)]) {
+      const source = buildCompactionSource(withPrior(summary, { compactor: "dc-distill", summaryDigest: sha256Hex(verified) }));
+      expect(source.predecessor).toBeNull();
+      expect(source.records[0]).toEqual({ kind: "native-summary", text: summary });
+      expect(extractObservations(source).commands).toEqual([]);
+    }
+    const input = withPrior(verified, { compactor: "dc-distill", summaryDigest: sha256Hex(verified) });
+    const assistant = { role: "assistant", content: "response only" };
+    input.messagesToSummarize = [assistant];
+    (input.branchEntries[1] as unknown as { message: Message }).message = assistant;
+    const source = buildCompactionSource(input);
+    expect(buildSummary(source, extractObservations(source)).latestRequest).toEqual({ ...value.latestRequest, origin: "prior" });
+  });
+  test("invalid tool IDs cancel before budgeting; undefined IDs use certified pairing", () => {
+    for (const invalid of ["", null, 0, true, {}, []]) {
+      const call = { role: "assistant", content: [{ type: "toolCall", id: invalid, name: "read", arguments: { path: "x", extra: "x".repeat(MAX_INPUT_BYTES + 1) } }] };
+      expect(() => buildCompactionSource(packet([call]))).toThrow("invalid tool identity");
+      expect(() => buildCompactionSource(packet([{ role: "toolResult", toolName: "read", toolCallId: invalid, content: "ok" }]))).toThrow("invalid tool identity");
+    }
+    for (const identity of [{}, { id: undefined }]) {
+      const source = buildCompactionSource(packet([
+        { role: "assistant", content: [{ type: "toolCall", ...identity, name: "read", arguments: { path: "valid" } }] },
+        { role: "toolResult", toolName: "read", toolCallId: undefined, isError: false, content: "ok" },
+      ]));
+      expect(extractObservations(source).files.read.map(row => row.path)).toEqual(["valid"]);
+    }
+    const exact = "  valid identity  ";
+    const source = buildCompactionSource(packet([
+      { role: "assistant", content: [{ type: "toolCall", id: exact, name: "read", arguments: { path: "exact" } }] },
+      { role: "toolResult", toolName: "read", toolCallId: exact, isError: false, content: "ok" },
+    ]));
+    expect(source.records.map(record => record.kind === "tool-call" || record.kind === "tool-result" ? record.callId : null)).toEqual([exact, exact]);
+    expect(extractObservations(source).files.read.map(row => row.path)).toEqual(["exact"]);
   });
   test("native and foreign summaries remain attributed text", () => {
     const native = buildCompactionSource(withPrior("native prose"));
@@ -118,7 +163,7 @@ describe("20 MiB whole-message envelope", () => {
         idlessCall(name, { ...args, extra: "x".repeat(21 * 1024 * 1024) }),
         idlessCall(name, args), idlessResult(name),
       ]));
-      expect(source.records.map(record => record.idlessPairingKey)).toEqual([null, null]);
+      expect(source.records.map(record => record.kind === "tool-call" || record.kind === "tool-result" ? record.pairing.state === "certified-idless" ? record.pairing.key : null : undefined)).toEqual([null, null]);
       expect(source.omittedInputRecords).toBe(1);
       expect(Buffer.byteLength(JSON.stringify(source))).toBeLessThanOrEqual(MAX_INPUT_BYTES);
       const facts = extractObservations(source);
@@ -126,14 +171,14 @@ describe("20 MiB whole-message envelope", () => {
       expect(facts.commands).toEqual([]);
     });
   }
-  test("omitting an earlier successful result never redirects a later result", () => {
+  test("huge result content no longer omits the record and sequential pairs hold", () => {
     const source = buildCompactionSource(packet([
       idlessCall("read", { path: "first" }), idlessResult("read", "x".repeat(21 * 1024 * 1024)),
       idlessResult("read"), idlessCall("read", { path: "second" }), idlessResult("read"),
     ]));
-    expect(source.records.map(record => record.idlessPairingKey)).toEqual([0, null, 1, 1]);
-    expect(extractObservations(source).files.read.map(row => row.path)).toEqual(["second"]);
-    expect(source.omittedInputRecords).toBe(1);
+    expect(source.records.map(record => record.kind === "tool-call" || record.kind === "tool-result" ? record.pairing.state === "certified-idless" ? record.pairing.key : null : undefined)).toEqual([0, 0, null, 1, 1]);
+    expect(extractObservations(source).files.read.map(row => row.path)).toEqual(["first", "second"]);
+    expect(source.omittedInputRecords).toBe(0);
     expect(Buffer.byteLength(JSON.stringify(source))).toBeLessThanOrEqual(MAX_INPUT_BYTES);
   });
   test("omitting a unique paired call preserves later sequential pairing", () => {
@@ -141,7 +186,7 @@ describe("20 MiB whole-message envelope", () => {
       idlessCall("read", { path: "first", extra: "x".repeat(21 * 1024 * 1024) }), idlessResult("read"),
       idlessCall("read", { path: "second" }), idlessResult("read"),
     ]));
-    expect(source.records.map(record => record.idlessPairingKey)).toEqual([0, 1, 1]);
+    expect(source.records.map(record => record.kind === "tool-call" || record.kind === "tool-result" ? record.pairing.state === "certified-idless" ? record.pairing.key : null : undefined)).toEqual([0, 1, 1]);
     expect(extractObservations(source).files.read.map(row => row.path)).toEqual(["second"]);
     expect(source.omittedInputRecords).toBe(1);
     expect(Buffer.byteLength(JSON.stringify(source))).toBeLessThanOrEqual(MAX_INPUT_BYTES);
@@ -182,6 +227,7 @@ describe("20 MiB whole-message envelope", () => {
       { role: "toolResult", toolName: "read", toolCallId: "same", isError: false, content: "output" },
     ]));
     expect(source.duplicateCallIds).toEqual(["same"]);
+    expect(extractObservations(source).files.read).toEqual([]);
     expect(source.records.filter(record => record.kind === "tool-call")).toHaveLength(1);
     expect(source.omittedInputRecords).toBe(1);
   });
@@ -194,5 +240,77 @@ describe("20 MiB whole-message envelope", () => {
   });
   test("mandatory predecessor cannot fall out of the envelope", () => {
     expect(() => buildCompactionSource(withPrior("x".repeat(21 * 1024 * 1024)))).toThrow("mandatory metadata");
+  });
+});
+
+describe("malformed-message recovery provenance", () => {
+  const duplicateCall = { role: "assistant", content: [
+    { type: "toolCall", id: "toolu_1", name: "edit", arguments: { path: "/p/a.ts", old: "", new: "x" } },
+  ] };
+  const duplicateResult = { role: "toolResult", toolCallId: "toolu_1", toolName: "edit", isError: false, content: "done" };
+  test("malformed tool-bearing messages cancel instead of erasing duplicate-ID ambiguity", () => {
+    const malformed = { role: "assistant", content: [
+      { type: "toolCall", id: "toolu_1", name: "edit", arguments: { path: "/p/a.ts", old: "", new: "x" } },
+      { type: "text", text: 42 },
+    ] };
+    expect(() => buildCompactionSource(packet([malformed, duplicateCall, duplicateResult]))).toThrow(CompactionInputError);
+    expect(() => buildCompactionSource(packet([malformed]))).toThrow("invalid assistant text");
+  });
+  test("malformed tool-result messages cancel instead of losing their identity", () => {
+    expect(() => buildCompactionSource(packet([{ role: "toolResult", toolName: 42 }]))).toThrow(CompactionInputError);
+    expect(() => buildCompactionSource(packet([duplicateCall, { role: "toolResult", toolCallId: "toolu_1", toolName: "edit", isError: false, content: ["raw"] }])))
+      .toThrow(CompactionInputError);
+  });
+  test("identity-free malformed messages degrade to attributed text clipped exactly once", () => {
+    const oversized = { role: "assistant", content: [
+      { type: "text", text: "note" }, { type: "text", text: 42 }, { type: "text", text: "z".repeat(9500) },
+    ] };
+    const source = buildCompactionSource(packet([oversized]));
+    const recovered = source.records.find(record => record.kind === "custom");
+    expect(recovered).toBeDefined();
+    expect(codePointLength(recovered!.text)).toBeGreaterThan(2048);
+    const row = encodeSummary(buildSummary(source, extractObservations(source))).split("\n")
+      .find(line => line.startsWith("custom | "));
+    expect(row).toContain(" | cut | ");
+    const alien = buildCompactionSource(packet([{ role: "alien" }]));
+    expect(alien.records.filter(record => record.kind === "custom")).toHaveLength(1);
+  });
+  test("well-formed duplicate calls keep their ambiguity and suppress facts", () => {
+    const source = buildCompactionSource(packet([duplicateCall, duplicateCall, duplicateResult]));
+    expect(source.duplicateCallIds).toEqual(["toolu_1"]);
+    expect(extractObservations(source).files.modified).toEqual([]);
+  });
+});
+
+describe("bounded display text", () => {
+  test("large tool content stores once, clips display with honest provenance", () => {
+    const payload = "y".repeat(6 * 1024 * 1024);
+    const source = buildCompactionSource(packet([
+      { role: "user", content: "please edit" },
+      { role: "assistant", content: [{ type: "toolCall", id: "t1", name: "edit", arguments: { path: "/p/big.ts", old: "", new: payload } }] },
+      { role: "toolResult", toolCallId: "t1", toolName: "edit", isError: false, content: "r".repeat(4096) },
+      { role: "bashExecution", command: "echo hi", output: "z".repeat(4096), exitCode: 0 },
+      { role: "user", content: "thanks" },
+    ]));
+    const call = source.records.find(record => record.kind === "tool-call")!;
+    expect(codePointLength(call.text)).toBe(2048);
+    expect(call.textShortened).toBe(true);
+    expect(source.records.find(record => record.kind === "tool-result")!.textShortened).toBe(true);
+    expect(source.records.find(record => record.kind === "bash")!.textShortened).toBe(true);
+    // Content is stored once: no display-text duplicate of the payload.
+    expect(JSON.stringify(source).length).toBeLessThan(payload.length + 1024 * 1024);
+    const encoded = encodeSummary(buildSummary(source, extractObservations(source)));
+    expect(encoded).toContain("tool-call | current | cut | edit ");
+    expect(encoded).toContain("tool-result | current | cut | ");
+    expect(encoded).toContain("bash | current | cut | ");
+    expect(buildSummary(source, extractObservations(source)).files.modified.map(row => row.path)).toEqual(["/p/big.ts"]);
+  });
+  test("small tool content keeps full display without provenance flags", () => {
+    const source = buildCompactionSource(packet([
+      { role: "assistant", content: [{ type: "toolCall", id: "t1", name: "read", arguments: { path: "/p/a" } }] },
+      { role: "toolResult", toolCallId: "t1", toolName: "read", isError: false, content: "ok" },
+    ]));
+    for (const record of source.records) expect(record.textShortened).toBeUndefined();
+    expect(encodeSummary(buildSummary(source, extractObservations(source)))).toContain("tool-call | current | full | read ");
   });
 });

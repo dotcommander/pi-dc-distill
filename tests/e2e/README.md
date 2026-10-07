@@ -33,48 +33,36 @@ and a subsequent usable native prompt. A deliberately small model window checks
 that an oversized retained tail cancels when mandatory rebuilt context cannot fit.
 
 The acceptance oracle has no production imports. It independently checks the
-fixed JSON shape and notice, bounded Unicode observations, file/command bounds,
+fixed text format and notice, bounded Unicode observations, file/command bounds,
 omission counters, exact wire digest and minimal unversioned details. Its negative
 fixtures run in `bun test`; they reject numbered fields, checkpoint state,
 corrupt authenticated shapes and impossible known capacity.
 
 These are scripted installed-host receipts. Fixture checks alone do not prove
 installed-host behavior. They do not establish paid-provider behavior or rendered
-native UI notification/card behavior. Runtime results must be reported for the
+native compaction-card behavior. Runtime results must be reported for the
 actual host selected. Historical autonomous, continuation, checkpoint, timing,
 TUI and demo programs are retired and are not acceptance evidence.
 
-The simplified extension requires fresh sessions. Existing incompatible owned
-summaries and active legacy handoffs are refused; use the old extension to finish
-those sessions. These programs neither migrate nor delete historical data.
+The simplified extension requires fresh sessions. Existing incompatible sessions
+should use the old extension to finish those sessions. Predecessor admission itself is opportunistic: only verified
+current-format summaries carry structured state; every other summary becomes
+bounded attributed text, and active legacy handoffs contribute no messages.
+These programs neither migrate nor delete historical data.
 
-## Historical equal-summary callback regression
+## Identical-summary journal regression
 
-The lifecycle suite now seeds a real compaction, keeps it as an abandoned journal
+The lifecycle suite seeds a real compaction, keeps it as an abandoned journal
 sibling, and reopens the original conversation branch with an inert custom leaf.
 Repeating the same native compaction instructions produces byte-identical summary
-bytes but a new active attempt. An independent test extension records the host's
-callback identity and the newest actual active compaction. Older Pi hosts may
-report the abandoned entry; newer hosts may report the new entry directly.
-Both must leave exactly one new current-contract active commit.
+bytes with a distinct new journal entry. The independent journal/summary oracle
+identifies the newly appended active entry by its journal ID and parent ancestry,
+checks its details and summary digest, and requires exactly one new current-contract
+active commit. Historical callback identity or summary equality is not an oracle
+for the active commit.
 
-Pi exposes its RPC UI bridge as `hasUI:true`. The RPC scenario therefore also
-requires exactly one observed `ctx.ui.notify` invocation for the new active
-commit, with the matching rebuilt token estimate. This establishes invocation
-through the bridge; it does not establish rendered notification text. Run the
-separate native launcher in an owned PTY for the rendered UI boundary:
-
-```sh
-DISTILL_PI_PACKAGE="/path/to/installed/pi-coding-agent" DISTILL_PI_EXPECT_VERSION=1.0.4 bun run tests/e2e/summary-collision-tui.ts
-```
-
-After startup submit the printed `/compact` instruction, wait for the native
-successful compaction card, then exit with Ctrl+C twice. The launcher asserts
-one active new attempt with identical bytes, one extension-owned callback, and
-exactly one real `ctx.ui.notify` invocation with `hasUI:true`. It preserves the
-callback/notification telemetry, interactive instructions and acceptance receipt
-in the printed temporary directory. Terminal screenshots or a PTY transcript are
-still needed to establish visible notification rendering. Relaunching creates a
-fresh sandbox; no installed package or existing session is altered. If the host
-resists shutdown, the launcher bounds its own termination escalation to five
-seconds and stops only its child process.
+The extension has no post-commit observer, notification receipt, or notification
+invocation. Pi's native compaction card is the sole success display. RPC journals
+establish host append and active-branch behavior; they do not establish rendered
+card visibility. The former notification observer and native TUI launcher are
+retired. No installed package or existing session is altered by these scenarios.

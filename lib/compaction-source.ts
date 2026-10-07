@@ -1,10 +1,11 @@
+import { sha256Hex } from "./sha256.ts";
 import { isDeepStrictEqual } from "node:util";
 import { buildSessionProjection, type SessionEntry } from "./sdk.ts";
-import { decodeSummary, salvageSummary } from "./compiler/budget-formatter.ts";
+import { decodeSummary } from "./compiler/budget-formatter.ts";
 import { normalizeMessage } from "./compiler/normalizer.ts";
-import { certifyIdlessPairs } from "./compiler/tool-tracker.ts";
+import { certifyToolPairs } from "./compiler/tool-tracker.ts";
 import { CompactionInputError } from "./compiler/errors.ts";
-import { checkAbort, digest, isRecord, MAX_INPUT_BYTES, MAX_SOURCE_MESSAGES, MAX_TEXT_CODE_POINTS, shorten, validateStructuralInput } from "./compiler/helpers.ts";
+import { checkAbort, isRecord, MAX_INPUT_BYTES, MAX_SOURCE_MESSAGES, validateStructuralInput } from "./compiler/helpers.ts";
 import type { CompactionSource, NormalizedRecord } from "./compiler/types.ts";
 
 export type { CompactionSource } from "./compiler/types.ts";
@@ -15,9 +16,7 @@ export interface CompactionSourceInput {
   turnPrefixMessages?: unknown[];
   firstKeptEntryId: string;
   branchEntries: SessionEntry[];
-  sessionId: string;
   cwd: string;
-  timestamp?: string;
   signal?: AbortSignal;
 }
 
@@ -56,13 +55,13 @@ export function buildCompactionSource(input: CompactionSourceInput): CompactionS
   let count = 0;
   let partitionExists = messages.length === 0;
   for (const entry of discarded) {
-    count += flatten([entry]).length;
+    count += entry.sourceEntry.type === "compaction" ? 0 : entry.messages.filter(message => message.role !== "system").length;
     if (count === messages.length) partitionExists = true;
   }
   if (!partitionExists) throw new CompactionInputError("inconsistent_projection: partition splits a projected entry");
   // Legacy handoff custom entries are state-only: they project no messages and
   // simply contribute nothing, never blocking compaction.
-  const session = { id: input.sessionId, cwd: input.cwd, timestamp: input.timestamp ?? new Date(0).toISOString() };
+  const session = { cwd: input.cwd };
   validateStructuralInput(session);
   let predecessor: CompactionSource["predecessor"] = null;
   const nativePrior: NormalizedRecord[] = [];
@@ -70,14 +69,12 @@ export function buildCompactionSource(input: CompactionSourceInput): CompactionS
     validateStructuralInput(prior);
     const details = isRecord(prior.details) ? prior.details : undefined;
     // Admission is opportunistic and never required: an exactly authenticated
-    // current-template summary carries full structured state; a damaged owned
-    // summary is row-mined so partial corruption drops rows, not the compaction;
-    // everything else degrades to attributed text without historical decoding.
+    // current-template summary carries full structured state. Everything else
+    // degrades to attributed text without historical decoding.
     if (details?.compactor === "dc-distill" && !("version" in details)
-      && typeof details.summaryDigest === "string" && digest(prior.summary) === details.summaryDigest) {
+      && typeof details.summaryDigest === "string" && sha256Hex(prior.summary) === details.summaryDigest) {
       try { predecessor = decodeSummary(prior.summary); } catch { predecessor = null; }
     }
-    if (predecessor === null && details?.compactor === "dc-distill") predecessor = salvageSummary(prior.summary);
     if (predecessor === null) nativePrior.push({ kind: "native-summary", text: prior.summary });
   }
   const groups = [...messages, ...prefix].map(message => {
@@ -87,24 +84,24 @@ export function buildCompactionSource(input: CompactionSourceInput): CompactionS
       return normalizeMessage(message);
     } catch (error) {
       if (!(error instanceof CompactionInputError)) throw error;
-      // Resilience: a malformed message degrades to bounded attributed text
-      // mined from whatever is recoverable instead of cancelling compaction.
+      // Tool identity must never be silently discarded: recovering an
+      // identity-bearing message as attributed text could erase duplicate-ID
+      // ambiguity and manufacture a unique pairing the source never proved.
+      // Malformed tool-bearing messages cancel compaction instead.
+      const toolBearing = isRecord(message) && (message.role === "toolResult"
+        || (message.role === "assistant" && Array.isArray(message.content)
+          && message.content.some(block => isRecord(block) && block.type === "toolCall")));
+      if (toolBearing) throw error;
+      // Resilience: a malformed message without tool identity degrades to
+      // attributed text mined from whatever is recoverable. The full text is
+      // kept here so observation clips exactly once and the row keeps its
+      // truncation provenance instead of masquerading as a complete record.
       let mined = "";
       try { mined = JSON.stringify(message) ?? ""; } catch { mined = ""; }
-      const reduced = shorten(mined || String(message), MAX_TEXT_CODE_POINTS);
-      return [{ kind: "custom", text: reduced.text }] as NormalizedRecord[];
+      return [{ kind: "custom", text: mined || String(message) }] as NormalizedRecord[];
     }
   });
-  certifyIdlessPairs(groups.flat());
-  // Count ambiguity before admitting whole messages. Dropping one occurrence
-  // must never turn a duplicate call/result ID into an apparently unique pair.
-  const calls = new Map<string, number>(), results = new Map<string, number>();
-  for (const record of groups.flat()) {
-    if (record.callId === undefined) continue;
-    const counts = record.kind === "tool-call" ? calls : record.kind === "tool-result" ? results : undefined;
-    if (counts) counts.set(record.callId, (counts.get(record.callId) ?? 0) + 1);
-  }
-  const duplicateCallIds = [...new Set([...calls, ...results].filter(([, count]) => count > 1).map(([id]) => id))].sort();
+  const duplicateCallIds = certifyToolPairs(groups.flat());
   let omittedInputRecords = groups.reduce((total, group) => total + group.length, 0);
   const base = { records: nativePrior, predecessor, duplicateCallIds, omittedInputRecords, session };
   // Bytes measure this typed envelope only; no serialization/reparse compiler route.
@@ -122,8 +119,9 @@ export function buildCompactionSource(input: CompactionSourceInput): CompactionS
     if (used + cost > MAX_INPUT_BYTES) continue;
     omittedInputRecords = remaining;
     used += cost;
-    admitted.unshift(group);
+    admitted.push(group);
     admittedCount += group.length;
   }
+  admitted.reverse(); // ingestion walked newest-first; chronological order for the result
   return { records: [...nativePrior, ...admitted.flat()], predecessor, duplicateCallIds, omittedInputRecords, session };
 }

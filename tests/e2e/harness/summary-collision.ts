@@ -3,20 +3,18 @@ import { randomBytes } from "node:crypto";
 import { appendFileSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import { RpcClient } from "./rpc-client.ts";
-import { latestSessionFile, piEnv, REPO_ROOT, scriptedArgs, type TestDir } from "./env.ts";
+import { latestSessionFile, piEnv, scriptedArgs, type TestDir } from "./env.ts";
 import { assertCurrentCompaction } from "./current-compaction.ts";
 export const COLLISION_FOCUS = "Preserve collision regression observations.";
-export const COMMIT_OBSERVER = join(REPO_ROOT, "tests/e2e/harness/commit-observer.ts");
 export function readRecords(file: string): Array<Record<string, any>> {
   return readFileSync(file, "utf8").split("\n").filter(line => line.trim()).map(line => JSON.parse(line));
 }
-export function collisionEnv(t: TestDir, observer: string): Record<string, string> {
-  return piEnv(t, { DISTILL_COMMIT_OBSERVER: observer,
-    DISTILL_FAKE_BASE: "3000", DISTILL_FAKE_STEP: "500", DISTILL_FAKE_WINDOW: "200000" });
+export function collisionEnv(t: TestDir): Record<string, string> {
+  return piEnv(t, { DISTILL_FAKE_BASE: "3000", DISTILL_FAKE_STEP: "500", DISTILL_FAKE_WINDOW: "200000" });
 }
 export async function seedSummaryCollision(t: TestDir): Promise<{ session: string; abandoned: Record<string, any>; sibling: string }> {
   const client = new RpcClient({ args: scriptedArgs(t), cwd: t.dir, logFile: join(t.dir, "seed-rpc.log"),
-    env: collisionEnv(t, join(t.dir, "seed-observer.jsonl")) });
+    env: collisionEnv(t) });
   try {
     for (let i = 1; i <= 3; i++) {
       const since = client.mark();
