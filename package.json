@@ -1,7 +1,7 @@
 {
   "name": "pi-dc-distill",
   "version": "0.1.8",
-  "description": "Deterministic, local context compaction for the Pi coding agent. No LLM calls; includes tool-output previews and project-scoped recall.",
+  "description": "Deterministic local context compaction for Pi using bounded conversation excerpts and observations. No LLM calls.",
   "author": "Gary Blankenship",
   "license": "MIT",
   "type": "module",
@@ -23,37 +23,28 @@
       "./index.ts"
     ]
   },
-  "bin": {
-    "dc-distill-session": "./bin/dc-distill-session.ts"
-  },
   "files": [
     "index.ts",
-    "bin/**",
-    "lib/**",
-    "docs/**",
+    "lib/compaction-source.ts",
+    "lib/local-compact.ts",
+    "lib/sdk.ts",
+    "lib/unicode.ts",
+    "lib/sha256.ts",
+    "lib/compiler/types.ts",
+    "lib/compiler/normalizer.ts",
+    "lib/compiler/tool-tracker.ts",
+    "lib/compiler/budget-formatter.ts",
+    "lib/compiler/helpers.ts",
+    "lib/compiler/errors.ts",
     "README.md",
-    "AGENTS.md",
-    "LICENSE",
-    "tsconfig.json",
-    "!**/*.test.ts",
-    "!**/.work/**",
-    "!**/.*",
-    "bun.lock",
-    "tests/compare-session.ts",
-    "tests/fixtures/**",
-    "!docs/specs/**"
+    "LICENSE"
   ],
   "scripts": {
-    "distill:session": "bun ./bin/dc-distill-session.ts",
     "test": "bun test",
     "typecheck": "tsc --noEmit",
     "prepublishOnly": "bun run test && bun run typecheck",
-    "distill:e2e": "bun test ./tests/e2e/lifecycle.e2e.ts ./tests/e2e/interception.e2e.ts ./tests/e2e/busy-compaction.e2e.ts",
-    "distill:demo": "bun run tests/e2e/demo.ts",
-    "distill:compare": "bun run tests/compare-session.ts",
-    "distill:architecture": "bun scripts/check-architecture.ts",
-    "distill:quality": "bun scripts/evaluate-selector.ts",
-    "distill:performance": "bun scripts/benchmark-compiler.ts --checkpoint"
+    "distill:e2e": "bun test ./tests/e2e/lifecycle.e2e.ts ./tests/e2e/interception.e2e.ts",
+    "distill:architecture": "bun scripts/check-architecture.ts"
   },
   "peerDependencies": {
     "@earendil-works/pi-coding-agent": "*",
@@ -89,5 +80,8 @@
   "repository": {
     "type": "git",
     "url": "git+https://github.com/dotcommander/pi-dc-distill.git"
+  },
+  "exports": {
+    ".": "./index.ts"
   }
 }

@@ -43,7 +43,9 @@ export class RpcClient {
     this.log(`[host] ${JSON.stringify(host)}`);
     this.proc = spawn(host.executable, [...host.prefix, "--mode", "rpc", ...options.args], {
       cwd: options.cwd,
-      env: { ...process.env, PI_SKIP_VERSION_CHECK: "1", PI_OFFLINE: "1", ...options.env },
+      env: { PATH: process.env.PATH, TMPDIR: process.env.TMPDIR,
+        LANG: process.env.LANG, TERM: "dumb",
+        PI_SKIP_VERSION_CHECK: "1", PI_OFFLINE: "1", ...options.env },
       stdio: ["pipe", "pipe", "pipe"],
     });
     this.proc.stdout.setEncoding("utf8");

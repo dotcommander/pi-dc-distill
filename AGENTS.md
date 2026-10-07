@@ -1,424 +1,56 @@
 # AGENTS.md — pi-dc-distill
 
-## What This Is
+## Product and orchestration
 
-`dc-distill` replaces Pi's default LLM compactor with a deterministic, local
-TypeScript compiler. Pi still owns `/compact`, cut selection, entry append, and
-context rebuilding. This feature owns the `session_before_compact` result and
-never calls an LLM.
+`dc-distill` replaces Pi's default LLM compactor with one deterministic local TypeScript compiler. Pi owns `/compact`, triggering, cut selection, append, and context rebuilding. Intercept every request reason identically, including missing and unfamiliar reasons.
 
-## Planning and Orchestration
+At planning and phase boundaries, dispatch genuinely independent native agents with disjoint ownership and bounded packets. Keep one integration owner, serialize overlapping writes, preserve concurrent work, and use one verifier after all planned edits and semantic review repairs. Children do not delegate. Parallelism does not expand authority.
 
-At every planning and phase boundary, actively look for opportunities to finish
-faster by running native agents in parallel. Proactively dispatch genuinely
-independent work with disjoint ownership and bounded task packets; reuse suitable
-specialists, state dependencies, and assign one integration owner. Serialize
-overlapping writes and dependent edits. Preserve agent-only execution and one
-verifier after all planned edits; avoid duplicate checks and speculative agent
-churn. Parallelism does not expand provider or action authority.
+## Hard invariants
 
-## Hard Invariants
+1. Never add an LLM call, extension-owned trigger, abort, timer, continuation send, tool, or command.
+2. Live input comes only from `event.preparation` and active `event.branchEntries`; never read session files in the hook.
+3. Source, compiler, cancellation, and capacity failures cancel compaction; never fall through to Pi's default LLM compactor.
+4. Only a matching primary-session committed compaction may produce a best-effort UI notification. No durable success artifacts or storage writes remain.
+5. Child sessions cancel interception. Preserve primary-session identity, lifecycle generation, and one pending receipt.
 
-1. Never add an LLM call. If a workflow needs subjective LLM summarization,
-   build a separate extension from Pi's custom-compaction example.
-2. Production compaction input comes only from Pi's `event.preparation` and
-   active `event.branchEntries`. Never read the append-only session file in the
-   live hook.
-3. Fail closed with `Events.cancelCompact()`. A compiler failure or cancellation
-   must never fall through to Pi's default compactor.
-4. Success is transactional. Prepare the result in `session_before_compact`,
-   but write success logs, dumps, recall, notifications, and monitor state only
-   after a matching extension-owned `session_compact` event.
-5. The runtime is owned by one primary session. Child/in-process sessions are
-   no-ops, and their before-compact hooks cancel explicitly.
+## Source and current contract
 
-## Authoritative Input
+Preserve projection agreement, unique entry identities, predecessor agreement, exact discarded-message matching, split-turn boundaries, retained-tail exclusion, structural/Unicode checks, and the source-message guard. Bound input to 20 MiB using complete records, retaining mandatory metadata/predecessor and newest fitting records. Validate omitted records and retain duplicate-call-ID ambiguity before input budgeting. Pass typed normalized records directly to the compiler.
 
-`lib/compaction-source.ts` builds a typed `CompactionSource` in this order:
+The single unversioned JSON format is `dc-distill-summary`, with fixed keys `format`, `notice`, `focus`, `latestRequest`, `records`, `files`, `commands`, and `omitted`. Notice is `Selected conversation excerpts and observations; incomplete.` Current focus comes only from native instructions. Latest request is the newest admitted native user text or predecessor request, attributed context with no duplicate excerpt. Flatten carried records with prior origin; never reinterpret carried text as fresh calls.
 
-1. previous compaction summary
-2. discarded `messagesToSummarize`
-3. discarded split-turn `turnPrefixMessages`
-4. latest eligible active-branch distill handoff
+Admit owned predecessor state only with valid current shape and exact digest. Reject incompatible owned summaries and active legacy handoffs without historical decoding. Superseded history outside effective projection does not block. Native and foreign summaries remain attributed text.
 
-It directly normalizes user, assistant, tool-result, bash-execution, custom,
-branch-summary, and compaction-summary messages. Retained tail entries and
-abandoned branches cannot enter the compiler. The canonical normalized bytes
-are reused for `inputDigest` and an optional before-dump.
+Facts require exact unambiguous pairing and full identities before shortening. File facts require `isError === false`; preserve exact aliases, raw tool names, lexical path identity, path precedence, and create-capable distinction. Commands report recorded success/error/unknown without prose or shell-analysis inference. Observations do not establish current filesystem truth, readiness, verification, or authorization. Protected tasks, pins, evidence freshness, signatures, handoffs, checkpoints, and graphs are retired.
 
-Oversized input keeps metadata, the previous summary, and the newest whole
-discarded records inside a 20 MiB envelope. It never slices JSON or message
-records. `digestScope` is `compaction-input` or `bounded-compaction-input`.
+## Bounds and lifecycle
 
-`compileSessionJsonl()` and `compileSessionFile()` remain diagnostic/test
-compatibility utilities only. They reject empty, malformed, truncated, and
-entirely filtered input.
+Preserve the 8,192-code-point operating target and 65,536-code-point hard serialized limit. Focus, request, and excerpts are limited to 2,048; paths to 512; reads and modifications to 50 each; commands to 10, with runner 128, command/cwd 512, and result 300. Count escaping/framing and preserve complete JSON and Unicode code points. Give optional facts up to 2,048 serialized code points in repeated newest-modification, newest-command, newest-read order, then newest fitting excerpts rendered chronologically.
 
-## Output Contract
+Carry omission counters once and add newly omitted candidates once. Deduplication/replacement are not omissions; source-bound drops count only as input omissions. Saturate counters at maximum safe integer. Evict oldest excerpt, command, read, then modification for hard-limit/capacity overflow.
 
-`session_before_compact` returns Pi's canonical shape with dc-distill details
-version 15:
+Estimate the exact proposed summary and retained tail with Pi's `buildSessionContext()` and `estimateTokens()`. Retry after whole-row eviction; cancel if mandatory content cannot fit. Unknown capacity remains explicit. Details contain only compactor, attemptId, summaryDigest, tokensAfter, tokensAfterSource, capacityStatus, and optional contextWindow.
 
-```ts
-{
-  compaction: {
-    summary: string,
-    firstKeptEntryId: string,
-    tokensBefore: number,
-    details: {
-      compactor: "dc-distill",
-      version: 15,
-      tier: 1,
-      attemptId: string,
-      autonomous: boolean,
-      tokensAfter: number,
-      summaryTokens: number,
-      tokensAfterSource: "pi-rebuilt-message-estimate",
-      capacityStatus: "unknown" | "within-window",
-      contextWindow?: number,
-      reductionPct: number,
-      apiTokensBefore?: number,
-      readFiles: string[],
-      modifiedFiles: string[],
-      literalAnchors: string[],
-      inputDigest: string,
-      summaryDigest: string,
-      checkpoint: ResumeCheckpoint, // schema v2; historical v1 readable
-      checkpointDigest: string,
-      checkpointSections: CheckpointSectionLedger, // 17 fixed keys, derived telemetry
-      digestScope: "compaction-input" | "bounded-compaction-input"
-    }
-  }
-}
-```
+Commit matching independently validates the newest active compaction against the full pending receipt: owner, attempt, generation, cut, branch anchor, and exact summary/details; tolerate later sibling custom entries. Pi 1.0.4 may supply a historical identical-summary entry in its callback. Callback summary equality alone never authorizes notification; reconcile against the independently validated active entry. Consume the receipt before synchronous best-effort notification and invalidate on relevant lifecycle/model/tree changes. Stale, duplicate, superseding, abandoned, or foreign commits cannot authorize it. The native compaction card is the persistent success display; literal notification text need not remain visible after the host rebuilds chat. Do not add timers, private presentation patches, or new UI features.
 
-`tokensAfter` is Pi's rebuilt message-context estimate, calculated with
-`buildSessionContext()` and `estimateTokens()`. `summaryTokens` estimates the
-returned summary alone. `summaryDigest` hashes the exact returned wire summary,
-without a model-facing metric line. These counts are host-consistent heuristics. Version-5 through version-13 session entries remain
-readable and are not rewritten.
+## Scope and development
 
-The final summary is limited to 65,536 Unicode code points and targets an 8,192-
-code-point operating state by dropping complete optional records first. User
-focus is limited to 2,048 code points; read and modified file lists each keep 50
-items; individual marker items keep 512 code points. Truncated lists include
-omitted counts. Formatting must preserve complete headings and balanced XML
-markers; never apply a final substring to structured output. Malformed decoded
-Unicode, including materialized handoff fields, is rejected with a typed input
-error; shortening valid Unicode preserves complete code points.
+Production allowlist: `index.ts`; `lib/{compaction-source,local-compact,sdk,unicode,sha256}.ts`; `lib/compiler/{types,normalizer,tool-tracker,budget-formatter,helpers,errors}.ts`. Package exports only the root extension and publishes its explicit runtime allowlist plus README/license. No replay binary, offline historical evaluator, benchmark program, recall, preview, focus injection, storage, dump, migration, or custom card remains.
 
-Version 15 adds a bounded `<type-signatures>` catalog immediately after `</verification>`: exported-declaration lines extracted only from successfully paired tool results, capped at 12 files and 8 signatures per file (512 code points each), ordered modified-class first, then read-class, then carried prior-summary entries restricted to frontier paths without a fresh observation. The operating budget evicts complete entries from the lowest-priority tail before touching read-files, the hard wire limit clears the whole catalog before cancelling, and the catalog is rebuilt fresh each compaction; it is never persisted.
+Use fresh sessions with the new extension; existing incompatible sessions use the old extension. Do not load both together. Preserve `.work`, receipts, stored data, session files, excluded historical docs, and the `CLAUDE.md` symlink. Active docs are indexed in `docs/README.md`; historical specs/ADRs/benchmarks/assets are excluded from the current contract and package.
 
-Version 9 adds exact lowercased tool aliases: `view_file` reads;
-`write_to_file`, `replace_file_content`, `patch_file`, and `create_file` writes;
-`write_to_file` and `create_file` are create-capable. Preserve raw tool names
-for pairing. Path precedence is `path`, `file_path`, `filePath`, `file`, followed
-by `targetFile`, `TargetFile`, `target_file`, `target_path`, `absolutePath`,
-`AbsolutePath`.
+Keep existing dependency versions and Pi SDK development pins at 0.99.2; host peer ranges remain `*`. Use project-local `bun install --frozen-lockfile`, never another project's node_modules. No dependency additions, publication, data deletion, or migration is authorized by implementation.
 
-Version 10 requires a unique matching call ID and compatible raw tool name,
-with only the unique same-name ID-less fallback. Successful paired results alone
-enter provenance-labeled file lists. Write risks retain full lexical path identity
-and chronology independently of bounded display text; later successful paired
-inspection resolves terminal risks across aliases, never a pending mutation.
-
-Verification identity is exact runner, command bytes, and known working directory.
-Potential mutations fence evidence at submission and completion, including failed
-or pending work. Fresh passes start after preceding mutations finish, overlap no
-mutation, and precede no later mutation. Mixed batches cannot establish execution
-order. Missing diagnostic `isError` is incomplete; unknown cwd leaves scope and
-freshness unestablished. Git observations distinguish status, worktree diff/stat,
-whitespace checks, and revision comparisons and carry the same freshness rules.
-
-Strict v1/v2/v3 handoff envelopes remain intact. V3 adds at most 32 observed
-preconditions (`file-read-succeeded` and `verification-pass`) and task-level
-`requires` lists. Evaluate immutable full-identity observations before display
-shortening: fresh unique success is satisfied, fresh matching failure contradicted,
-and stale/missing/incomplete/pending/overlapping/uncertain evidence unknown.
-Graph readiness stays distinct; `<ready-tasks>` requires every predicate satisfied,
-while `<graph-ready-tasks>` shows unknown or contradicted requirements. No task
-is executed or stored status changed. Their partial task-state projection
-is capped at 3,072 Unicode code points, with rendered field excerpts capped at
-512. The budget includes escaping, framing, references, and omission notices;
-complete records preserve balanced markers and report omissions and shortening.
-Readiness is derived from the intact graph, and retained references never dangle.
-
-Version 11 preserves exact verification identity and global mutation fencing.
-Bounded shell analysis inspects supported compounds/pipelines and treats unsupported
-syntax as unknown. Scan full supplied output before preview shortening; decisive
-excerpts stay within 300 code points. Transcript-derived change-impact hints are
-advisory only, with no filesystem enrichment or dependency-based pass preservation.
-Version 12 uses the baseline production selector after the coverage candidate
-failed its ordinary-workload performance gate. The rejected coverage selector is
-removed; production and offline quality use one deterministic baseline policy.
-Move complete handoff projection late, followed by resume risks/tasks, with metrics confined to details and committed notifications. A digest-authenticated `<request-candidate-v1>` marker restates the latest native user request as attributed context only — never declared work, pins, or authorization — bounded to a 4,096-code-point envelope with an optional 512-code-point proposal, evicted only after retained-context excerpts, and carried across compactions only through digest-authenticated predecessor summaries. Verification display prioritizes required, failed, and pending receipts and protects them from budget eviction without changing checkpoint observations. Summary ordering keeps per-compaction volatile blocks — including the request candidate — after stable sections as a tested soft goal for provider prefix-cache reuse across compactions (byte determinism, volatile-data exclusion, and head-carry are pinned by `lib/cache-stability.test.ts`, with a diag-only `headStableCodePoints` observation); it is neither an attention nor a cache guarantee.
-Invalid envelopes stay bounded legacy text.
-
-Version 15 renders the `<type-signatures>` catalog after `</verification>` with `- path: signature` lines that round-trip through the scanner and recall; see the Output Contract paragraph for caps, ordering, and eviction semantics.
-
-## Transactional Lifecycle
-
-`session_before_compact` snapshots counters, compiles, calculates prospective
-metrics, freezes a `PendingCompaction`, and returns it. It does not emit durable
-success artifacts or reset the monitor.
-
-`session_compact` commits only when the owner session, extension identity,
-details version 15, owning attempt/lease, settings/model snapshot, first-kept ID, exact summary digest, validated checkpoint digest, and the exact section ledger derived from the pending checkpoint match. Branch
-ownership requires the compaction entry to remain the active branch's newest
-compaction; entries that sibling extensions append after it (for example
-compaction-reactive markers) are tolerated, while superseding or abandoned
-compactions cannot commit. Identity mismatches are ignored silently except
-for a best-effort `compaction commit ignored reason=identity-mismatch`
-diagnostic. Commit
-then resets the monitor from Pi's post-rebuild full-context usage when available,
-writes log/dump/recall, clears failure state, notifies only in a UI, and queues
-continuation only for an autonomous attempt. Continuation delivery is durable: the attempt id is journalled in the compaction details and the delivered message, and on `session_start` or tree changes a pure reducer over the active branch recovers an unanswered autonomous continuation subject to process submission fences and journal acknowledgement. Pending state and the latch are
-released in `finally`. Historical v8–v14 autonomous continuations remain readable alongside v15.
-
-A non-cancelled local compiler failure in a still-owned autonomous attempt pauses
-Mechanical admission process-locally before settled
-submission, including Auto, missed-auto pursuit, headroom floor and Emergency.
-Source construction, compilation and returned-result validation (including
-protected capacity overflow) carry structured stage/code identity; an untyped
-local strategy failure is `compiler_failure`, never classified from its message.
-Cancellation, stale snapshots, generic host callback failures, storage/reporting
-errors and post-commit artifact failures do not arm the pause. Capture the owning
-attempt, lease/generation, branch anchor and model/settings snapshot before
-reporting or releasing its reservation; late or anonymous events cannot pause or
-release another attempt. Notify once per pause episode and diagnose admission
-with `compiler-paused`; duplicate local failure reports are suppressed and
-reporting remains best effort. Warn steering and manual `/compact` remain available.
-
-Clear the pause only on a new session lifecycle generation, an actual effective
-model/context-window change or valid effective compaction-settings change,
-trustworthy branch navigation outside the failed anchor's lineage, or a validated
-newest active-branch successful compaction commit (including manual/native
-recovery). Ordinary user prompts, new leaves/input digests, identical callbacks,
-invalid settings, missing branch evidence, failed manual attempts and mismatched
-commits cannot clear it. Reservation-release rules remain independent. The pause
-has no persistent circuit, retry timer or new command; restart follows existing
-startup guards. Successful wire output, details v15, checkpoint schema v2 and
-trigger policy v3 are unchanged.
-
-Session replacement, shutdown, autonomous errors, cancellation, foreign
-compaction, mismatches, and duplicate events cannot create success artifacts.
-`session_compact_failed` releases pending/latch state only when its attempt identity matches. Anonymous failures preserve ambiguous reservations until an originating terminal callback or lifecycle reset; late events cannot clear another attempt. Preparation cancellation likewise retains its reservation, except that an anonymous aborted terminal event — the only terminal callback a native trigger has — releases an attempt that provably cannot commit: one whose preparation the runtime cancelled, or whose returned result can no longer be appended by the host.
-
-## Trigger Policy
-
-dc-distill has no extension trigger settings. It reads Pi's effective global and
-project `compaction` settings through `pi.getSettings()` at primary-session
-start, model selection, and before autonomous checks. Model-specific token
-overrides follow Pi 0.99.2 precedence and validation; invalid settings block
-autonomous checks without disabling manual deterministic interception:
-
-| Band | Pi-derived boundary | Action |
-| --- | --- | --- |
-| Auto | `min(120,000, (contextWindow - reserveTokens) - 20,000)` | Mechanical compaction through warn-minus-one. |
-| Warn | `contextWindow - reserveTokens` | Pi's native trigger line; cooperative warning through the headroom-floor-minus-one. |
-| Headroom floor | `max(Warn, contextWindow - 20,480)` | Unconditional Mechanical compaction with emergency-grade guard bypass. |
-| Emergency | `contextWindow` | Unconditional Mechanical compaction. |
-
-`compaction.enabled: false` disables dc-distill's autonomous monitor; manual
-`/compact` remains available. Fixed small-window floors preserve ordered bands,
-and 100K/140K/160K are legacy fallbacks only when Pi cannot report a context
-window; small-window floors can reduce the 20K lead. Ordinary checks require a
-current finite positive host count and apply cooldown, post-compaction growth,
-Pi-sync, and warmup guards. Headroom floor and emergency bypass those guards; ownership, valid
-enabled Pi settings, the concurrency latch, and the separate compiler-failure pause
-still apply. The 120,000-token target is fixed
-policy, not extension configuration; smaller contexts are capped by Pi's safe
-geometry. `auto-check blocked` records in `~/.pi/agent/data/dc-distill/diag.log` carry Pi's inputs and the resolved boundaries.
-
-Trigger policy version 3 retains two decisions on top of those bands. The
-**headroom floor** is `contextWindow - 16,384 - 4,096` (answer budget plus
-pi-ai's request-clamp safety margin), clamped into
-[warn, emergency]: at or above it, pi-ai's clamp
-(`min(maxTokens, window - input - 4,096)`) leaves less than 16,384 answer
-tokens, so steering cannot finish a unit and the monitor compacts mechanically
-with the same guard bypass as emergency. A **missed auto window is pursued**: a
-blocked at-or-above-auto observation sets a `missedAuto` marker, and the next
-unblocked warn-band observation compacts mechanically (`missed-auto-pursuit`)
-instead of steering; the marker never bypasses guards and is reset on
-compaction. Decided checks log `auto-check decided tier=… reason=… policy=v3`
-alongside the existing `auto-check blocked` records.
-
-At startup, capture the owner session identity and active branch journal once.
-A trustworthy nonempty branch without a compaction may skip the synthetic
-120-second cooldown only after ordinary warmup and a current synchronized host
-count. A prior compaction restores its real timestamp and waits for a fresh host
-usage baseline; ordinary admission above auto still requires 4,000-token growth.
-Never restore that baseline from heuristic `details.tokensAfter`. Missing,
-malformed, future-dated, or inaccessible journal data preserves conservative
-guards. Model and branch changes require fresh samples. Duplicate commit events
-cannot reset guards; manual, foreign, and legacy commits update admission without
-extension success artifacts. Diagnostics include session/process provenance.
-Trigger policy is v3; compaction details are version 15.
-
-## Optional Feature Gates
-
-Tool-output persistence/previews and recall are independently off by default.
-Read global/project `extensionConfig["dc-distill"].toolOutput.enabled` and
-`.recall.enabled` booleans at owner-session start. Disabled output must return
-before content/storage; disabled recall must not persist/read stored summaries,
-inject extra focus echo, or recommend recall in live summaries. Keep core
-compaction, handoffs, session details/logs, and continuation recovery independent.
-Preserve existing data. Whole-source migration is deferred unless both gates are
-on so partial hydration cannot finalize migration markers.
-
-## Recall, Dumps, and Migration
-
-`DistillStore` owns migration, logs, dumps, and recall. Default recall is stored
-under `Path.project("dc-distill", cwd)/recall.json`, keeps ten summaries per
-project, and does not expose other projects. `recall_compaction(scope: "all")`
-explicitly merges projects and labels ownerless version-5 entries
-`legacy-unscoped`.
-
-Raw dumps default off. When enabled, each committed pair contains the exact
-canonical input and exact returned wire summary. Names include millisecond
-time, PID, and attempt suffix; writes are temporary-file-and-rename operations
-under a lock.
-
-Migration runs during store initialization/session start, never module import.
-Historical names are centralized in `lib/legacy.ts` for reads/migration only;
-new writes use distill. Preserve source data and historical payloads. Do not
-load the old and new extension together.
-Each source migration marker is written only after that source
-succeeds. A failure preserves source/current data, leaves no marker, and retries
-on the next startup.
-
-## Focus Echo
-
-Focus echo reads Pi's native `{ role: "compactionSummary", summary }` message.
-It is bounded and de-duplicated before context injection. Do not restore the old
-synthetic assistant/content assumption.
-
-## Compatibility
-
-The development SDK baseline is Pi 0.99.2; the reviewed installed runtime is
-Pi 1.0.0 and 1.0.2. The root package pins the four
-`@earendil-works/pi-*` development dependencies to 0.99.2 and records
-the graph in `bun.lock`. Install project-local dependencies with
-`bun install --frozen-lockfile`; do not use or mutate another project's shared
-`node_modules`. Peer ranges are `"*"` for every host-provided package, as
-Pi's packaging contract requires; the reviewed-host boundary (0.99.2 patch
-releases, exact 1.0.0, and 1.0.2) is carried by the development pins and the review
-process, not by the peer ranges.
-
-Reviewed Pi 0.99.0+ and 1.x (including 1.0.0, 1.0.2, 1.0.3, and subsequent releases)
-use their native compaction card without patching the InteractiveMode prototype. The private
-presentation patch for hosts below 0.99 is retired. Historical custom-entry
-renderers, including `dc-shrink-compaction`, remain supported.
-
-## Verification
+After all edits and semantic review repairs, one verifier runs the approved full suite once and these gates:
 
 ```bash
 bun test
 bun x tsc --noEmit
 bun run distill:architecture
 git diff --check
+npm pack --dry-run --json
+bun run distill:e2e
 ```
 
-`bun run distill:quality <artifact-directory> <unique-label>` writes the offline
-checkpoint, generation-survival, and baseline-only optional quality receipts.
-The nested optional report is schema 2 and the aggregate report is schema 4;
-checkpoint and survival schemas remain unchanged. All 13 fixtures run with both
-focus and recall settings, three repeats each, producing 52 comparisons.
-`compileSessionJsonl()` takes four arguments. The published direct-file selector,
-card-shim, and runtime-probe imports are intentionally retired. Benchmark switches
-`--semantic`, `--semantic-worker`, and checkpoint-worker `coverage` selection
-fail explicitly; its positional `baseline` sentinel remains.
-`bun run distill:performance <artifact-directory> <unique-label> <baseline-checkpoint-receipt>`
-runs the checkpoint benchmark with 10 warmups and 30 samples in isolated workers.
-The ordinary gate requires identical sealed input, runtime/options, and Pi SDK
-preload; it compares absolute lifetime RSS, never host-subtracted RSS. See
-`docs/compiler-benchmark.md` for baseline preparation and comparison limits.
-
-`bun run distill:e2e` is the opt-in real-Pi RPC contract suite (scripted
-provider, sandboxed HOME plus temp Pi dirs); the autonomous scenario observes
-the production 120-second startup cooldown. `bun run distill:demo` runs one
-offline manual lifecycle and writes inspectable artifacts. Both stay out of
-`bun test` discovery. Their historical v13/schema-v1 assertions have not yet
-been refreshed for v15; neither is v15 acceptance evidence.
-
-Keep `runStrategies()` single-strategy and deterministic. Bump
-`details.version` when details fields or their semantics change.
-
-Version 12 hardens unknown-tool effects, structural parsing, locale-independent wire counts/order, and exact rebuilt-context capacity acceptance. Unknown capacity is explicit; observed token drift requires a valid post-commit host count. Historical versions 5–11 remain readable, continuation recovery supports 8–15, and integrity validation supports 10–15. Recovery is host-journal dependent and is not crash-atomic across process restarts.
-
-## Checkpoint v15
-
-`details.checkpoint` is a validated schema-v2 snapshot and the sole authority for
-declared tasks, user-source pins, constraints, decisions, exact evidence identities,
-mutation frontier, risks, failure history, and predecessor identity. Its deterministic
-serialization has a separate digest; the wire summary is hashed independently.
-Validated declarations and explicitly pinned user text survive repeated compaction.
-Other prose remains attributed context; implied obligations or user authorization
-are not inferred. Terminal prose or missing items cannot retire unresolved work.
-Failure history is bounded by evidence: at each compaction a carried unresolved
-failure with no fresh occurrence retires
-(`retired: not re-observed in compaction input`), and a failure whose exact
-invocation identity — tool name and arguments, or the same verification runner,
-command bytes, and working directory — later succeeds resolves
-(`resolved: later success with same invocation`). Auto-resolved records render
-only as one bounded transparency count and share the ten-resolved retention
-bound with omission accounting. This projection-only behavior changed no details field in v13; v14/v15 add the
-schema-v2 failure identity and section ledger. A stored v2 failure retains its
-full invocation digest and a bounded display excerpt, not the full fix bytes.
-Historical schema-v1 checkpoints remain read-only and convert in memory.
-
-`save_distill_handoff` optionally accepts `checkpoint: { version: 1, expectedBase:
-{ checkpointDigest, updateEntryId }, operations }`. Pin, resolve, and supersede
-operations validate exact sources and the current base atomically. The result
-returns canonical source references and the actual saved host entry identity.
-Explicit resolution cannot create evidence, finish a pending mutation, or waive
-user authorization. A declared-done task may retain unmet evidence requirements.
-
-Protected state is mandatory. Limits include 32 pins of 2,048 code points, 32
-update operations in a 16,384-code-point envelope, and a 65,536-code-point checkpoint.
-If mandatory input, obligations, checkpoint, or rebuilt context cannot fit, the
-compiler cancels with `protected_overflow`; optional whole records are dropped
-first, using the fixed T3 source → T2 unreferenced-read → T1 excerpt ladder;
-T0 identity cores, declared work, required observations, mutation frontier and
-predecessor cannot be evicted. `checkpointSections` reports 17 fixed Unicode
-code-point section costs and ladder outcomes from the final validated checkpoint;
-it is observability only, not authorization or a new scoring engine. Invalid
-expected v13/v14/v15 state cancels instead of reconstructing from prose. Production
-and diagnostic predecessor carry accept authenticated v13/v14/v15 details; recall
-retains v5–15 entries (integrity checks for v10–15), and continuation recovery
-accepts v8–15. Rollback requires a v15-aware reader or must refuse lossy
-carry-forward.
-
-`tool_call` and completed persisted `turn_end` callbacks only sample the first
-fresh post-compaction host count after assistant persistence. They do not consume
-warmup, reset cooldown, decide admission, or interrupt tools. `agent_settled` is
-the sole autonomous decision boundary for every band, including headroom floor
-and Emergency. It refreshes host usage and validates current ownership,
-settings, branch/model and concurrency guards before capturing the exact settled
-leaf and requesting standard `ctx.compact()`. Ordinary Auto/Warn admission
-requires a current finite positive host count. Headroom floor and Emergency
-preserve the existing finite local-estimate fallback when host usage is
-unavailable or invalid, and bypass ordinary admission guards. The request and
-matching host commit remain separate operations. Continuing tool loops can delay
-compaction until the agent naturally settles; the extension never aborts a run
-for compaction. Native host compaction and genuine errors/cancellations retain
-their existing paths. Unknown samples cannot establish a baseline. Ordinary
-120-second cooldown and 4,000-token growth remain intact; only a matching
-transactional host commit authorizes success effects and continuation.
-`agent_before_settle` migration is deferred.
-The opt-in natural-settlement runtime gate is documented in
-`tests/e2e/README.md`; historical receipts do not establish this behavior.
-
-Trigger policy version 3 names
-the 120,000 cap, 20,000 lead, headroom floor, and missed-auto pursuit.
-Positive ordered boundaries are required;
-effective windows below three tokens disable automatic admission.
-
-Continuation intent is created by an autonomous host commit; submission is a
-separate send, and resulting work is separately observed in the branch journal.
-A later genuine user turn or manual/foreign compaction supersedes older intent.
-Pi supplies no durable send acknowledgement: acceptance before journal persistence
-leaves an uncertain crash interval. Process fences suppress same-process retries;
-a restart follows the durable journal and cannot promise exactly-once work.
-Pre-commit failure and blocked-check diagnostics are explicit exceptions to the
-post-commit artifact rule. Diagnostic formatting/reporting is best effort and total.
+After repairs rerun affected gates only. E2e uses isolated scripted-provider scenarios and available installed Pi; it is separate from unit discovery and requires no paid provider for deterministic-compiler QA. Fixture and static evidence do not prove installed-host behavior. Runtime acceptance instructions are owned by `tests/e2e/README.md`.

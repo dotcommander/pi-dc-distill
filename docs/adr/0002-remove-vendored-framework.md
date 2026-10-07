@@ -1,11 +1,13 @@
 # ADR 0002: Remove the vendored framework entirely — owned support surface
 
-- **Status:** Accepted (2026-10-01)
+- **Status:** Accepted framework-removal decision (2026-10-01); historical implementation inventory superseded by the current compiler reduction (2026-10-06)
 - **Deciders:** repository owner (user, session 2026-10-01: "a single extension
   should not have a whole framework")
 - **Supersedes:** ADR 0001's "trim to reachable surface" endpoint. ADR 0001
   remains the governing record for its executed trim (7 unreachable files);
   this ADR replaces the *endpoint*: reachability was the wrong bar.
+
+The no-vendored-framework decision remains applicable. The support-module inventory, old wire-compatibility gates, and migration preconditions below describe historical implementation only; the current production allowlist in [AGENTS](../../AGENTS.md) supersedes them. This ADR is an excluded historical record, not the current product contract.
 
 ## Context
 

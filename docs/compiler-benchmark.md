@@ -1,3 +1,5 @@
+> Historical archive only. This benchmark and its commands are retired and excluded from the current contract and package. Preserve existing receipts; they do not establish current acceptance. See [current docs](README.md).
+
 # Local deterministic compiler benchmark
 
 Run this opt-in workload locally with Bun. It uses synthetic data, never launches

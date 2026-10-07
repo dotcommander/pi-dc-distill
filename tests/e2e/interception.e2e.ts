@@ -3,6 +3,7 @@ import { expect, test } from "bun:test";
 import { existsSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import { RpcClient, eventsOfType } from "./harness/rpc-client.ts";
+import { assertCurrentCompaction } from "./harness/current-compaction.ts";
 import { makeTestDir, piEnv, scriptedArgs, latestSessionFile, REPO_ROOT } from "./harness/env.ts";
 
 function records(file: string): Array<Record<string, any>> {
@@ -41,7 +42,7 @@ for (const scenario of [
         expect(ends[0]?.willRetry).toBe(scenario.retry);
         const result = ends[0]?.result as Record<string, any>;
         expect(result.details?.compactor).toBe("dc-distill");
-        expect(result.details?.autonomous).toBe(false);
+        assertCurrentCompaction(result.summary, result.details);
         expect(result.summary).not.toContain("FAKE-SUMMARY");
 
         // Include ALL compaction entries so a default or duplicate append cannot hide.
@@ -50,6 +51,8 @@ for (const scenario of [
         expect(committed).toHaveLength(1);
         expect(committed[0]?.details?.compactor).toBe("dc-distill");
         expect(committed[0]?.details?.attemptId).toBe(result.details?.attemptId);
+        assertCurrentCompaction(committed[0]?.summary, committed[0]?.details);
+        expect(existsSync(join(t.agentHome, "data", "dc-distill"))).toBe(false);
 
         // The real converted native summary drives the fake provider's low usage.
         const since = client.mark();
@@ -94,11 +97,7 @@ for (const fault of ["previous-summary", "discarded-partition", "unicode"] as co
         expect(records(t.traceFile).filter((entry) => entry.kind === "summary")).toHaveLength(0);
         expect(records(latestSessionFile(t)!).filter((entry) => entry.type === "compaction")).toHaveLength(0);
         expect(eventsOfType(client.events, "compaction_end").every((event) => event.aborted === true)).toBe(true);
-        const data = join(t.agentHome, "data", "dc-distill");
-        const logFile = join(data, "compact-log.jsonl");
-        // Pre-commit failure diagnostics are allowed; success records are not.
-        const logEntries = existsSync(logFile) ? records(logFile) : [];
-        expect(logEntries.filter((entry) => entry.kind !== "failure")).toHaveLength(0);
+        expect(existsSync(join(t.agentHome, "data", "dc-distill"))).toBe(false);
         expect(client.events.some((event) => (event.message as any)?.customType === "dc-distill-continuation")).toBe(false);
         // A cancelled attempt must still leave a usable native session.
         const since = client.mark();
@@ -110,3 +109,27 @@ for (const fault of ["previous-summary", "discarded-partition", "unicode"] as co
     } finally { await t.finalize(passed); }
   }, 60000);
 }
+
+// The retained native user message alone exceeds this deliberately small window.
+// The extension must cancel after whole-row eviction cannot fit mandatory context.
+test("known capacity failure cancels without provider fallback or append", async () => {
+  const t = makeTestDir("capacity-failure", { enabled: false, keepRecentTokens: 1024 });
+  let passed = false;
+  try {
+    const client = new RpcClient({ args: scriptedArgs(t), cwd: t.dir, logFile: t.logFile,
+      env: piEnv(t, { DISTILL_FAKE_WINDOW: "4096", DISTILL_FAKE_BASE: "1000", DISTILL_FAKE_STEP: "100" }) });
+    try {
+      for (let i = 0; i < 3; i++) {
+        const since = client.mark();
+        expect((await client.request({ type: "prompt", message: `Large retained user turn ${i}: `
+          + "mandatory native retained tail ".repeat(3000) })).success).toBe(true);
+        await client.waitFor(event => event.type === "agent_settled", 30000, { since });
+      }
+      expect((await client.request({ type: "compact", customInstructions: "Preserve native retained context" })).success).toBe(false);
+      expect(records(t.traceFile).filter(entry => entry.kind === "summary")).toEqual([]);
+      expect(records(latestSessionFile(t)!).filter(entry => entry.type === "compaction")).toEqual([]);
+      expect(existsSync(join(t.agentHome, "data", "dc-distill"))).toBe(false);
+    } finally { await client.close(); }
+    passed = true;
+  } finally { await t.finalize(passed); }
+}, 60000);

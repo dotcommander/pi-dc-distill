@@ -1,12 +1,3 @@
-/**
- * Pi SDK re-export — the single new-style import target for product code.
- *
- * Everything product files previously imported through the vendored
- * framework's Pi adapter resolves here. Support modules import
- * the SDK packages directly; this module exists for product consumers so the
- * SDK boundary stays one import wide.
- *
- * @module lib/sdk
- */
-
+/** Single Pi SDK boundary for the host adapter and active source projection. */
 export * from "@earendil-works/pi-coding-agent";
+export { getCurrentSystemMessage } from "@earendil-works/pi-ai";

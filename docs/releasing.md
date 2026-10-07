@@ -1,87 +1,22 @@
 # Releasing to npm
 
-`pi-dc-distill` is a Pi extension distributed as TypeScript source. Pi loads
-`index.ts` through the package's `pi.extensions` declaration, so there is no
-compiled build step. The optional `dc-distill-session` CLI uses Bun.
+Publication requires separate explicit authorization. The reduction task does not publish a package, change dependency versions, migrate sessions, or delete stored data.
 
-The package is configured for the public npm registry. Publishing makes the
-allowlisted source and documentation public. GitHub description and topics are
-independent of npm publication.
+Pi loads `index.ts` as TypeScript source through `pi.extensions`. The package exports only the root extension. The `files` allowlist includes the entrypoint, its surviving runtime modules, README, and license. It excludes internal tests, e2e programs, docs archives, scripts, binaries, `.work`, receipts, raw sessions, credentials, and node_modules. There is no replay CLI or supported direct-file compiler API.
 
-## Prepare the package
-
-From a checkout, use Node.js 22.19.0 or newer, npm, and Bun 1.4.0. Install only
-this project's pinned development dependencies:
-
-```bash
-bun install --frozen-lockfile
-```
-
-Check the proposed package name and version, authentication, and registry state:
-
-```bash
-npm pkg get name version
-npm whoami --registry=https://registry.npmjs.org/
-npm view pi-dc-distill versions --json --registry=https://registry.npmjs.org/
-```
-
-If `whoami` reports `ENEEDAUTH`, run `npm login
---registry=https://registry.npmjs.org/` interactively, then repeat `whoami`.
-An `E404` from `view` means the registry did not return that package; it does not
-reserve the name or guarantee publishing rights. For an existing package, use an
-unpublished version and an account with maintainer access. Confirm that the
-specific version shown by `npm pkg get version` has not already been published:
-
-```bash
-npm view pi-dc-distill@0.1.8 version --registry=https://registry.npmjs.org/
-```
-
-Replace `0.1.8` with the proposed version for subsequent releases. npm does not
-allow reuse of a published name/version pair, even after unpublishing.
-
-Run the checks and inspect the package contents:
+Before an authorized release, complete implementation and semantic review, then reuse the verifier's current receipts:
 
 ```bash
 bun test
-bun run typecheck
+bun x tsc --noEmit
 bun run distill:architecture
 git diff --check
 npm pack --dry-run --json
+bun run distill:e2e
 ```
 
-The pack listing must include `package.json`, `index.ts`, its `lib/` imports,
-`bin/dc-distill-session.ts`, `LICENSE`, `README.md`, and `docs/`. It also includes
-the synthetic comparison script and fixtures intentionally. It must exclude
-`node_modules`, `.git`, `.work`, `docs/specs`, raw sessions, credentials, and
-unit/e2e tests.
-Review every listed file before publishing. The `files` allowlist in
-`package.json` owns this boundary.
+Run the full suite once with the user's approval; after repairs rerun affected gates only. Inspect every package dry-run entry against the allowlist. Unit fixtures and package inspection do not establish installed-host behavior or registry publication.
 
-## Publish manually
+Keep the existing Pi SDK pins and dependency versions. Install project-local dependencies only with `bun install --frozen-lockfile`. Do not use another checkout's node_modules.
 
-Once the release contents and registry account are approved, publish from the
-checkout:
-
-```bash
-npm publish --access public --registry=https://registry.npmjs.org/
-```
-
-`prepublishOnly` reruns the test and typecheck gates before publishing. npm may
-prompt for two-factor authentication. The command publishes the current version
-with the `latest` tag. This guide does not configure automated releases or
-trusted publishing. Do not force `--provenance`: npm provenance is not supported
-for private source repositories.
-
-Verify the exact released version, then install it in Pi:
-
-```bash
-npm view pi-dc-distill@0.1.8 version dist.integrity --registry=https://registry.npmjs.org/
-pi install npm:pi-dc-distill@0.1.8
-```
-
-For normal installation after publication, use `pi install npm:pi-dc-distill`.
-Start a new Pi session and use `/compact` to exercise the installed extension.
-Local tests and a pack listing do not prove a published registry install.
-
-References: [npm publish](https://docs.npmjs.com/cli/v11/commands/npm-publish/)
-and [npm trusted publishing](https://docs.npmjs.com/trusted-publishers/).
+A separately authorized publication uses `npm publish --access public --registry=https://registry.npmjs.org/` with an unpublished package version and appropriate account authentication. The current prepublish script reruns the test and typecheck gates; those publication-time executions require their own release scope. Verify the exact registry version and integrity after publication, then exercise `/compact` in a fresh Pi session. Existing incompatible sessions remain with the old extension, and old and new extensions must not load together.

@@ -1,5 +1,3 @@
-import { createCacheRun, finalizeCacheRun, type CacheRun } from "../../../lib/cache-runs.ts";
-import { Path } from "../../../lib/paths.ts";
 /**
  * Shared isolation and CLI plumbing for the E2E suite.
  *
@@ -8,7 +6,8 @@ import { Path } from "../../../lib/paths.ts";
  * offline flags, and exactly two extensions loaded: dc-distill and the
  * scripted provider. Nothing here touches user data or the network.
  */
-import { existsSync, mkdirSync, readdirSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readdirSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 
 const HARNESS_DIR = resolve(new URL(".", import.meta.url).pathname);
@@ -16,14 +15,11 @@ const HARNESS_DIR = resolve(new URL(".", import.meta.url).pathname);
 export const REPO_ROOT = resolve(HARNESS_DIR, "..", "..", "..");
 export const EXTENSION = join(REPO_ROOT, "index.ts");
 export const FAKE_PROVIDER = join(HARNESS_DIR, "fake-provider.ts");
-/** Capture parent profile before creating the child's isolated environment. */
-const PARENT_CACHE_ROOT = Path.cache("dc-distill").path;
-export const VERIFICATION_DIR = join(PARENT_CACHE_ROOT, "e2e");
+
 
 export interface TestDir {
   /** Scratch project directory; also the pi process cwd. */
   dir: string;
-  run: CacheRun;
   finalize(success: boolean): Promise<void>;
   /** Isolated PI_CODING_AGENT_DIR holding settings.json. */
   agentHome: string;
@@ -38,8 +34,7 @@ export interface TestDir {
 }
 
 export function makeTestDir(name: string, settings: Record<string, unknown> = {}): TestDir {
-  const run = createCacheRun(name === "demo" ? "demo" : "e2e", PARENT_CACHE_ROOT);
-  const dir = run.directory;
+  const dir = mkdtempSync(join(tmpdir(), `dc-distill-e2e-${name}-`));
   console.log(`Artifacts (${name}): ${dir}`);
   const agentHome = join(dir, "agent-home");
   const home = join(dir, "home");
@@ -49,20 +44,18 @@ export function makeTestDir(name: string, settings: Record<string, unknown> = {}
   mkdirSync(join(home, ".pi"), { recursive: true });
   mkdirSync(sessionDir, { recursive: true });
 
-  // dc-distill mirrors Pi's own compaction settings; write them at the
-  // sandboxed agent home, the sandboxed ~/.pi, and the project so every
-  // resolution path agrees.
+  // Pi owns triggering. Use identical native settings in all isolated profiles.
   const compaction = { enabled: true, reserveTokens: 16_384, ...settings };
-  const extensionConfig = { "dc-distill": { toolOutput: { enabled: true }, recall: { enabled: true } } };
   for (const target of [join(agentHome, "settings.json"), join(home, ".pi", "settings.json")]) {
-    writeFileSync(target, JSON.stringify({ compaction, extensionConfig }, null, 2));
+    writeFileSync(target, JSON.stringify({ compaction }, null, 2));
   }
-  writeFileSync(join(dir, ".pi", "settings.json"), JSON.stringify({ compaction, extensionConfig }, null, 2));
+  writeFileSync(join(dir, ".pi", "settings.json"), JSON.stringify({ compaction }, null, 2));
 
   return {
     dir,
-    run,
-    finalize: (success) => finalizeCacheRun(run, success),
+    finalize: async (success) => {
+      writeFileSync(join(dir, "result.json"), JSON.stringify({ success }));
+    },
     agentHome,
     home,
     sessionDir,

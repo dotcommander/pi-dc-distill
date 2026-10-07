@@ -1,58 +1,38 @@
-import { describe, expect, test } from "bun:test";
+import { expect, test } from "bun:test";
 import { createHash } from "node:crypto";
-import { checkpointDigest, checkpointSectionLedger, emptyCheckpoint } from "../../lib/compiler/checkpoint.ts";
 import { assertCurrentCompaction } from "./harness/current-compaction.ts";
 
 function fixture() {
-  const summary = "Current wire summary\n😀\n";
-  const checkpoint = emptyCheckpoint();
-  return { summary, details: {
-    compactor: "dc-distill", version: 15, checkpoint,
-    checkpointDigest: checkpointDigest(checkpoint),
-    summaryDigest: createHash("sha256").update(summary).digest("hex"),
-    checkpointSections: checkpointSectionLedger(checkpoint),
-  } };
+  const summary = JSON.stringify({ format: "dc-distill-summary",
+    notice: "Selected conversation excerpts and observations; incomplete.", focus: "😀", latestRequest: null,
+    records: [], files: { read: [], modified: [] }, commands: [],
+    omitted: { inputRecords: 0, excerpts: 0, readFiles: 0, modifiedFiles: 0, commands: 0 } });
+  return { summary, details: { compactor: "dc-distill", attemptId: "test-attempt",
+    summaryDigest: createHash("sha256").update(summary).digest("hex"), tokensAfter: 100,
+    tokensAfterSource: "pi-rebuilt-message-estimate", capacityStatus: "within-window", contextWindow: 1000 } };
 }
-
-describe("current real-Pi compaction acceptance", () => {
-  test("accepts authenticated v15/schema-v2 with exactly derived telemetry", () => {
-    const { summary, details } = fixture();
-    expect(() => assertCurrentCompaction(summary, details)).not.toThrow();
-  });
-
-  const corruptions: Array<[string, (details: Record<string, any>) => void]> = [
-    ["historical details version", d => { d.version = 13; }],
-    ["missing details version", d => { delete d.version; }],
-    ["foreign compactor", d => { d.compactor = "other"; }],
-    ["historical checkpoint schema", d => {
-      d.checkpoint.version = 1;
-      // Authenticating historical state does not make it a current checkpoint.
-      d.checkpointDigest = checkpointDigest(d.checkpoint);
-    }],
-    ["malformed checkpoint", d => { delete d.checkpoint.tasks; }],
-    ["wrong checkpoint digest", d => { d.checkpointDigest = "0".repeat(64); }],
-    ["missing checkpoint digest", d => { delete d.checkpointDigest; }],
-    ["wrong summary digest", d => { d.summaryDigest = "0".repeat(64); }],
-    ["missing summary digest", d => { delete d.summaryDigest; }],
-    ["missing section ledger", d => { delete d.checkpointSections; }],
-    ["wrong section cost", d => { d.checkpointSections.sections.tasks++; }],
-    ["missing section key", d => { delete d.checkpointSections.sections.tasks; }],
-    ["extra section key", d => { d.checkpointSections.sections.unexpected = 0; }],
-    ["wrong ladder telemetry", d => { d.checkpointSections.ladderOutcomes.sourcesDropped = true; }],
-    ["wrong ledger version", d => { d.checkpointSections.version = 2; }],
-  ];
-  for (const [name, corrupt] of corruptions) {
-    test(`rejects ${name}`, () => {
-      const { summary, details } = fixture();
-      corrupt(details);
-      expect(() => assertCurrentCompaction(summary, details)).toThrow();
-    });
-  }
-
-  test("hashes exact Unicode wire bytes including trailing newline", () => {
-    const { summary, details } = fixture();
-    expect(() => assertCurrentCompaction(summary.trimEnd(), details)).toThrow();
-    expect(() => assertCurrentCompaction(undefined, details)).toThrow();
-    expect(() => assertCurrentCompaction(summary, null)).toThrow();
-  });
+test("independent oracle accepts exact unversioned contract", () => {
+  const f = fixture(); expect(() => assertCurrentCompaction(f.summary, f.details)).not.toThrow();
+});
+for (const [name, corrupt] of [
+  ["numbered details", (d: any) => { d.version = 15; }],
+  ["checkpoint", (d: any) => { d.checkpoint = {}; }],
+  ["wrong digest", (d: any) => { d.summaryDigest = "0".repeat(64); }],
+  ["foreign owner", (d: any) => { d.compactor = "foreign"; }],
+  ["known overflow", (d: any) => { d.tokensAfter = 1001; }],
+] as const) test(`oracle rejects ${name}`, () => {
+  const f = fixture(); corrupt(f.details); expect(() => assertCurrentCompaction(f.summary, f.details)).toThrow();
+});
+for (const [name, corrupt] of [
+  ["numbered summary", (s: any) => { s.version = 1; }],
+  ["nested state", (s: any) => { s.records.push({ kind: "native-summary", text: {}, shortened: false, origin: "prior" }); }],
+  ["invalid counter", (s: any) => { s.omitted.inputRecords = -1; }],
+  ["malformed Unicode", (s: any) => { s.focus = "\ud800"; }],
+] as const) test(`oracle rejects authenticated ${name}`, () => {
+  const f = fixture(); const s = JSON.parse(f.summary); corrupt(s);
+  f.summary = JSON.stringify(s); f.details.summaryDigest = createHash("sha256").update(f.summary).digest("hex");
+  expect(() => assertCurrentCompaction(f.summary, f.details)).toThrow();
+});
+test("oracle authenticates exact wire bytes", () => {
+  const f = fixture(); expect(() => assertCurrentCompaction(f.summary + "\n", f.details)).toThrow();
 });

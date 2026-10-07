@@ -38,13 +38,12 @@ async function emitDirectory(relative: string): Promise<void> {
 
 try {
   await emit('index.ts');
-  await emitDirectory('bin');
   await emitDirectory('lib');
   await copyFile(join(root, 'package.json'), join(staged, 'package.json'));
   await symlink(join(root, 'node_modules'), join(staged, 'node_modules'), 'dir');
   process.chdir(staged);
   const { tsConfig: _tsConfig, enhancedResolveOptions: _resolver, ...options } = config.options;
-  const result = await cruise(['index.js', 'bin', 'lib'], {
+  const result = await cruise(['index.js'], {
     ...options, ruleSet: { forbidden: config.forbidden }, outputType: 'err-long',
   }, {
     extensions: ['.js', '.json'], conditionNames: ['import', 'default'],

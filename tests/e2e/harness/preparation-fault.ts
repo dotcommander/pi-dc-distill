@@ -14,7 +14,11 @@ export default function preparationFault(pi: ExtensionAPI): void {
         }];
         break;
       case "unicode":
-        preparation.previousSummary = "Invalid decoded Unicode: \ud800";
+        // Structural validation precedes partition matching, so a malformed
+        // discarded message exercises Unicode rejection rather than predecessor agreement.
+        preparation.messagesToSummarize = [...preparation.messagesToSummarize, {
+          role: "user", content: "Invalid decoded Unicode: \ud800", timestamp: Date.now(),
+        }];
         break;
       default:
         throw new Error("Missing preparation fault selection");
