@@ -427,3 +427,13 @@ describe("checkpoint recall", () => {
     expect(searchRecallEntries([tied], "sharedquasar")[0]).not.toContain("<checkpoint-v1>");
   });
 });
+
+test("recall exposes the type-signatures catalog marker by name", () => {
+  const entry = makeEntry("2026-10-02", 100, 20, {}, {
+    "type-signatures": "- src/widget.ts: export function widget(): void {}",
+  });
+  const result = searchRecallEntries([entry], "type-signatures");
+  expect(result).toHaveLength(1);
+  expect(result[0]).toContain("<type-signatures>");
+  expect(result[0]).toContain("- src/widget.ts: export function widget(): void {}");
+});

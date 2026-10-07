@@ -14,6 +14,7 @@ import type {
 } from "./lib/sdk.ts";
 import { buildSessionContext, estimateTokens } from "./lib/sdk.ts";
 import { Diag } from "./lib/diag-support.ts";
+import { commonPrefixCodePoints } from "./lib/unicode.ts";
 import { Notify, registerBlockSpec } from "./lib/notify-support.ts";
 import { Block } from "./lib/tui-block.ts";
 import { Tool } from "./lib/tool-result.ts";
@@ -60,7 +61,7 @@ import { runStrategies } from "./lib/strategy.ts";
 import { Tier } from "./lib/types.ts";
 import { registerOutputCompactor } from "./lib/output-compactor.ts";
 
-const VERSION = 14;
+const VERSION = 15;
 const WARN_STEER_PROMPT = [
   "You are near the context boundary — compaction is imminent.",
   "Finish the current atomic unit, then call save_distill_handoff with either legacy text",
@@ -417,6 +418,12 @@ function createExtension(pi: ExtensionAPI, options: DistillExtensionOptions = {}
             throw new CompactionInputError("protected wire summary exceeds 65,536 code points", "protected_overflow");
           }
           if (event.signal.aborted) throw new CompactionCancelledError();
+
+          // Cache-stability observation only: how much of the predecessor's
+          // wire summary survives verbatim at the head of the new one.
+          if (source.previousSummary) {
+            Diag.debug("dc-distill", `cache-stability headStableCodePoints=${commonPrefixCodePoints(source.previousSummary, wire.wireSummary)}`);
+          }
 
           failureStage = null;
           let currentUsage: ReturnType<ExtensionContext["getContextUsage"]>;

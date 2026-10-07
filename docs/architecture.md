@@ -123,7 +123,7 @@ host-consistent heuristics, not measured provider prompt counts.
 `summaryDigest` hashes the exact returned wire summary. `checkpointDigest`
 separately hashes the validated checkpoint’s deterministic serialization.
 `digestScope` is `compaction-input` or `bounded-compaction-input`.
-New transactions emit details version 14 and commit only when version, checkpoint
+New transactions emit details version 15 and commit only when version, checkpoint
 digest, and the section ledger derived from the pending checkpoint match the host
 entry. Historical version-5 through version-13 entries remain readable unchanged.
 
@@ -414,7 +414,7 @@ exactly-once execution or zero lost turns when host submission is uncertain.
 Enabled recall independently reconstructs validated committed compactions from
 the active branch at owner start, tree changes and matching commits. Recovery
 coalesces requests and revalidates owner, lease and tree revision under the recall
-publication lock. Host entry IDs, timestamps, attempt IDs and v10/v11/v12/v13/v14 summary digests
+publication lock. Host entry IDs, timestamps, attempt IDs and v10/v11/v12/v13/v14/v15 summary digests
 make replay idempotent and preserve original recency. Disabled recall performs no
 recall projection or storage access. Initialization and recovery failures do not
 block deterministic compaction or continuation.
@@ -485,7 +485,7 @@ Committed logs distinguish observed host counts from estimates: tokenObservation
 is observed or unavailable; observedTokenDelta exists only for a valid host count.
 
 Current readers preserve versions 5–13; continuation recovery supports versions
-8–14 and wire-integrity recall projection supports versions 10–14. Recovery relies on the
+8–15 and wire-integrity recall projection supports versions 10–15. Recovery relies on the
 host persisting compaction details and continuation messages on the active branch.
 A same-process uncertain submission is fenced in memory; a true process restart
 can lose that fence. Delivery and persistence are not one crash-atomic transaction.
@@ -505,7 +505,7 @@ with `protected_overflow` if T0 cannot fit. Rendered tasks, readiness and files
 derive from the snapshot without mutating status or freshness. Protected
 declarations and user-source pins survive repeated compaction; implied
 obligations and user authorization are not inferred. Other prose is attributed
-context. Invalid v13/v14 state cancels; rollback must retain a v14-aware reader
+context. Invalid v13/v14/v15 state cancels; rollback must retain a v15-aware reader
 or refuse lossy carry-forward.
 
 Attempts own a ticket and session generation with branch, model, and effective

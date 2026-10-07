@@ -36,9 +36,9 @@ test("untyped primer-like prefixes and mixed historical summary lines remain con
   expect(meta.priorSummaries).toEqual([lines.join("\n")]);
 });
 
-test("diagnostic v13/v14 predecessor carries only authenticated checkpoint and summary", () => {
+test("diagnostic v13/v14/v15 predecessor carries only authenticated checkpoint and summary", () => {
   const checkpoint = emptyCheckpoint();
-  for (const version of [13, 14]) {
+  for (const version of [13, 14, 15]) {
     const entry = { type: "compaction", id: "prior", summary: "wire summary", details: {
       compactor: "dc-distill", version, checkpoint, checkpointDigest: checkpointDigest(checkpoint), summaryDigest: digest("wire summary") } };
     const result = normalizeSessionJsonl(JSON.stringify(entry));
@@ -47,7 +47,7 @@ test("diagnostic v13/v14 predecessor carries only authenticated checkpoint and s
     expect(result.meta.predecessorEntryId).toBe("prior");
     expect(result.meta.authenticatedPriorSummary).toBe("wire summary");
     expect(() => normalizeSessionJsonl(JSON.stringify({ ...entry, details: { ...entry.details, checkpointDigest: "0".repeat(64) } }))).toThrow();
-    if (version === 14) expect(() => normalizeSessionJsonl(JSON.stringify({ ...entry, summary: "tampered" }))).toThrow("wire summary digest mismatch");
+    if (version >= 14) expect(() => normalizeSessionJsonl(JSON.stringify({ ...entry, summary: "tampered" }))).toThrow("wire summary digest mismatch");
   }
 });
 

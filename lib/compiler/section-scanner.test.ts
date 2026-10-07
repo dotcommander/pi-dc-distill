@@ -1,7 +1,7 @@
 import { expect, test } from "bun:test";
 import { scanSections } from "./section-scanner.ts";
 
-const wireTags = ["summary-omissions", "change-impact", "checkpoint-v1"];
+const wireTags = ["summary-omissions", "change-impact", "checkpoint-v1", "type-signatures"];
 
 test("scanner extracts emitted sections and historical omission markers", () => {
   for (const tag of [...wireTags, "budget-omissions"]) {

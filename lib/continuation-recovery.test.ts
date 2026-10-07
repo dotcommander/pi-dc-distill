@@ -111,7 +111,7 @@ describe("recoverContinuation", () => {
     ).toEqual({ phase: "delivered", action: "resume", attemptId: "a-1" });
   });
 
-  for (const version of [8, 9, 10, 11, 12, 13, 14]) {
+  for (const version of [8, 9, 10, 11, 12, 13, 14, 15]) {
     test(`v${version} delivery and resume journal each suppress repeated recovery`, () => {
       const committed = [autonomousCompaction({ version })];
       const originalCompaction = JSON.stringify(committed);
@@ -127,7 +127,7 @@ describe("recoverContinuation", () => {
     });
   }
 
-  for (const version of [8, 9, 10, 11, 12, 13, 14]) {
+  for (const version of [8, 9, 10, 11, 12, 13, 14, 15]) {
     for (const customType of ["dc-distill-continuation", "dc-shrink-continuation"]) {
       describe(`v${version} ${customType} attempt matching`, () => {
         const compaction = () => autonomousCompaction({ version });
@@ -207,7 +207,7 @@ describe("recoverContinuation", () => {
   });
 });
 
-for (const version of [5, 6, 7, 15]) test(`v${version} cannot authorize autonomous continuation recovery`, () => {
+for (const version of [5, 6, 7, 16]) test(`v${version} cannot authorize autonomous continuation recovery`, () => {
   expect(recoverContinuation([autonomousCompaction({ version })])).toEqual({ phase: "none", action: "none" });
 });
 
@@ -221,7 +221,7 @@ test("v13 intent is superseded before or after delivery by genuine user/manual/f
   expect(recoverContinuation([autonomousCompaction({ version: 13 })]).action).toBe("deliver");
 });
 
-for (const version of [13, 14]) test(`corrupt v${version} does not recover an earlier automatic intent`, () => {
+for (const version of [13, 14, 15]) test(`corrupt v${version} does not recover an earlier automatic intent`, () => {
   expect(recoverContinuation([autonomousCompaction(),autonomousCompaction({version,checkpointDigest:"f".repeat(64)})]).action).toBe("none");
   expect(recoverContinuation([autonomousCompaction(),autonomousCompaction({version,summaryDigest:"f".repeat(64)})]).action).toBe("none");
   expect(recoverContinuation([autonomousCompaction(),autonomousCompaction({version,checkpoint:undefined})]).action).toBe("none");

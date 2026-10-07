@@ -245,6 +245,24 @@ function formatRecentToolCalls(calls: ToolCallFingerprint[], measure = false): R
   }
   return sink.value();
 }
+/** Catalog lines use `- path: signature` so parsePriorMarker round-trips them. */
+function formatTypeSignaturesSection(catalog: NonNullable<ConversationResult["typeSignatures"]>, pathRoot: string | undefined, measure = false): RenderedSection {
+  const sink = new SectionSink(measure);
+  const lines: string[] = [];
+  for (const entry of catalog.entries) {
+    const path = sliceU16(displayPath(entry.path, pathRoot), 512);
+    for (const signature of entry.signatures) lines.push(`- ${path}: ${sliceU16(signature, 512)}`);
+  }
+  const omissions: string[] = [];
+  if (catalog.omittedFiles > 0) omissions.push(`... (${catalog.omittedFiles} catalog files omitted)`);
+  if (catalog.omittedSignatures > 0) omissions.push(`... (${catalog.omittedSignatures} signatures omitted)`);
+  if (!lines.length && !omissions.length) return sink.value();
+  sink.line().raw("<type-signatures>");
+  for (const line of lines) sink.line().escaped(line);
+  for (const line of omissions) sink.line().raw(line);
+  sink.line().raw("</type-signatures>");
+  return sink.value();
+}
 function formatRecentToolResults(results: ToolResultEntry[], measure = false): RenderedSection {
   const sink = new SectionSink(measure);
   if (results.length) {
@@ -509,16 +527,23 @@ export function prepareSummaryProjection(meta: SessionMeta, conv: ConversationRe
  * timestamp, so identical input keeps producing byte-identical summaries. */
 const SUMMARY_SCOPE_NOTE = "This summary covers only the entries Pi discarded at compaction; newer state lives in the retained messages that follow it in context.";
 
+/** Late request-candidate block. Stable sections render ahead of this
+ * per-request churn so a provider prefix cache can survive past them across
+ * successive compactions; pinned by lib/cache-stability.test.ts. */
+function renderCandidateSection(meta: SessionMeta, conv: ConversationResult, measure: boolean): RenderedSection {
+  if (!conv.requestCandidate) return "";
+  const candidate = renderRequestCandidate(conv.requestCandidate);
+  const text = (!conv.checkpoint?.objective && !meta.goalObjective)
+    ? `${candidate}\n\nNo declared objective; attributed request is context only.`
+    : candidate;
+  return measure ? codePointLength(text) : text;
+}
+
 export function formatSummary(meta: SessionMeta, conv: ConversationResult, userFocus?: string, projection?: SummaryProjection): string {
   const parts: RenderedSection[] = [];
   const measure = projection?.measureOnly ?? false;
   parts.push(measure ? codePointLength(SUMMARY_SCOPE_NOTE) : SUMMARY_SCOPE_NOTE, "");
   if (conv.checkpoint) { const text = renderCheckpoint(conv.checkpoint); if (text) parts.push(measure ? codePointLength(text) : text, ""); }
-  if (conv.requestCandidate) {
-    const candidate = renderRequestCandidate(conv.requestCandidate);
-    parts.push(measure ? codePointLength(candidate) : candidate, "");
-    if (!conv.checkpoint?.objective && !meta.goalObjective) parts.push("No declared objective; attributed request is context only.", "");
-  }
   const identity = (value: object) => {
     if (!projection) return 0;
     projection.identities ??= new WeakMap();
@@ -604,6 +629,8 @@ export function formatSummary(meta: SessionMeta, conv: ConversationResult, userF
     markerBlock("summary-omissions", conv.budgetOmissions, measure),
     exactLineMarkerBlock("change-impact", conv.changeImpact ?? [], measure),
     cached(conv.verification, "verification", () => exactLineMarkerBlock("verification", conv.verification, measure)),
+    conv.typeSignatures ? cached(conv.typeSignatures, `type-signatures:${conv.typeSignatures.entries.length}:${conv.typeSignatures.omittedFiles}:${conv.typeSignatures.omittedSignatures}`, () => formatTypeSignaturesSection(conv.typeSignatures!, conv.pathRoot, measure)) : "",
+    cached(conv, "request-candidate", () => renderCandidateSection(meta, conv, measure)),
     measure ? codePointLength(handoffBlock) : handoffBlock,
     cached(conv.resumeRisks, "resume-risks", () => markerBlock("resume-risks", conv.resumeRisks, measure)),
     cached(conv.resumeTasks, "resume-tasks", () => exactLineMarkerBlock("resume-tasks", filterGeneratedTasks(conv.resumeTasks, structured), measure)),
@@ -719,6 +746,14 @@ export function enforceOperatingBudget(
     } else if (conv.activeTasks.length > 0) {
       conv.activeTasks.shift();
       note("active tasks");
+    } else if (conv.typeSignatures && conv.typeSignatures.entries.length > 0) {
+      // Entries are sorted by descending retention priority (modified before
+      // read before carried, newest first), so the tail is always the lowest-
+      // priority complete record. Catalogs are rebuilt from paired results
+      // each compaction; a dropped entry is recoverable evidence, not state.
+      const dropped = conv.typeSignatures.entries.at(-1)!;
+      conv.typeSignatures = { ...conv.typeSignatures, entries: conv.typeSignatures.entries.slice(0, -1), omittedFiles: conv.typeSignatures.omittedFiles + 1, omittedSignatures: conv.typeSignatures.omittedSignatures + dropped.signatures.length };
+      note("type-signature files");
     } else if (conv.readFiles.length > 0) {
       conv.readFiles.shift();
       conv.omittedReadFiles += 1;

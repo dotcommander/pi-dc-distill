@@ -1992,3 +1992,137 @@ test("multiblock user pins retain authoritative per-block text and identity thro
   expect(compiled.checkpoint.pins.map(p => p.source.blockIndex)).toEqual([0, 1]);
   expect(compiled.checkpoint.pins.map(p => p.source.contentDigest)).toEqual(blocks.map(b => b.sourceReference!.contentDigest));
 });
+
+describe("type-signature catalog assembly", () => {
+  const tsFile = "src/widget.ts";
+  const content = "export function widget(): void {}\nexport const version = 2;\n";
+
+  test("successful paired read results populate the catalog", () => {
+    const input = [sessionLine, userMsg("inspect the widget"),
+      toolCall("view_file", { path: tsFile }, "c1"), toolResult("view_file", content, false, "c1")].join("\n");
+    const result = compileSessionJsonl(input, undefined, undefined, false);
+    expect(result.typeSignatures?.entries).toEqual([
+      { path: tsFile, signatures: ["export function widget(): void {}", "export const version = 2;"] },
+    ]);
+    expect(result.typeSignatures?.omittedFiles).toBe(0);
+    expect(result.typeSignatures?.omittedSignatures).toBe(0);
+  });
+
+  test("unpaired, failed, and bash-execution results contribute no signatures", () => {
+    const input = [sessionLine, userMsg("run things"),
+      toolCall("view_file", { path: tsFile }, "c1"), toolResult("view_file", "error reading file", true, "c1"),
+      toolResult("view_file", content, false, "c2"),
+      toolCall("bash", { command: `cat ${tsFile}` }, "c3"), toolResult("bash", content, false, "c3"),
+    ].join("\n");
+    const result = compileSessionJsonl(input, undefined, undefined, false);
+    expect(result.typeSignatures?.entries ?? []).toEqual([]);
+  });
+
+  test("a later paired read refreshes the observed text", () => {
+    const input = [sessionLine, userMsg("inspect twice"),
+      toolCall("view_file", { path: tsFile }, "c1"), toolResult("view_file", "export const old = 1;\n", false, "c1"),
+      toolCall("view_file", { path: tsFile }, "c2"), toolResult("view_file", "export const fresh = 2;\n", false, "c2"),
+    ].join("\n");
+    const result = compileSessionJsonl(input, undefined, undefined, false);
+    expect(result.typeSignatures?.entries).toEqual([{ path: tsFile, signatures: ["export const fresh = 2;"] }]);
+  });
+
+  test("modified files rank ahead of read files", () => {
+    const input = [sessionLine, userMsg("edit"),
+      toolCall("view_file", { path: "src/read.ts" }, "c1"), toolResult("view_file", "export const r = 1;", false, "c1"),
+      toolCall("write_to_file", { path: "src/mod.ts", content: "export const m = 1;" }, "c2"), toolResult("write_to_file", "wrote src/mod.ts\nexport const m = 1;", false, "c2"),
+    ].join("\n");
+    const result = compileSessionJsonl(input, undefined, undefined, false);
+    expect(result.typeSignatures?.entries.map((entry) => entry.path)).toEqual(["src/mod.ts", "src/read.ts"]);
+  });
+});
+
+describe("type-signature lifecycle invariants", () => {
+  const viewAuth = (id: string, text: string) => [
+    toolCall("view_file", { path: "src/a.ts" }, `${id}a`),
+    toolResult("view_file", text, false, `${id}a`),
+    toolCall("view_file", { path: "src/b.ts" }, `${id}b`),
+    toolResult("view_file", "export const bravo = 2;\n", false, `${id}b`),
+  ];
+  const priorFrom = (r: { checkpoint: unknown; checkpointDigest: string; summaryDigest: string; summary: string }, version = 15) =>
+    line({ type: "compaction", id: "prior", summary: r.summary, details: {
+      compactor: "dc-distill", version,
+      checkpoint: r.checkpoint, checkpointDigest: r.checkpointDigest, summaryDigest: r.summaryDigest,
+    } });
+
+  test("carry-forward across a real compaction boundary keeps frontier paths without fresh reads", () => {
+    const first = compileSessionJsonl([
+      sessionLine, userMsg("read the modules"), ...viewAuth("t1", "export const alpha = 1;\n"),
+    ].join("\n"));
+    expect(first.summary).toContain("<type-signatures>");
+    expect(first.summary).toContain("- src/a.ts: export const alpha = 1;");
+    const second = compileSessionJsonl([
+      sessionLine, priorFrom(first), userMsg("continue from the compaction"), assistantMsg("planning next steps"),
+    ].join("\n"));
+    // No fresh observations: both entries survive purely via the prior marker.
+    expect(second.typeSignatures?.entries.map((e) => e.path)).toEqual(["src/a.ts", "src/b.ts"]);
+    expect(second.typeSignatures?.entries.map((e) => e.signatures)).toEqual([["export const alpha = 1;"], ["export const bravo = 2;"]]);
+    expect(second.summary).toContain("<type-signatures>");
+  });
+
+  test("frontier exit via the 50-path cap drops carried entries", () => {
+    const first = compileSessionJsonl([
+      sessionLine, userMsg("read the modules"), ...viewAuth("t1", "export const alpha = 1;\n"),
+    ].join("\n"));
+    expect(first.summary).toContain("- src/a.ts: export const alpha = 1;");
+    // 50 fresh reads displace the two oldest merged-frontier paths (a, b).
+    const freshReads: string[] = [];
+    for (let i = 1; i <= 50; i++) {
+      freshReads.push(
+        toolCall("view_file", { path: `src/f${String(i).padStart(2, "0")}.ts` }, `tc${i}`),
+        toolResult("view_file", `export const fresh${i} = ${i};\n`, false, `tc${i}`),
+      );
+    }
+    const second = compileSessionJsonl([
+      sessionLine, priorFrom(first), userMsg("sweep every module"), ...freshReads,
+    ].join("\n"));
+    const paths = second.typeSignatures?.entries.map((e) => e.path) ?? [];
+    expect(paths).not.toContain("src/a.ts");
+    expect(paths).not.toContain("src/b.ts");
+    expect(paths).toHaveLength(12); // per-catalog file cap, newest reads first
+    expect(paths[0]).toBe("src/f50.ts");
+    for (const entry of second.typeSignatures!.entries) {
+      expect(entry.signatures[0]).toMatch(/^export const fresh\d+ = \d+;$/);
+    }
+  });
+
+  test("whole-marker eviction under pressure keeps balanced markers and omission accounting", () => {
+    const entries: string[] = [sessionLine, userMsg("grow the window"), ...viewAuth("t1", "export const alpha = 1;\n")];
+    const bulky = "x".repeat(600);
+    for (let i = 0; i < 24; i++) {
+      entries.push(userMsg(`bulk ${i} ${bulky}`), assistantMsg(`ack ${i} ${bulky}`));
+    }
+    const result = compileSessionJsonl(entries.join("\n"));
+    const hasOpen = result.summary.includes("<type-signatures>");
+    const hasClose = result.summary.includes("</type-signatures>");
+    expect(hasOpen).toBe(hasClose); // whole-marker eviction, never a partial slice
+    expect(result.summary).toContain("type-signature files omitted"); // summary-omissions accounting
+    if (!hasOpen) {
+      // No orphaned catalog lines survive eviction of the wrapping marker.
+      expect(result.summary.match(/^- src\/[ab]\.ts: /m)).toBeNull();
+    } else {
+      const block = result.summary.match(/<type-signatures>\n([\s\S]*?)\n<\/type-signatures>/)![1];
+      for (const row of block.split("\n")) expect(row === "..." || /^- \S+: /.test(row) || /^\.\.\. \(\d+ /.test(row)).toBe(true);
+    }
+  });
+
+  test("a v14 prior summary without the marker parses as an empty catalog", () => {
+    const fileless = compileSessionJsonl([
+      sessionLine, userMsg("no file work here"), assistantMsg("text only"),
+    ].join("\n"));
+    expect(fileless.summary).not.toContain("<type-signatures>");
+    const second = compileSessionJsonl([
+      sessionLine, priorFrom(fileless, 14), userMsg("now inspect the module"),
+      toolCall("view_file", { path: "src/d.ts" }, "xd"),
+      toolResult("view_file", "export const delta = 4;\n", false, "xd"),
+    ].join("\n"));
+    // The marker-less prior contributes nothing; only the fresh read appears.
+    expect(second.typeSignatures?.entries.map((e) => e.path)).toEqual(["src/d.ts"]);
+    expect(second.typeSignatures?.entries[0].signatures).toEqual(["export const delta = 4;"]);
+  });
+});

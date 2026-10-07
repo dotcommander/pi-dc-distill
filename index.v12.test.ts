@@ -18,7 +18,7 @@ function fixture() {
 test("v14 accepts unknown capacity and retains a cancelled reservation until lifecycle reset", async () => {
   const { stub, event } = fixture(); await simulate.hook(stub, "session_start", {});
   const [first] = await simulate.hook(stub, "session_before_compact", event); const compaction = (first as any).compaction;
-  expect(compaction.details).toMatchObject({ version: 14, capacityStatus: "unknown" });
+  expect(compaction.details).toMatchObject({ version: 15, capacityStatus: "unknown" });
   await simulate.hook(stub, "session_compact_failed", { aborted: true, reason: "manual", attemptId: compaction.details.attemptId });
   stub.ctx.getContextUsage = () => ({ tokens: 120000, contextWindow: compaction.details.tokensAfter, percent: 100 });
   expect((await simulate.hook(stub, "session_before_compact", event))[0]).toEqual({ cancel: true });

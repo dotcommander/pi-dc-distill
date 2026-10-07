@@ -199,7 +199,7 @@ test("completed failed-tool siblings survive settlement and exact-leaf preparati
   await simulate.hook(f.stub, "agent_settled", {});
   expect(f.calls("ctx.compact")).toHaveLength(1);
   const [prepared] = await simulate.hook(f.stub, "session_before_compact", preparationFor(f));
-  expect(prepared).toHaveProperty("compaction.details.version", 14);
+  expect(prepared).toHaveProperty("compaction.details.version", 15);
   expect(prepared).toHaveProperty("compaction.firstKeptEntryId", "result-sibling");
   expect(prepared).toHaveProperty("compaction.details.autonomous", true);
   expect((prepared as any).compaction.details.checkpoint.failures).toContainEqual(expect.objectContaining({

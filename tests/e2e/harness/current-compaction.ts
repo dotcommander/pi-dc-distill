@@ -9,7 +9,7 @@ export function assertCurrentCompaction(summary: unknown, details: unknown): voi
   assert.equal(d.compactor, "dc-distill", "unexpected compactor");
   // Expected protocol versions are explicit: importing the writer's constant
   // would let an accidental writer version change silently change this oracle.
-  assert.equal(d.version, 14, "current details must be v14");
+  assert.equal(d.version, 15, "current details must be v15");
   const checkpoint = validateCheckpoint(d.checkpoint);
   assert.equal(checkpoint.version, 2, "current checkpoint must be schema v2");
   assert.equal(d.checkpointDigest, checkpointDigest(checkpoint), "checkpoint digest mismatch");

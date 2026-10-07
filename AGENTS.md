@@ -57,7 +57,7 @@ entirely filtered input.
 ## Output Contract
 
 `session_before_compact` returns Pi's canonical shape with dc-distill details
-version 14:
+version 15:
 
 ```ts
 {
@@ -67,7 +67,7 @@ version 14:
     tokensBefore: number,
     details: {
       compactor: "dc-distill",
-      version: 14,
+      version: 15,
       tier: 1,
       attemptId: string,
       autonomous: boolean,
@@ -106,6 +106,8 @@ omitted counts. Formatting must preserve complete headings and balanced XML
 markers; never apply a final substring to structured output. Malformed decoded
 Unicode, including materialized handoff fields, is rejected with a typed input
 error; shortening valid Unicode preserves complete code points.
+
+Version 15 adds a bounded `<type-signatures>` catalog immediately after `</verification>`: exported-declaration lines extracted only from successfully paired tool results, capped at 12 files and 8 signatures per file (512 code points each), ordered modified-class first, then read-class, then carried prior-summary entries restricted to frontier paths without a fresh observation. The operating budget evicts complete entries from the lowest-priority tail before touching read-files, the hard wire limit clears the whole catalog before cancelling, and the catalog is rebuilt fresh each compaction; it is never persisted.
 
 Version 9 adds exact lowercased tool aliases: `view_file` reads;
 `write_to_file`, `replace_file_content`, `patch_file`, and `create_file` writes;
@@ -149,8 +151,10 @@ advisory only, with no filesystem enrichment or dependency-based pass preservati
 Version 12 uses the baseline production selector after the coverage candidate
 failed its ordinary-workload performance gate. Coverage remains available offline;
 production keeps one deterministic strategy.
-Move complete handoff projection late, followed by resume risks/tasks, with metrics confined to details and committed notifications. A digest-authenticated `<request-candidate-v1>` marker restates the latest native user request as attributed context only — never declared work, pins, or authorization — bounded to a 4,096-code-point envelope with an optional 512-code-point proposal, evicted only after retained-context excerpts, and carried across compactions only through digest-authenticated predecessor summaries. Verification display prioritizes required, failed, and pending receipts and protects them from budget eviction without changing checkpoint observations. Organization makes no attention or prompt-cache guarantee.
+Move complete handoff projection late, followed by resume risks/tasks, with metrics confined to details and committed notifications. A digest-authenticated `<request-candidate-v1>` marker restates the latest native user request as attributed context only — never declared work, pins, or authorization — bounded to a 4,096-code-point envelope with an optional 512-code-point proposal, evicted only after retained-context excerpts, and carried across compactions only through digest-authenticated predecessor summaries. Verification display prioritizes required, failed, and pending receipts and protects them from budget eviction without changing checkpoint observations. Summary ordering keeps per-compaction volatile blocks — including the request candidate — after stable sections as a tested soft goal for provider prefix-cache reuse across compactions (byte determinism, volatile-data exclusion, and head-carry are pinned by `lib/cache-stability.test.ts`, with a diag-only `headStableCodePoints` observation); it is neither an attention nor a cache guarantee.
 Invalid envelopes stay bounded legacy text.
+
+Version 15 renders the `<type-signatures>` catalog after `</verification>` with `- path: signature` lines that round-trip through the scanner and recall; see the Output Contract paragraph for caps, ordering, and eviction semantics.
 
 ## Transactional Lifecycle
 
@@ -159,7 +163,7 @@ metrics, freezes a `PendingCompaction`, and returns it. It does not emit durable
 success artifacts or reset the monitor.
 
 `session_compact` commits only when the owner session, extension identity,
-details version 14, owning attempt/lease, settings/model snapshot, first-kept ID, exact summary digest, validated checkpoint digest, and the exact section ledger derived from the pending checkpoint match. Branch
+details version 15, owning attempt/lease, settings/model snapshot, first-kept ID, exact summary digest, validated checkpoint digest, and the exact section ledger derived from the pending checkpoint match. Branch
 ownership requires the compaction entry to remain the active branch's newest
 compaction; entries that sibling extensions append after it (for example
 compaction-reactive markers) are tolerated, while superseding or abandoned
@@ -169,7 +173,7 @@ diagnostic. Commit
 then resets the monitor from Pi's post-rebuild full-context usage when available,
 writes log/dump/recall, clears failure state, notifies only in a UI, and queues
 continuation only for an autonomous attempt. Continuation delivery is durable: the attempt id is journalled in the compaction details and the delivered message, and on `session_start` or tree changes a pure reducer over the active branch recovers an unanswered autonomous continuation subject to process submission fences and journal acknowledgement. Pending state and the latch are
-released in `finally`. Historical v8–v13 autonomous continuations remain readable alongside v14.
+released in `finally`. Historical v8–v14 autonomous continuations remain readable alongside v15.
 
 A non-cancelled local compiler failure in a still-owned autonomous attempt pauses
 Mechanical admission process-locally before settled
@@ -193,7 +197,7 @@ recovery). Ordinary user prompts, new leaves/input digests, identical callbacks,
 invalid settings, missing branch evidence, failed manual attempts and mismatched
 commits cannot clear it. Reservation-release rules remain independent. The pause
 has no persistent circuit, retry timer or new command; restart follows existing
-startup guards. Successful wire output, details v14, checkpoint schema v2 and
+startup guards. Successful wire output, details v15, checkpoint schema v2 and
 trigger policy v3 are unchanged.
 
 Session replacement, shutdown, autonomous errors, cancellation, foreign
@@ -249,7 +253,7 @@ malformed, future-dated, or inaccessible journal data preserves conservative
 guards. Model and branch changes require fresh samples. Duplicate commit events
 cannot reset guards; manual, foreign, and legacy commits update admission without
 extension success artifacts. Diagnostics include session/process provenance.
-Trigger policy is v3; compaction details are version 14.
+Trigger policy is v3; compaction details are version 15.
 
 ## Optional Feature Gates
 
@@ -328,14 +332,14 @@ provider, sandboxed HOME plus temp Pi dirs); the autonomous scenario observes
 the production 120-second startup cooldown. `bun run distill:demo` runs one
 offline manual lifecycle and writes inspectable artifacts. Both stay out of
 `bun test` discovery. Their historical v13/schema-v1 assertions have not yet
-been refreshed for v14; neither is v14 acceptance evidence.
+been refreshed for v15; neither is v15 acceptance evidence.
 
 Keep `runStrategies()` single-strategy and deterministic. Bump
 `details.version` when details fields or their semantics change.
 
-Version 12 hardens unknown-tool effects, structural parsing, locale-independent wire counts/order, and exact rebuilt-context capacity acceptance. Unknown capacity is explicit; observed token drift requires a valid post-commit host count. Historical versions 5–11 remain readable, continuation recovery supports 8–14, and integrity validation supports 10–14. Recovery is host-journal dependent and is not crash-atomic across process restarts.
+Version 12 hardens unknown-tool effects, structural parsing, locale-independent wire counts/order, and exact rebuilt-context capacity acceptance. Unknown capacity is explicit; observed token drift requires a valid post-commit host count. Historical versions 5–11 remain readable, continuation recovery supports 8–15, and integrity validation supports 10–15. Recovery is host-journal dependent and is not crash-atomic across process restarts.
 
-## Checkpoint v14
+## Checkpoint v15
 
 `details.checkpoint` is a validated schema-v2 snapshot and the sole authority for
 declared tasks, user-source pins, constraints, decisions, exact evidence identities,
@@ -351,7 +355,7 @@ invocation identity — tool name and arguments, or the same verification runner
 command bytes, and working directory — later succeeds resolves
 (`resolved: later success with same invocation`). Auto-resolved records render
 only as one bounded transparency count and share the ten-resolved retention
-bound with omission accounting. This projection-only behavior changed no details field in v13; v14 adds the
+bound with omission accounting. This projection-only behavior changed no details field in v13; v14/v15 add the
 schema-v2 failure identity and section ledger. A stored v2 failure retains its
 full invocation digest and a bounded display excerpt, not the full fix bytes.
 Historical schema-v1 checkpoints remain read-only and convert in memory.
@@ -372,10 +376,10 @@ T0 identity cores, declared work, required observations, mutation frontier and
 predecessor cannot be evicted. `checkpointSections` reports 17 fixed Unicode
 code-point section costs and ladder outcomes from the final validated checkpoint;
 it is observability only, not authorization or a new scoring engine. Invalid
-expected v13/v14 state cancels instead of reconstructing from prose. Production
-and diagnostic predecessor carry accept authenticated v13/v14 details; recall
-retains v5–14 entries (integrity checks for v10–14), and continuation recovery
-accepts v8–14. Rollback requires a v14-aware reader or must refuse lossy
+expected v13/v14/v15 state cancels instead of reconstructing from prose. Production
+and diagnostic predecessor carry accept authenticated v13/v14/v15 details; recall
+retains v5–15 entries (integrity checks for v10–15), and continuation recovery
+accepts v8–15. Rollback requires a v15-aware reader or must refuse lossy
 carry-forward.
 
 `tool_call` and completed persisted `turn_end` callbacks only sample the first

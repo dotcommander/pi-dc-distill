@@ -188,7 +188,7 @@ Eligible conversation prose receives a separate display projection before its
 preview is clipped. The original semantic turn preview remains the input to
 turn scoring, selection, the resume index, and evidence handling. This changes
 optional rendered text, not checkpoint declarations, pins, evidence identities,
-mutation state, or task authority. Details use version 14 with checkpoint schema
+mutation state, or task authority. Details use version 15 with checkpoint schema
 v2; the exact resulting wire summary is hashed and used for host estimates.
 The checkpoint pressure ladder is separate from optional prose cleanup: it drops
 failure sources (T3), then unreferenced reads (T2), then shortens display excerpts
@@ -312,17 +312,30 @@ place stable supplied identity first, then goal/focus,
 conversation and prior context; file/tool/working-tree evidence; anchors and
 resume index; recovery and omissions; change-impact advice and verification;
 the complete handoff projection; resume risks; resume tasks. Version 13 omits
-the model-facing metric line; telemetry stays in details and committed notifications. Only exact compatible records are deduplicated; a
+the model-facing metric line; telemetry stays in details and committed notifications. Immediately after
+`</verification>`, a bounded `<type-signatures>` catalog lists one
+`- path: signature` line per exported declaration observed in successfully
+paired tool results: modified files first, then read files, then entries
+carried from the prior summary only for frontier paths without a fresh
+observation. The catalog is capped at 12 files and 8 signatures per file
+(512 code points per item); the operating budget evicts complete entries
+from the lowest-priority tail before read-files, and the hard wire limit
+clears the whole catalog before cancelling. It is rebuilt fresh each
+compaction and never persisted. Only exact compatible records are deduplicated; a
 generated task is suppressed only for the same explicit structured task ID.
-A digest-authenticated `<request-candidate-v1>` marker follows the checkpoint
-projection: the latest native user request restated as attributed context
-only — never declared work, pins, or authorization — with source identity, a
-request of at most 2,048 code points, an optional proposal of at most 512, and
-the whole marker, framing and escaping included, within 4,096 code points.
-Offline
+A digest-authenticated `<request-candidate-v1>` marker renders late,
+immediately before the complete handoff projection: the latest native user
+request restated as attributed context only — never declared work, pins, or
+authorization — with source identity, a request of at most 2,048 code points,
+an optional proposal of at most 512, and the whole marker, framing and
+escaping included, within 4,096 code points. Offline
 section-position checks cover this organization. Pi retains messages
 after the summary, so risks are not the absolute end of the model prompt. This
-ordering establishes neither improved attention nor prompt-cache gains.
+ordering is a tested soft goal: stable sections render ahead of
+per-compaction volatile blocks so a provider prefix cache can survive past
+them across successive compactions (byte determinism, volatile-data
+exclusion, and head-carry are pinned by `lib/cache-stability.test.ts`), but
+it establishes neither improved attention nor a cache guarantee.
 
 Remaining losses include subjective intent that lexical heuristics miss,
 images represented as MIME placeholders, budget eviction and omissions

@@ -223,13 +223,13 @@ function normalizeSessionEntry(entry: Record<string, unknown>, meta: SessionMeta
       return normalizeMessageEntry(entry, meta);
     case "compaction":
       meta.authenticatedPriorSummary = undefined;
-      if (isRecord(entry.details) && entry.details.compactor === "dc-distill" && (entry.details.version === 13 || entry.details.version === 14)) {
-        if (typeof entry.details.checkpointDigest !== "string") throw new CompactionInputError("missing v13/v14 checkpoint digest", "invalid_checkpoint");
+      if (isRecord(entry.details) && entry.details.compactor === "dc-distill" && (entry.details.version === 13 || entry.details.version === 14 || entry.details.version === 15)) {
+        if (typeof entry.details.checkpointDigest !== "string") throw new CompactionInputError("missing v13/v14/v15 checkpoint digest", "invalid_checkpoint");
         meta.checkpoint = validateCheckpoint(entry.details.checkpoint, entry.details.checkpointDigest);
         const authenticSummary = typeof entry.summary === "string" && typeof entry.id === "string" &&
           typeof entry.details.summaryDigest === "string" && digest(entry.summary) === entry.details.summaryDigest;
-        if (entry.details.version === 14 && !authenticSummary)
-          throw new CompactionInputError("invalid_checkpoint: v14 prior wire summary digest mismatch", "invalid_checkpoint");
+        if (entry.details.version >= 14 && !authenticSummary)
+          throw new CompactionInputError("invalid_checkpoint: v14+ prior wire summary digest mismatch", "invalid_checkpoint");
         if (authenticSummary) meta.authenticatedPriorSummary = entry.summary as string;
         meta.checkpointDigest = entry.details.checkpointDigest;
         meta.predecessorEntryId = typeof entry.id === "string" ? entry.id : undefined;

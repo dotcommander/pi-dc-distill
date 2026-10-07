@@ -284,13 +284,13 @@ commands mark earlier results as having unestablished freshness.
 The operating summary target is 8,192 Unicode code points. Complete optional
 records are removed first, and omissions are reported; the hard wire ceiling
 is 65,536. See [algorithm](algorithm.md) for scoring and eviction, and
-[architecture](architecture.md#compaction-contract) for version 14 details,
+[architecture](architecture.md#compaction-contract) for version 15 details,
 schema-v2 checkpoint integrity, the 17-section `checkpointSections` ledger,
 and token estimates.
 The fixed T3→T2→T1 checkpoint ladder drops optional failure sources, unreferenced
 reads and then shortens excerpts; T0 identities, declared work and required
 evidence remain protected. Historical schema-v1 checkpoints remain readable.
-Rollback from v14 requires a v14-aware reader or refusal of lossy carry-forward.
+Rollback from v15 requires a v15-aware reader or refusal of lossy carry-forward.
 
 ### Persistence and generated artifacts
 

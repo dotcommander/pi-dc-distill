@@ -199,7 +199,7 @@ describe("dc-distill host compaction override", () => {
           tokensBefore: 120_000,
           details: {
             compactor: "dc-distill",
-            version: 14,
+            version: 15,
             tokensAfterSource: "pi-rebuilt-message-estimate",
           },
         },
@@ -238,7 +238,7 @@ describe("dc-distill host compaction override", () => {
     );
 
     expect(result).toMatchObject({
-      compaction: { details: { compactor: "dc-distill", version: 14 } },
+      compaction: { details: { compactor: "dc-distill", version: 15 } },
     });
   });
 
@@ -438,12 +438,12 @@ describe("dc-distill host compaction override", () => {
     expect(existsSync(join(root, "data", "compact-log.jsonl"))).toBe(true);
   });
 
-  for (const historicalVersion of [5, 6, 7, 8, 9, 10, 11, 12, 13]) test(`rejects a historical v${historicalVersion} append for a newly prepared v14 transaction`, async () => {
+  for (const historicalVersion of [5, 6, 7, 8, 9, 10, 11, 12, 13]) test(`rejects a historical v${historicalVersion} append for a newly prepared v15 transaction`, async () => {
     const { stub, root } = failureReportingFixture(false);
     await simulate.hook(stub, "session_start", {});
     const [prepared] = await simulate.hook(stub, "session_before_compact", compactEvent("manual"));
     const compaction = (prepared as any).compaction;
-    expect(compaction.details.version).toBe(14);
+    expect(compaction.details.version).toBe(15);
 
     await simulate.hook(stub, "session_compact", {
       fromExtension: true,
@@ -465,7 +465,7 @@ describe("dc-distill host compaction override", () => {
     await simulate.hook(stub, "session_compact", { fromExtension: true,
       compactionEntry: { type: "compaction", id: "matching-current", ...compaction } });
     const [replacement] = await simulate.hook(stub, "session_before_compact", compactEvent("manual"));
-    expect(replacement).toMatchObject({ compaction: { details: { version: 14 } } });
+    expect(replacement).toMatchObject({ compaction: { details: { version: 15 } } });
     await simulate.hook(stub, "session_compact", {
       fromExtension: true,
       compactionEntry: { type: "compaction", id: "matching-v11", ...(replacement as any).compaction },
@@ -666,7 +666,7 @@ describe("dc-distill subagent safety", () => {
         },
       },
     );
-    expect(replacement).toMatchObject({ compaction: { details: { version: 14 } } });
+    expect(replacement).toMatchObject({ compaction: { details: { version: 15 } } });
   });
 });
 

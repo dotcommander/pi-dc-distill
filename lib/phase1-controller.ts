@@ -232,7 +232,9 @@ export class Phase1Controller {
       const trustedNewest = this.trustedBranch(ctx).findLast((item) => item.type === "compaction");
       if (allowPauseReset && trustedNewest?.id === entry.id && isDeepStrictEqual(trustedNewest, entry)
         && !((trustedNewest.details as Record<string, unknown> | undefined)?.compactor === "dc-distill"
-          && (trustedNewest.details as Record<string, unknown> | undefined)?.version === 14)
+          // Matches index.ts VERSION: extension-owned commits clear the pause
+          // through full commit validation, not this foreign-observation path.
+          && (trustedNewest.details as Record<string, unknown> | undefined)?.version === 15)
         && Number.isFinite(time) && time >= 0 && time <= this.clock()) this.compilerPause = null;
       if (alreadyObserved) return;
       this.startupCooldownExempt = false;

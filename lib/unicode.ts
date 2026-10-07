@@ -11,6 +11,23 @@ export function codePointLength(text: string): number {
   return count;
 }
 
+/** Length in code points of the longest common prefix of two strings. */
+export function commonPrefixCodePoints(a: string, b: string): number {
+  let count = 0;
+  let i = 0;
+  let j = 0;
+  while (i < a.length && j < b.length) {
+    const pointA = a.codePointAt(i)!;
+    const pointB = b.codePointAt(j)!;
+    if (pointA !== pointB) break;
+    count++;
+    const width = pointA > 0xffff ? 2 : 1;
+    i += width;
+    j += width;
+  }
+  return count;
+}
+
 /** Equivalent to Array.from(text).slice(0, limit).join("") without a character array. */
 export function codePointPrefix(text: string, limit: number): string {
   let remaining = Number.isNaN(limit) ? 0 : Math.trunc(limit);

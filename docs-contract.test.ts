@@ -150,21 +150,21 @@ describe("runtime-contract drift audit", () => {
     expect(docs.find((doc) => doc.file.endsWith("README.md"))?.text).toContain("agent_settled");
   });
 
-  test("v14 docs describe the checkpoint ledger, reader ranges and protected floor", async () => {
+  test("v15 docs describe the checkpoint ledger, reader ranges and protected floor", async () => {
     const agent = await readFile(join(root, "AGENTS.md"), "utf8");
     const docs = await loadDocs();
     const architecture = docs.find(doc => doc.file.endsWith(join("docs", "architecture.md")))!.text;
     const algorithm = docs.find(doc => doc.file.endsWith(join("docs", "algorithm.md")))!.text;
     const usage = docs.find(doc => doc.file.endsWith(join("docs", "usage.md")))!.text;
     for (const text of [agent, architecture, algorithm, usage]) {
-      expect(text).toContain("version 14");
+      expect(text).toContain("version 15");
       expect(text).toContain("checkpointSections");
       expect(text).toMatch(/schema-v2|checkpoint schema\s*v2/);
       expect(text).toContain("T0");
     }
-    expect(agent).toContain("8–14");
-    expect(architecture).toContain("10–14");
-    expect(architecture).toContain("v14-aware reader");
+    expect(agent).toContain("8–15");
+    expect(architecture).toContain("10–15");
+    expect(architecture).toContain("v15-aware reader");
   });
 
   /** Settings keys the runtime actually reads; owner: lib/settings.ts normalizeDistillFeatureSettings. */

@@ -1,6 +1,6 @@
 /** Bounded structural recognition; example text never opens a control section. */
 export interface ScannedSections { valid: boolean; sections: Map<string, string>; headings: Map<string, string> }
-const known = new Set(["read-files", "modified-files", "resume-state", "current-intent", "verification", "resume-risks", "working-tree", "resume-tasks", "resume-index", "retained-context", "goal-state", "path-root", "file-evidence", "literal-anchors", "active-tasks", "source-anchors", "recent-tool-calls", "recent-tool-results", "budget-omissions", "summary-omissions", "change-impact", "checkpoint-v1", "ready-tasks", "graph-ready-tasks", "task-state", "full-session-recovery"]);
+const known = new Set(["read-files", "modified-files", "resume-state", "current-intent", "verification", "type-signatures", "resume-risks", "working-tree", "resume-tasks", "resume-index", "retained-context", "goal-state", "path-root", "file-evidence", "literal-anchors", "active-tasks", "source-anchors", "recent-tool-calls", "recent-tool-results", "budget-omissions", "summary-omissions", "change-impact", "checkpoint-v1", "ready-tasks", "graph-ready-tasks", "task-state", "full-session-recovery"]);
 export function outsideExampleLines(lines: readonly string[]): boolean[] {
   let fence: { char: string; size: number } | undefined;
   return lines.map(line => {

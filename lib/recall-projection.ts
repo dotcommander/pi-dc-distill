@@ -13,7 +13,7 @@ export function projectActiveBranchRecall(entries: Iterable<unknown>, projectIde
     const entry = raw as Record<string, unknown>;
     const details = entry.details as Record<string, unknown> | undefined;
     if (entry.type !== "compaction" || !details || !isDistillCompactor(details.compactor)) continue;
-    if (typeof details.version !== "number" || !Number.isInteger(details.version) || details.version < 5 || details.version > 14) continue;
+    if (typeof details.version !== "number" || !Number.isInteger(details.version) || details.version < 5 || details.version > 15) continue;
     if (typeof entry.id !== "string" || !entry.id || typeof entry.timestamp !== "string" || !Number.isFinite(Date.parse(entry.timestamp))) continue;
     if (typeof entry.summary !== "string" || !entry.summary || typeof entry.firstKeptEntryId !== "string" || !entry.firstKeptEntryId) continue;
     const before = entry.tokensBefore;
@@ -24,7 +24,7 @@ export function projectActiveBranchRecall(entries: Iterable<unknown>, projectIde
     if (details.version >= 10 && (typeof digest !== "string" || !/^[0-9a-f]{64}$/.test(digest)
       || sha256Hex(entry.summary) !== digest || typeof details.attemptId !== "string" || !details.attemptId
       || details.tokensAfterSource !== "pi-rebuilt-message-estimate")) continue;
-    if (details.version === 13 || details.version === 14) {
+    if (details.version === 13 || details.version === 14 || details.version === 15) {
       try {
         if (typeof details.checkpointDigest !== "string") continue;
         validateCheckpoint(details.checkpoint, details.checkpointDigest);

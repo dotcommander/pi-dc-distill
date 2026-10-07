@@ -114,6 +114,10 @@ export interface ConversationResult {
   lexical?: LexicalBudget;
   checkpoint?: ResumeCheckpointV1;
   observedFiles?: { read: string[]; modified: string[] };
+  /** Internal per-path paired file-access observations feeding the type-signature catalog. */
+  signatureObservations?: Array<import("./type-signatures.ts").SignatureObservation>;
+  /** Bounded exported-declaration catalog from successful paired results; wire-summary only, never persisted. */
+  typeSignatures?: import("./type-signatures.ts").TypeSignatureCatalog;
   /** Internal source chronology for string-valued optional records. */
   selectionSourceSequences?: Record<string, number>;
   /** Authoritative obligations captured before display reduction; never persisted. */
@@ -152,6 +156,7 @@ export interface LocalCompileResult {
   readFiles: string[];
   modifiedFiles: string[];
   literalAnchors: string[];
+  typeSignatures?: import("./type-signatures.ts").TypeSignatureCatalog;
   inputDigest: string;
   summaryDigest: string;
   digestScope: "compaction-input" | "bounded-compaction-input";

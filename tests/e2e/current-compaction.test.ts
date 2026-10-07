@@ -7,7 +7,7 @@ function fixture() {
   const summary = "Current wire summary\n😀\n";
   const checkpoint = emptyCheckpoint();
   return { summary, details: {
-    compactor: "dc-distill", version: 14, checkpoint,
+    compactor: "dc-distill", version: 15, checkpoint,
     checkpointDigest: checkpointDigest(checkpoint),
     summaryDigest: createHash("sha256").update(summary).digest("hex"),
     checkpointSections: checkpointSectionLedger(checkpoint),
@@ -15,7 +15,7 @@ function fixture() {
 }
 
 describe("current real-Pi compaction acceptance", () => {
-  test("accepts authenticated v14/schema-v2 with exactly derived telemetry", () => {
+  test("accepts authenticated v15/schema-v2 with exactly derived telemetry", () => {
     const { summary, details } = fixture();
     expect(() => assertCurrentCompaction(summary, details)).not.toThrow();
   });

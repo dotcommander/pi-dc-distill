@@ -11,6 +11,8 @@ import { extractSignals, isReferentialImplementation, conversationEvictionCandid
 import { buildResumeIndex, buildResumeTasks, buildResumePlan } from "./compiler/resume-index.ts";
 import { formatSummary, enforceOperatingBudget, readRetainedContext } from "./compiler/budget-formatter.ts";
 import { DisplayProjectionBudget } from "./compiler/display-projection.ts";
+import { scanSections } from "./compiler/section-scanner.ts";
+import { buildTypeSignatures, type SignatureObservation } from "./compiler/type-signatures.ts";
 import { choosePathRoot } from "./compiler/path-roots.ts";
 import { canonicalJson, buildCheckpoint, validateCheckpoint, checkpointDigest } from "./compiler/checkpoint.ts";
 import { captureRequestCandidate } from "./compiler/request-candidate.ts";
@@ -68,6 +70,9 @@ function extractConversation(blocks: NormalizedBlock[], sessionCwd?: string, pre
   let pendingFiles: string[] = [];
   let pendingError = false;
   const evidenceState = createEvidenceState(blocks);
+  const signatureObservations: SignatureObservation[] = [];
+  const signatureIdentityPaths = new Map<string, string>();
+  let signatureFileReadsSeen = 0;
   for (const call of pendingCalls) if (call.callId && blocks.some(block => block.kind === "tool_call" && block.callId === call.callId)) evidenceState.duplicateIds.add(call.callId);
   let mutationEpoch = 0;
   const lastErrorRun: { current?: ToolResultEntry } = {};
@@ -106,6 +111,9 @@ function extractConversation(blocks: NormalizedBlock[], sessionCwd?: string, pre
     }
 
     if (block.kind === KIND_TOOL_RESULT) {
+      const signatureReadCountBefore = readFiles.size;
+      const signatureModifiedCountBefore = modifiedFiles.size;
+      const signatureCreatedCountBefore = createdFiles.size;
       const collected = collectConversationToolResult(
         block,
         pendingCalls,
@@ -133,6 +141,31 @@ function extractConversation(blocks: NormalizedBlock[], sessionCwd?: string, pre
       omittedRecentResults = collected.omittedRecentResults;
       mutationEpoch = collected.mutationEpoch;
       stampStrings(sourceSequence);
+      // Type-signature provenance: the file lists grow only for successful
+      // paired results, and fileReads carries the per-observation identity
+      // chronology. The identity join lets later re-reads refresh the text of
+      // a path the lists already hold, using display-form paths throughout.
+      const signatureGrownRead = readFiles.slice(signatureReadCountBefore);
+      const signatureGrownModified = [...modifiedFiles.slice(signatureModifiedCountBefore), ...createdFiles.slice(signatureCreatedCountBefore)];
+      const signatureNewReads = evidenceState.fileReads.slice(signatureFileReadsSeen);
+      signatureFileReadsSeen = evidenceState.fileReads.length;
+      const signatureNewestRead = signatureNewReads.length === 1 ? signatureNewReads[0] : undefined;
+      if (signatureGrownRead.length > 0 || signatureGrownModified.length > 0) {
+        if (signatureNewestRead) signatureIdentityPaths.set(signatureNewestRead.path, signatureGrownRead[0] ?? signatureGrownModified[0]);
+        for (const signaturePath of new Set([...signatureGrownModified, ...signatureGrownRead])) {
+          signatureObservations.push({
+            path: signaturePath,
+            text: block.text ?? "",
+            seq: sourceSequence,
+            kind: signatureGrownModified.includes(signaturePath) ? "modified" : "read",
+          });
+        }
+      } else if (signatureNewestRead?.status === "succeeded") {
+        const signatureRefreshPath = signatureIdentityPaths.get(signatureNewestRead.path);
+        if (signatureRefreshPath) {
+          signatureObservations.push({ path: signatureRefreshPath, text: block.text ?? "", seq: sourceSequence, kind: "read" });
+        }
+      }
       continue;
     }
 
@@ -285,6 +318,7 @@ function extractConversation(blocks: NormalizedBlock[], sessionCwd?: string, pre
     verification: Object.freeze([...verificationHistory, ...currentSnapshot.verification.filter(r => r.status === "INCOMPLETE" && r.sourceSequence === undefined)]), pendingMutations: pendingCalls.filter(call=>call.potentiallyModifying).map(call=>({...call}))});
   return {
     selectionSourceSequences,
+    signatureObservations,
     observationSnapshot,
     changeImpact: transcriptChangeImpact(observationSnapshot),
     resumePlan,
@@ -387,7 +421,7 @@ function invocationOutcomes(blocks: NormalizedBlock[], previous: import("./compi
 }
 
 /** Exhaust whole optional file markers before rejecting a hard wire overflow. */
-export function enforceSummaryLimit(render: () => string, conv: Pick<ConversationResult, "readFiles" | "modifiedFiles" | "omittedReadFiles" | "omittedModifiedFiles">): string {
+export function enforceSummaryLimit(render: () => string, conv: Pick<ConversationResult, "readFiles" | "modifiedFiles" | "omittedReadFiles" | "omittedModifiedFiles" | "typeSignatures">): string {
   let summary = render();
   // The operating budget may stop at protected state above its soft target.
   // At the hard wire limit, exhaust the remaining whole file display records before cancelling.
@@ -401,12 +435,30 @@ export function enforceSummaryLimit(render: () => string, conv: Pick<Conversatio
     }
     summary = render();
   }
+  // The type-signature catalog is fully optional derived state; clearing it
+  // whole preserves balanced markers where a substring could not.
+  if (codePointLength(summary) > MAX_STRUCTURED_SUMMARY_CODE_POINTS && conv.typeSignatures && conv.typeSignatures.entries.length > 0) {
+    conv.typeSignatures = {
+      ...conv.typeSignatures,
+      entries: [],
+      omittedFiles: conv.typeSignatures.omittedFiles + conv.typeSignatures.entries.length,
+      omittedSignatures: conv.typeSignatures.omittedSignatures + conv.typeSignatures.entries.reduce((total, entry) => total + entry.signatures.length, 0),
+    };
+    summary = render();
+  }
   if (codePointLength(summary) > MAX_STRUCTURED_SUMMARY_CODE_POINTS) {
     throw new CompactionInputError(
       `structured summary exceeds ${formatInteger(MAX_STRUCTURED_SUMMARY_CODE_POINTS)} code points`, "protected_overflow",
     );
   }
   return summary;
+}
+
+/** Latest prior summary's scanned <type-signatures> block for carry-forward. */
+function typeSignatureMarkerFromPriorSummary(authenticatedPriorSummary: string | undefined, priorSummaries: string[]): string | null {
+  const prior = authenticatedPriorSummary ?? priorSummaries.at(-1);
+  if (!prior) return null;
+  return scanSections(prior).sections.get("type-signatures") ?? null;
 }
 
 export function compileSessionJsonl(content: string, userFocus?: string, signal?: AbortSignal, recallEnabled = true, selection: "baseline" | "coverage" = "baseline"): LocalCompileResult {
@@ -449,6 +501,11 @@ export function compileSessionJsonl(content: string, userFocus?: string, signal?
     conv.observationSnapshot!, normalized.meta.predecessorEntryId, conv.observedFiles, declarations.map(item => item.source), conv.resumeRisks,
     outcomes.failures, outcomes.succeeded);
   conv.observationSnapshot = conv.checkpoint.evidence;
+  conv.typeSignatures = buildTypeSignatures(
+    conv.signatureObservations ?? [],
+    [...conv.checkpoint.files.read, ...conv.checkpoint.files.modified],
+    typeSignatureMarkerFromPriorSummary(normalized.meta.authenticatedPriorSummary, normalized.meta.priorSummaries),
+  );
   conv.requestCandidate = requestCandidate;
   conv.verification = prioritizeVerificationDisplay(conv.checkpoint);
   conv.retainedContext = readRetainedContext(normalized.meta.priorSummaries);
@@ -467,6 +524,7 @@ export function compileSessionJsonl(content: string, userFocus?: string, signal?
     readFiles: conv.checkpoint!.files.read.slice(-50).map(path=>sliceU16(path,512)),
     modifiedFiles: conv.checkpoint!.files.modified.slice(-50).map(path=>sliceU16(path,512)),
     literalAnchors: conv.literalAnchors,
+    typeSignatures: conv.typeSignatures,
     inputDigest: digest(content),
     summaryDigest: digest(summary),
     digestScope: "compaction-input",

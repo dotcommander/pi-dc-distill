@@ -43,6 +43,7 @@ const MARKER_BLOCKS = [
   "recent-tool-calls",
   "recent-tool-results",
   "verification",
+  "type-signatures",
   "working-tree",
   "source-anchors",
   "active-tasks",

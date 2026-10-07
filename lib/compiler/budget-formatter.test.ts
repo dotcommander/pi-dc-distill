@@ -118,3 +118,66 @@ for (const selection of ["baseline", "coverage"] as const) {
     for (const row of protectedRows) expect(conv.verification).toContain(row);
   });
 }
+
+describe("type-signature catalog rendering and eviction", () => {
+  test("marker renders - path: signature lines immediately after verification", () => {
+    const conv = conversation(turns);
+    conv.verification = ["PASS bun test [freshness: journal]"];
+    conv.typeSignatures = { entries: [
+      { path: "src/a.ts", signatures: ["export const a = 1;", "export function f(): void {}"] },
+      { path: "src/b.tsx", signatures: ["export const el = <div/>;"] },
+    ], omittedFiles: 0, omittedSignatures: 0 };
+    const summary = formatSummary({ priorSummaries: [] }, conv);
+    const markerStart = summary.indexOf("<type-signatures>");
+    const verificationEnd = summary.indexOf("</verification>");
+    expect(markerStart).toBeGreaterThan(0);
+    expect(verificationEnd).toBeGreaterThan(0);
+    expect(markerStart).toBeGreaterThan(verificationEnd);
+    const between = summary.slice(verificationEnd + "</verification>".length, markerStart);
+    expect(between.includes("<")).toBe(false);
+    expect(summary).toContain("- src/a.ts: export const a = 1;");
+    expect(summary).toContain("- src/a.ts: export function f(): void {}");
+    expect(summary).toContain("- src/b.tsx: export const el = &lt;div/&gt;;");
+    expect(scanSections(summary).valid).toBe(true);
+    expect(scanSections(summary).sections.get("type-signatures")).toContain("- src/a.ts: export const a = 1;");
+  });
+
+  test("empty catalog renders no marker", () => {
+    const summary = formatSummary({ priorSummaries: [] }, conversation(turns));
+    expect(summary.includes("<type-signatures>")).toBe(false);
+  });
+
+  test("omission counters render as whole-record receipt lines", () => {
+    const conv = conversation(turns);
+    conv.typeSignatures = { entries: [], omittedFiles: 3, omittedSignatures: 7 };
+    const summary = formatSummary({ priorSummaries: [] }, conv);
+    expect(summary).toContain("<type-signatures>");
+    expect(summary).toContain("... (3 catalog files omitted)");
+    expect(summary).toContain("... (7 signatures omitted)");
+  });
+
+  test("budget eviction drops the lowest-priority tail entry first", () => {
+    const conv = conversation(turns);
+    const big = (path: string) => ({ path, signatures: Array.from({ length: 8 }, (_, i) => `export const ${path}_${i} = "${"x".repeat(480)}";`) });
+    conv.typeSignatures = { entries: [big("src/mod.ts"), big("src/read.ts"), big("src/carried.ts")], omittedFiles: 0, omittedSignatures: 0 };
+    enforceOperatingBudget({ priorSummaries: [] }, conv, undefined, false);
+    const catalog = conv.typeSignatures!;
+    expect(catalog.entries.every((entry) => entry.path !== "src/carried.ts")).toBe(true);
+    expect(catalog.omittedFiles).toBeGreaterThanOrEqual(1);
+    expect(conv.budgetOmissions.join("\n")).toContain("type-signature files");
+    expect(catalog.entries.at(0)?.path).toBe("src/mod.ts");
+  });
+
+  test("enforceSummaryLimit clears the whole catalog before protected overflow", () => {
+    const conv = conversation(turns);
+    const entries = Array.from({ length: 160 }, (_, i) => ({ path: `src/big${i}.ts`, signatures: [`${"export const x".repeat(30)} = ${i};`] }));
+    conv.typeSignatures = { entries, omittedFiles: 0, omittedSignatures: 0 };
+    const meta: SessionMeta = { priorSummaries: [], cwd: "/tmp/project" };
+    const summary = enforceSummaryLimit(() => formatSummary(meta, conv), conv);
+    expect(codePointLength(summary)).toBeLessThanOrEqual(65_536);
+    expect(summary.includes("- src/big0.ts")).toBe(false);
+    expect(summary).toContain("catalog files omitted");
+    expect(conv.typeSignatures!.entries).toHaveLength(0);
+    expect(conv.typeSignatures!.omittedFiles).toBe(160);
+  });
+});
