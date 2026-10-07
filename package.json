@@ -1,6 +1,6 @@
 {
   "name": "pi-dc-distill",
-  "version": "0.1.8",
+  "version": "0.2.0",
   "description": "Deterministic local context compaction for Pi using bounded conversation excerpts and observations. No LLM calls.",
   "author": "Gary Blankenship",
   "license": "MIT",

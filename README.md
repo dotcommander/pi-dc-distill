@@ -4,11 +4,20 @@ Deterministic local context compaction for [Pi](https://github.com/earendil-work
 
 ## Install and first compaction
 
-Prerequisite: Pi with Node.js 22.19.0 or newer (the package's `engines` floor). Pi packages execute extension code, so review the source before installing. Then:
+Prerequisite: Pi with Node.js 22.19.0 or newer (the package's `engines` floor). Pi packages execute extension code, so review the source before installing. After 0.2.0 is published to npm:
 
 ```bash
-pi install npm:pi-dc-distill
+pi install npm:pi-dc-distill@0.2.0
 ```
+
+Alternatively, after the 0.2.0 Homebrew formula is published to the tap:
+
+```bash
+brew install dotcommander/tap/pi-dc-distill
+pi install "$(brew --prefix)/opt/pi-dc-distill/libexec"
+```
+
+Homebrew installs the extension source; Pi must already be installed. The stable `opt` path follows Homebrew upgrades. Use one installation method and load only one copy of the extension. Release preparation and publication steps are in [releasing](docs/releasing.md).
 
 Pi loads the TypeScript source directly (`"pi": { "extensions": ["./index.ts"] }`); there is nothing to build. Start a fresh session with this extension. Existing incompatible sessions must use the old extension — there is no migration or historical format decoder. Stored data and existing session files are preserved; this extension writes no state of its own.
 
