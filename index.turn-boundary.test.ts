@@ -30,8 +30,7 @@ async function fixture() {
   store.writeDump = async () => null;
   createDistillExtension({ clock: () => now, storeFactory: () => store,
     loadCompactionSettings: () => ({ enabled, reserveTokens }),
-    loadFeatureSettings: () => ({ recall: { enabled: false }, toolOutput: { enabled: false } }),
-    installCompactionDedupe: async () => null })(stub.pi);
+    loadFeatureSettings: () => ({ recall: { enabled: false }, toolOutput: { enabled: false } }) })(stub.pi);
   await simulate.hook(stub, "session_start", {});
   const assistant = (id: string, stopReason = "toolUse") => stopReason === "aborted"
     ? { ...nativeAbortEntry(branch.at(-1)?.id), id, message: { ...nativeAbortEntry(branch.at(-1)?.id).message, stopReason: "aborted" } }

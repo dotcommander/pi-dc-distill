@@ -190,16 +190,6 @@ describe("Phase 1 lifecycle and tickets", () => {
     expect(controller.activeAttempt).toBe(next);
     expect(controller.commitInFlight).toBe(true);
   });
-  test("late UI handles are disposed after shutdown or same-identity replacement", () => {
-    const { stub, controller } = fixture();
-    const lease = controller.lease(stub.ctx)!;
-    let disposed = 0;
-    controller.shutdown(stub.ctx);
-    controller.start(stub.ctx);
-    controller.attachUI({ dispose: () => { disposed++; } }, lease, stub.ctx);
-    expect(disposed).toBe(1);
-    expect(controller.compactionCardDedupe).toBeNull();
-  });
   test("feature gates stay independent startup snapshots across context changes", () => {
     const { stub, controller, setSettings } = fixture();
     for (const recall of [false, true]) for (const toolOutput of [false, true]) {
@@ -282,6 +272,35 @@ describe("Checkpoint operation ownership", () => {
       expect(controller.activeAttempt).toBe(ticket);
     }
   });
+  test("omitted injected defaults remain equivalent through preparation and commit", () => {
+    const { stub } = fixture();
+    let settings: any = { enabled: true, reserveTokens: 16_384 };
+    const controller = new Phase1Controller(stub.pi, { loadCompactionSettings: () => settings });
+    controller.start(stub.ctx);
+    const ticket = controller.beginPreparation(stub.ctx)!;
+    expect(ticket.settings.keepRecentTokens).toBe(20_000);
+    settings = { ...settings, keepRecentTokens: 20_000 };
+    expect(controller.snapshotMatches(ticket, stub.ctx)).toBe(true);
+    expect(controller.beginCommitOutcome(ticket, stub.ctx)).toEqual({ accepted: true });
+  });
+
+  for (const change of ["keepRecentTokens", "shadowed-reserve", "invalid-shadowed-reserve"] as const) {
+    test(`effective ${change} preserves preparation and commit fencing`, () => {
+      const { stub, controller, setSettings } = fixture();
+      const ticket = controller.beginPreparation(stub.ctx)!;
+      if (change === "keepRecentTokens") setSettings({ compaction: { keepRecentTokens: 25_000 } });
+      else setSettings({ compaction: { reserveTokens: change === "shadowed-reserve" ? 42 : -1,
+        modelOverrides: { "fake/one": { reserveTokens: 16_384 } } } });
+      const unchanged = change === "shadowed-reserve";
+      expect(controller.snapshotMatches(ticket, stub.ctx)).toBe(unchanged);
+      expect(controller.beginCommitOutcome(ticket, stub.ctx)).toEqual(unchanged
+        ? { accepted: true } : { accepted: false, reason: "settings-changed" });
+      if (change === "invalid-shadowed-reserve") {
+        expect(controller.refreshSettings(stub.ctx)).toBe(false);
+        expect(controller.compactionSettings.enabled).toBe(false);
+      }
+    });
+  }
   test("diagnostic formatting and error stringification cannot escape admission", () => {
     const { stub, controller, setSettings } = fixture();
     setSettings(new Proxy({}, { get() { throw { toString() { throw new Error("broken formatter"); } }; } }));

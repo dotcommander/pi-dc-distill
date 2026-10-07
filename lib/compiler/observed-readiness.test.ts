@@ -3,7 +3,7 @@ import { compileSessionJsonl } from "../local-compact.ts";
 import { evaluatePreconditions } from "./observed-readiness.ts";
 import type { ConversationResult, ObservationSnapshot } from "./types.ts";
 import type { DistillHandoffPrecondition } from "../handoff.ts";
-import { enforceOperatingBudget, filterGeneratedTasks, formatSummary, renderStructuredHandoff } from "./budget-formatter.ts";
+import { filterGeneratedTasks, formatSummary, renderStructuredHandoff } from "./budget-formatter.ts";
 import { parseStructuredDistillHandoffV3 } from "../handoff.ts";
 
 const read: DistillHandoffPrecondition = { id: "P1", kind: "file-read-succeeded", path: "src/a.ts", cwd: "/repo" };
@@ -60,19 +60,6 @@ describe("observed readiness and integration", () => {
     const model = { ...handoff(), tasks: [{ ...handoff().tasks[0], id: "build" }, { ...handoff().tasks[0], id: "build.test" }] };
     expect(filterGeneratedTasks(["Continue task: build.test", "Continue task: `build.test`", "Continue task: build.other", "Continue task: build.test.extra", "Continue task: build/test"], model)).toEqual(["Continue task: build.other", "Continue task: build.test.extra", "Continue task: build/test"]);
   });
-  test("coverage prefilter retains recent structural conversation bands", () => {
-    const conv: ConversationResult = {
-      turns: Array.from({ length: 40 }, (_, index) => ({ role: "assistant", text: `Context record ${index} discusses parser details.`, sourceSequence: index })),
-      readFiles: [], modifiedFiles: [], omittedReadFiles: 0, omittedModifiedFiles: 0,
-      recentToolCalls: [], recentToolResults: [], verification: [], workingTree: [], sourceAnchors: [], literalAnchors: [], activeTasks: [], resumeRisks: [], budgetOmissions: [], resumeTasks: [],
-      resumeIndex: { activeFiles: [], recentUserIntents: [], continuationHints: [], recallQueries: [] },
-    };
-    enforceOperatingBudget({ priorSummaries: [] }, conv, "parser", false, "coverage");
-    for (let index = 32; index < 40; index++) expect(conv.turns.some((turn) => turn.text.includes(`record ${index} `))).toBe(true);
-    expect(conv.turns.some((turn) => turn.text.includes("record 0 "))).toBe(false);
-    expect(conv.turns.length).toBeLessThanOrEqual(33); // 32 optional plus the pinned frontier.
-    expect(conv.budgetOmissions.join("\n")).toContain("conversation");
-  });
   test("numeric trial measurement equals complete escaped rendering across every section", () => {
     const initial: ConversationResult = {
       turns: [{ role: "user", origin: "custom", customType: "<note>", text: "Inspect <parser> 🚀\ud800" }, { role: "assistant", text: "Keep an exact receipt." }],
@@ -94,12 +81,6 @@ describe("observed readiness and integration", () => {
       formatSummary(priorMeta, current, undefined, projection);
       expect(projection.renderedCost).toBe([...formatSummary(priorMeta, current, undefined, { structured: projection.structured, handoffBlock: projection.handoffBlock })].length);
     }
-    const cache = (projection as Parameters<typeof formatSummary>[3])!.blocks!;
-    expect([...cache.get(initial.verification)!.values()].every((value) => typeof value === "number")).toBe(true);
-  });
-  test("bounded all-fit coverage preserves exact baseline formatting", () => {
-    const content = jsonl([user, call("read", "r1", { path: "src/a.ts" }), result("read", "r1", "Example <tag> with Unicode 🚀"), call("bash", "v1", { command: "bun test", cwd: "/repo" }), result("bash", "v1", "1 pass\n0 fail")]);
-    expect(compileSessionJsonl(content, "parser", undefined, false, "coverage").summary).toBe(compileSessionJsonl(content, "parser", undefined, false, "baseline").summary);
   });
   test("production snapshots fence reads on failed, pending and overlapping writes", () => {
     const payload = { ...handoff(), version: undefined, preconditions: [read], tasks: [{ ...handoff().tasks[0], requires: ["P1"] }] };
@@ -151,6 +132,6 @@ describe("observed readiness and integration", () => {
     expect(summary.indexOf("<verification>")).toBeLessThan(summary.indexOf("<resume-state>"));
     expect(summary).toContain("<graph-ready-tasks>\n- T1");
     expect(summary).not.toContain("<resume-tasks>\nT1:");
-    expect(compileSessionJsonl(content, "Focus", undefined, false, "coverage").summary).toBe(compileSessionJsonl(content, "Focus", undefined, false, "coverage").summary);
+    expect(compileSessionJsonl(content, "Focus", undefined, false).summary).toBe(compileSessionJsonl(content, "Focus", undefined, false).summary);
   });
 });

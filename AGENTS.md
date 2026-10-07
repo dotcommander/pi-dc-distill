@@ -149,8 +149,8 @@ syntax as unknown. Scan full supplied output before preview shortening; decisive
 excerpts stay within 300 code points. Transcript-derived change-impact hints are
 advisory only, with no filesystem enrichment or dependency-based pass preservation.
 Version 12 uses the baseline production selector after the coverage candidate
-failed its ordinary-workload performance gate. Coverage remains available offline;
-production keeps one deterministic strategy.
+failed its ordinary-workload performance gate. The rejected coverage selector is
+removed; production and offline quality use one deterministic baseline policy.
 Move complete handoff projection late, followed by resume risks/tasks, with metrics confined to details and committed notifications. A digest-authenticated `<request-candidate-v1>` marker restates the latest native user request as attributed context only — never declared work, pins, or authorization — bounded to a 4,096-code-point envelope with an optional 512-code-point proposal, evicted only after retained-context excerpts, and carried across compactions only through digest-authenticated predecessor summaries. Verification display prioritizes required, failed, and pending receipts and protects them from budget eviction without changing checkpoint observations. Summary ordering keeps per-compaction volatile blocks — including the request candidate — after stable sections as a tested soft goal for provider prefix-cache reuse across compactions (byte determinism, volatile-data exclusion, and head-carry are pinned by `lib/cache-stability.test.ts`, with a diag-only `headStableCodePoints` observation); it is neither an attention nor a cache guarantee.
 Invalid envelopes stay bounded legacy text.
 
@@ -306,9 +306,9 @@ releases, exact 1.0.0, and 1.0.2) is carried by the development pins and the rev
 process, not by the peer ranges.
 
 Reviewed Pi 0.99.0+ and 1.x (including 1.0.0, 1.0.2, 1.0.3, and subsequent releases)
-use their native compaction card without patching the InteractiveMode prototype. Older
-reviewed hosts retain historical shim fixtures. Unreviewed older host versions (< 0.99)
-do not receive a private presentation patch.
+use their native compaction card without patching the InteractiveMode prototype. The private
+presentation patch for hosts below 0.99 is retired. Historical custom-entry
+renderers, including `dc-shrink-compaction`, remain supported.
 
 ## Verification
 
@@ -320,7 +320,14 @@ git diff --check
 ```
 
 `bun run distill:quality <artifact-directory> <unique-label>` writes the offline
-checkpoint, generation-survival, and optional-selector quality receipts.
+checkpoint, generation-survival, and baseline-only optional quality receipts.
+The nested optional report is schema 2 and the aggregate report is schema 4;
+checkpoint and survival schemas remain unchanged. All 13 fixtures run with both
+focus and recall settings, three repeats each, producing 52 comparisons.
+`compileSessionJsonl()` takes four arguments. The published direct-file selector,
+card-shim, and runtime-probe imports are intentionally retired. Benchmark switches
+`--semantic`, `--semantic-worker`, and checkpoint-worker `coverage` selection
+fail explicitly; its positional `baseline` sentinel remains.
 `bun run distill:performance <artifact-directory> <unique-label> <baseline-checkpoint-receipt>`
 runs the checkpoint benchmark with 10 warmups and 30 samples in isolated workers.
 The ordinary gate requires identical sealed input, runtime/options, and Pi SDK

@@ -79,6 +79,15 @@ describe("dc-distill entrypoint", () => {
     expect(existsSync(join(home, ".pi", "data", "distill"))).toBe(false);
   });
 
+  test("keeps current and historical custom compaction renderers registered", () => {
+    const stub = createStubCtx();
+    extension(stub.pi);
+    const types = stub.calls.filter((call) => call.api === "pi.registerMessageRenderer")
+      .map((call) => call.args[0]);
+    expect(types).toContain("dc-distill-compaction");
+    expect(types).toContain("dc-shrink-compaction");
+  });
+
   test("routes user notifications through the active context", async () => {
     const source = await readFile(
       new URL("./index.ts", import.meta.url),
@@ -96,41 +105,6 @@ describe("dc-distill entrypoint", () => {
     expect(stub.registeredCommands.has("compact-status")).toBe(false);
     expect(stub.registeredCommands.has("distill")).toBe(false);
     expect(stub.registeredCommands.has("compact")).toBe(false);
-  });
-
-  test("replaces and disposes the active Pi compatibility installation", async () => {
-    const stub = createStubCtx();
-    (stub.ctx as { mode: string }).mode = "tui";
-    const disposed: number[] = [];
-    let installed = 0;
-    createDistillExtension({
-      storeFactory: (ctx) => new DistillStore({
-        dataDir: join(testRoot, "lifecycle-data"),
-        projectRoot: join(testRoot, "lifecycle-projects", encodeURIComponent(ctx.cwd)),
-        projectsRoot: join(testRoot, "lifecycle-projects"),
-        projectIdentity: ctx.cwd,
-        legacyDir: join(testRoot, "missing-lifecycle-legacy"),
-      }),
-      installCompactionDedupe: async () => {
-        const id = ++installed;
-        return { dispose: () => disposed.push(id) };
-      },
-    })(stub.pi);
-
-    await simulate.hook(stub, "session_start", {});
-    const ownerId = stub.ctx.sessionManager.getSessionId();
-    stub.ctx.sessionManager.getSessionId = () => "child-session";
-    await simulate.hook(stub, "session_start", { reason: "fork" });
-    expect(installed).toBe(1);
-    expect(disposed).toEqual([]);
-
-    stub.ctx.sessionManager.getSessionId = () => ownerId;
-    await simulate.hook(stub, "session_start", {});
-    expect(installed).toBe(2);
-    expect(disposed).toEqual([1]);
-
-    await simulate.hook(stub, "session_shutdown", {});
-    expect(disposed).toEqual([1, 2]);
   });
 });
 

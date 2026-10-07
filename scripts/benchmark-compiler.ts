@@ -7,6 +7,13 @@ import { spawnSync } from "node:child_process";
 import type { CompactionSource } from "../lib/compaction-source.ts";
 import { pathToFileURL } from "node:url";
 import { compareCachingPerformance, compareOrdinaryPerformance } from "../lib/offline/performance-gate.ts";
+// Retired modes must fail before loading the compiler or reading benchmark input.
+if (["--semantic", "--semantic-worker"].includes(process.argv[2])) {
+  throw new Error(`${process.argv[2]} is retired; semantic selector benchmarks are no longer supported`);
+}
+if (process.argv[2] === "--checkpoint-worker" && process.argv[4] !== "baseline") {
+  throw new Error("checkpoint worker requires baseline selection; coverage is retired");
+}
 // Reserve diagnostic storage before any Pi/compiler import. Keep the scratch
 // directory in the receipt for inspection; never write into the active profile.
 const scratchPiDirectory = await mkdtemp(join(tmpdir(), 'dc-distill-benchmark-'));
@@ -34,19 +41,17 @@ const compilerLoad = { elapsedMs: performance.now() - compilerLoadStarted, peakR
 
 // Isolated processes make peak RSS comparable; a shared process's high-water
 // counter cannot measure the candidate independently of baseline allocations.
-if (process.argv[2] === "--semantic-worker" || process.argv[2] === "--checkpoint-worker") {
-  const checkpointWorker = process.argv[2] === "--checkpoint-worker";
+if (checkpointWorkerMode) {
   const sealed = await readFile(process.argv[3], "utf8");
   const source: CompactionSource = JSON.parse(sealed);
   const selection = process.argv[4];
-  if (selection !== "baseline" && selection !== "coverage") throw new Error("invalid selector");
   const run = () => {
     let input: ReturnType<typeof canonicalizeCompactionSource> | undefined;
     try {
     input = canonicalizeCompactionSource(source);
-    return { canonical: { hash: createHash("sha256").update(input.bytes).digest("hex"), byteLength: Buffer.byteLength(input.bytes), digestScope: input.digestScope, recordCount: input.recordCount }, result: compileSessionJsonl(input.bytes, undefined, undefined, true, selection) }; }
+    return { canonical: { hash: createHash("sha256").update(input.bytes).digest("hex"), byteLength: Buffer.byteLength(input.bytes), digestScope: input.digestScope, recordCount: input.recordCount }, result: compileSessionJsonl(input.bytes, undefined, undefined, true) }; }
     catch (error) {
-      if (!checkpointWorker || !(error instanceof Error) || error.name !== "CompactionInputError") throw error;
+      if (!(error instanceof Error) || error.name !== "CompactionInputError") throw error;
       return { ...(input ? { canonical: { hash: createHash("sha256").update(input.bytes).digest("hex"), byteLength: Buffer.byteLength(input.bytes), digestScope: input.digestScope, recordCount: input.recordCount } } : {}), rejection: { name: error.name, code: (error as Error & { code?: string }).code, message: error.message } };
     }
   };
@@ -57,7 +62,7 @@ if (process.argv[2] === "--semantic-worker" || process.argv[2] === "--checkpoint
     const cpu = process.cpuUsage(), start = performance.now();
     const output = run();
     const elapsedMs = performance.now() - start;
-    if (JSON.stringify(output) !== JSON.stringify(expected)) throw new Error("nondeterministic selector output");
+    if (JSON.stringify(output) !== JSON.stringify(expected)) throw new Error("nondeterministic compiler output");
     samples.push({ elapsedMs, cpu: process.cpuUsage(cpu), memory: process.memoryUsage(), resourceUsage: process.resourceUsage() });
   }
   const sorted = samples.map(sample => sample.elapsedMs).sort((a, b) => a - b);
@@ -97,12 +102,11 @@ if (process.argv[2] === "--compare") {
   process.exit(0);
 }
 
-const semantic = process.argv[2] === "--semantic";
 const checkpointMode = process.argv[2] === "--checkpoint" || process.argv[2] === "--seal";
-const directory = process.argv[semantic || checkpointMode ? 3 : 2];
-const label = process.argv[semantic || checkpointMode ? 4 : 3];
+const directory = process.argv[checkpointMode ? 3 : 2];
+const label = process.argv[checkpointMode ? 4 : 3];
 if (!directory || !label || !/^[a-zA-Z0-9_-]+$/.test(label)) {
-  throw new Error("usage: bun scripts/benchmark-compiler.ts [--semantic|--checkpoint|--seal] <artifact-directory> <unique-label> [baseline-checkpoint-receipt]");
+  throw new Error("usage: bun scripts/benchmark-compiler.ts [--checkpoint|--seal] <artifact-directory> <unique-label> [baseline-checkpoint-receipt]");
 }
 await mkdir(directory, { recursive: true });
 const hash = (text: string) => createHash("sha256").update(text).digest("hex");
@@ -180,40 +184,6 @@ if (checkpointMode) {
   const report = { schema: 4, compilerSourceRoot: process.argv[6] ?? join(import.meta.dir, ".."), mode: "checkpoint-bounded-processing", label, ordinary: measurements.ordinary, nearLimit: Object.fromEntries(Object.entries(measurements).filter(([name]) => name !== "ordinary")), ordinaryGate: gate, passed: failures.length === 0, failures, limitations: ["Near-limit results are measured separately and are not ordinary latency acceptance.", "Baseline and candidate must use identical runtime, input and options; summary changes are expected.", "RSS gate uses absolute lifetime high-water with identical installed Pi host preload. Incremental RSS is advisory only; prior host high-water can mask below-peak allocations in that advisory subtraction. Module-load overhead is reported separately."] };
   await writeFile(join(directory, `${label}.checkpoint.json`), JSON.stringify(report, null, 2) + "\n", { flag: "wx" });
   console.log(JSON.stringify({ passed: report.passed, ordinaryGate: gate, failures }));
-  process.exit(failures.length ? 1 : 0);
-}
-if (semantic) {
-  const receipt: Record<string, unknown> = { schema: 2, mode: "semantic-selector-adoption", label, timestamp: new Date().toISOString(), warmups: 10, repetitions: 30, workloads: {}, passed: true, failures: [] };
-  const failures: string[] = [];
-  for (const [name, build] of Object.entries(workloads)) {
-    const path = join(directory, `${name}.input.json`);
-    try { await readFile(path, "utf8"); }
-    catch (error) {
-      if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
-      await writeFile(path, JSON.stringify(build()), { flag: "wx" });
-    }
-    const results: Record<string, any> = {};
-    for (const selection of ["baseline", "coverage"]) {
-      const child = spawnSync(process.execPath, [import.meta.path, "--semantic-worker", path, selection], { encoding: "utf8", maxBuffer: 16 * 1024 * 1024 });
-      if (child.status !== 0 || child.error) {
-        results[selection] = { error: child.error?.message ?? child.stderr, exitStatus: child.status };
-        failures.push(`${name}:${selection}: worker failed`);
-      } else {
-        try { results[selection] = JSON.parse(child.stdout); }
-        catch { results[selection] = { error: "invalid worker receipt", stdout: child.stdout }; failures.push(`${name}:${selection}: invalid worker receipt`); }
-      }
-    }
-    const { baseline, coverage } = results;
-    if (baseline.error || coverage.error) { (receipt.workloads as Record<string, unknown>)[name] = results; continue; }
-    if (JSON.stringify(baseline.runtime) !== JSON.stringify(coverage.runtime) || baseline.inputHash !== coverage.inputHash || JSON.stringify(baseline.canonical) !== JSON.stringify(coverage.canonical) || JSON.stringify(baseline.options) !== JSON.stringify(coverage.options)) { failures.push(`${name}: runtime/input/options mismatch`); (receipt.workloads as Record<string, unknown>)[name] = results; continue; }
-    const limits = { p50: Math.max(baseline.p50 * 1.10, baseline.p50 + 1), p95: Math.max(baseline.p95 * 1.10, baseline.p95 + 1), peakRssBytes: baseline.peakRssBytes + 8 * 1024 * 1024 };
-    for (const key of ["p50", "p95", "peakRssBytes"] as const) if (coverage[key] > limits[key]) failures.push(`${name}: coverage ${key}=${coverage[key]} exceeds ${limits[key]}`);
-    (receipt.workloads as Record<string, unknown>)[name] = { ...results, limits, semantic: { sameSummary: baseline.result.summary === coverage.result.summary, baselineSummaryHash: hash(baseline.result.summary), coverageSummaryHash: hash(coverage.result.summary) } };
-    console.log(`${name}: baseline p50=${baseline.p50.toFixed(2)} p95=${baseline.p95.toFixed(2)}; coverage p50=${coverage.p50.toFixed(2)} p95=${coverage.p95.toFixed(2)} ms`);
-  }
-  receipt.passed = failures.length === 0; receipt.failures = failures;
-  await writeFile(join(directory, `${label}.semantic.json`), JSON.stringify(receipt, null, 2) + "\n", { flag: "wx" });
-  console.log(JSON.stringify({ passed: receipt.passed, failures }));
   process.exit(failures.length ? 1 : 0);
 }
 const receipt: Record<string, unknown> = { schema: 1, label, timestamp: new Date().toISOString(), bun: Bun.version, platform: process.platform, arch: process.arch, repetitions: 3, workloads: {} };

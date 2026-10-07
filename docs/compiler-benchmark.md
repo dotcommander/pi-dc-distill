@@ -159,3 +159,22 @@ Request context must never become checkpoint tasks, pins, or authorization.
 These checks prove bounded synthetic retention and parity; they do not establish
 model attention, installed-host behavior, production throughput, or provider
 acceptance. Pressure speedup alone does not establish a dominant production cost.
+
+## Retired selector paths and baseline quality
+
+`--semantic`, `--semantic-worker`, and checkpoint-worker selection `coverage`
+are retired and produce a nonzero error. The checkpoint worker retains its
+positional `baseline` sentinel and schema-4 `selection: "baseline"` metadata.
+Ordinary benchmarks, `--checkpoint`, `--checkpoint-worker`, `--seal`, `--gate`,
+`--cache-gate`, and `--compare` retain their input, preload, sampling and absolute
+lifetime RSS contracts. Removing selector code makes no speed or memory claim.
+
+`bun run distill:quality <artifact-directory> <unique-label>` runs baseline-only
+quality: 13 fixtures × two focus settings × two recall settings = 52 comparisons,
+with three deterministic repeats per comparison. The nested optional report uses
+schema 2, one baseline result per comparison, and
+`pressure: { baselineHits, total }`; aggregate schema 4 retains checkpoint, survival,
+optional, passed and failure reporting. Checkpoint/survival report schemas, receipt
+filenames, seals and exclusive fresh-label writes remain unchanged. No comparative
+improvement or adoption threshold is reported. Historical receipts still describe
+their original algorithms and are not rewritten.

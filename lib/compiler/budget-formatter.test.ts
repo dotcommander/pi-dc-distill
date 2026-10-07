@@ -84,8 +84,18 @@ function verificationPressure() {
   return conv;
 }
 
-for (const selection of ["baseline", "coverage"] as const) {
-  test(`${selection} preserves protected verification after category exhaustion and evicts other optional sections`, () => {
+describe("baseline protected verification", () => {
+  test("rejects the retired selector argument before changing the conversation", () => {
+    const conv = conversation(turns);
+    const before = structuredClone(conv);
+    for (const selection of ["baseline", "coverage"]) {
+      expect(() => Reflect.apply(enforceOperatingBudget, undefined, [{ priorSummaries: [] }, conv, undefined, false, selection]))
+        .toThrow(new TypeError("enforceOperatingBudget no longer accepts a selector argument"));
+      expect(conv).toEqual(before);
+    }
+  });
+
+  test("preserves protected verification after category exhaustion and evicts other optional sections", () => {
     const conv = verificationPressure();
     const protectedRows = [...conv.verification];
     const mismatch = { ...conv.checkpoint!.evidence.verification[1], id: "stale-other-cwd", cwd: "/other" };
@@ -93,7 +103,7 @@ for (const selection of ["baseline", "coverage"] as const) {
       verification: [...conv.checkpoint!.evidence.verification, mismatch] };
     const optionalRow = renderVerificationReceipt(mismatch, conv.checkpoint!.evidence.mutationEpoch);
     conv.verification.push(optionalRow);
-    enforceOperatingBudget({ priorSummaries: [] }, conv, undefined, false, selection);
+    enforceOperatingBudget({ priorSummaries: [] }, conv, undefined, false);
     for (const row of protectedRows) expect(conv.verification).toContain(row);
     expect(conv.verification).not.toContain(optionalRow);
     expect(verificationEvictionIndex(conv.verification, conv.checkpoint)).toBe(-1);
@@ -105,19 +115,19 @@ for (const selection of ["baseline", "coverage"] as const) {
     expect(scanSections(summary).valid).toBe(true);
   });
 
-  test(`${selection} protected-only soft overflow still cancels at the hard wire limit`, () => {
+  test("protected-only soft overflow still cancels at the hard wire limit", () => {
     const conv = verificationPressure();
     conv.checkpoint!.objective = "Q".repeat(66_000);
     const protectedRows = [...conv.verification];
     let failure: unknown;
-    try { enforceOperatingBudget({ priorSummaries: [] }, conv, undefined, false, selection); }
+    try { enforceOperatingBudget({ priorSummaries: [] }, conv, undefined, false); }
     catch (error) { failure = error; }
     expect(failure).toBeInstanceOf(CompactionInputError);
     expect((failure as CompactionInputError).code).toBe("protected_overflow");
     expect((failure as CompactionInputError).message).toBe("protected rendered checkpoint overflow");
     for (const row of protectedRows) expect(conv.verification).toContain(row);
   });
-}
+});
 
 describe("type-signature catalog rendering and eviction", () => {
   test("marker renders - path: signature lines immediately after verification", () => {

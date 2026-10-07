@@ -63,3 +63,38 @@ describe("compaction card", () => {
     });
   });
 });
+
+// This exercises the project-local pinned SDK; it is not installed native-TUI proof.
+describe("native Pi compaction rendering", () => {
+  test("the native handler renders one expanded card with deterministic metrics", async () => {
+    const sdkUrl = import.meta.resolve("@earendil-works/pi-coding-agent");
+    const { InteractiveMode } = await import(new URL("./modes/interactive/interactive-mode.js", sdkUrl).href);
+    const { CompactionSummaryMessageComponent } = await import(
+      new URL("./modes/interactive/components/compaction-summary-message.js", sdkUrl).href);
+    const { initTheme, getMarkdownTheme } = await import(new URL("./modes/interactive/theme/theme.js", sdkUrl).href);
+    initTheme("dark", false);
+    const children: object[] = [];
+    const mode = Object.setPrototypeOf({
+      isInitialized: true, toolOutputExpanded: true,
+      footer: { invalidate() {} },
+      settingsManager: { getShowTerminalProgress: () => false, getShowCacheMissNotices: () => false },
+      clearStatusIndicator() {},
+      chatContainer: { clear() { children.length = 0; }, addChild(child: object) { children.push(child); } },
+      sessionManager: { buildContextEntries: () => [{ type: "compaction" }] },
+      pendingTools: new Map(), getMarkdownThemeWithSettings: getMarkdownTheme,
+      flushCompactionQueue() {}, ui: { requestRender() {} },
+    }, InteractiveMode.prototype);
+    await InteractiveMode.prototype.handleEvent.call(mode, {
+      type: "compaction_end", aborted: false, result: {
+        summary: "_160,078 → 4,914 tokens (97% reduction)_", tokensBefore: 160_078,
+        details: { compactor: "dc-distill", version: 15, tokensAfter: 4_914 },
+      },
+    });
+    const cards = children.filter((child) => child instanceof CompactionSummaryMessageComponent);
+    expect(cards).toHaveLength(1);
+    const rendered = (cards[0] as { render(width: number): string[] }).render(100).join("\n");
+    expect(rendered).toContain("160,078");
+    expect(rendered).toContain("4,914");
+    expect(rendered).toContain("97%");
+  });
+});

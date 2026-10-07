@@ -108,7 +108,14 @@ function toolResult(toolName: string, text: string, isError = false, toolCallId?
 }
 
 describe("compileSessionJsonl", () => {
-  test("production defaults to baseline while offline coverage remains available", async () => {
+  test("rejects the retired selector argument instead of silently compiling", () => {
+    for (const selection of ["baseline", "coverage"]) {
+      expect(() => Reflect.apply(compileSessionJsonl, undefined, [sessionLine, undefined, undefined, false, selection]))
+        .toThrow(new TypeError("compileSessionJsonl no longer accepts a selector argument"));
+    }
+  });
+
+  test("production uses the single deterministic compiler policy", async () => {
     const records = [sessionLine, userMsg("Inspect the supplied source files.")];
     for (let index = 0; index < 40; index++) {
       const id = `read-${index}`;
@@ -117,21 +124,15 @@ describe("compileSessionJsonl", () => {
     }
     const input = records.join("\n");
     const defaultResult = compileSessionJsonl(input, undefined, undefined, false);
-    const coverage = compileSessionJsonl(input, undefined, undefined, false, "coverage");
-    const baseline = compileSessionJsonl(input, undefined, undefined, false, "baseline");
-    expect(defaultResult).toEqual(baseline);
     expect(defaultResult.readFiles).toHaveLength(40);
-    expect(coverage.readFiles).toHaveLength(40); // Details retain checkpoint file authority across optional selection.
-    expect(coverage.summary).toContain("... (8 read files omitted)");
-    expect(defaultResult.summary).not.toBe(coverage.summary);
 
     const production = await runStrategies({ canonicalInput: input, recallEnabled: false });
     expect(production.ok).toBe(true);
     if (!production.ok) throw new Error(production.reasons.join("; "));
     expect(production.tier).toBe(1);
-    expect(production.summary).toBe(baseline.summary.trim());
-    expect(production.readFiles).toEqual(baseline.readFiles);
-    expect(production.summaryDigest).toBe(baseline.summaryDigest);
+    expect(production.summary).toBe(defaultResult.summary.trim());
+    expect(production.readFiles).toEqual(defaultResult.readFiles);
+    expect(production.summaryDigest).toBe(defaultResult.summaryDigest);
   });
 
   test("produces v4 taxonomy: meta, conversation, file markers", () => {
@@ -849,7 +850,7 @@ describe("compileSessionJsonl output bounds", () => {
       lines.push(toolResult("read", `content ${index}`));
     }
 
-    const result = compileSessionJsonl(lines.join("\n"), undefined, undefined, true, "baseline");
+    const result = compileSessionJsonl(lines.join("\n"), undefined, undefined, true);
     expect(Array.from(result.summary).length).toBeLessThanOrEqual(65_536);
     expect(result.readFiles).toHaveLength(50);
     expect(result.summary).toContain("... (9950 read files omitted)");

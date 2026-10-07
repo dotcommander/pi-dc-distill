@@ -51,14 +51,29 @@ conservative bypasses.
 Version 12 adds conservative unknown-tool fencing, structural parsing, locale-independent wire output, and rebuilt-context capacity acceptance. Version 11 preserves conservative shell/output evidence, adds transcript-derived
 rerun priorities and observed v3 handoff readiness, and improves summary ordering.
 Version 12 restores the baseline production selector after the coverage candidate
-failed its ordinary-workload performance gate. Coverage remains available in the
-offline evaluator. See the [adoption decision](docs/algorithm.md#version-11-adoption-decision)
+failed its ordinary-workload performance gate. The rejected coverage selector has
+now been removed; the offline evaluator checks baseline correctness only. See the [adoption decision](docs/algorithm.md#version-11-adoption-decision)
 for measurements and reproducible commands. Offline evidence does not establish
 installed Pi behavior, model resumption quality, attention gains or cache hits.
 
 Two optional features — oversized tool-output previews and project-scoped
 recall — are independent of each other and **off by default**. Enable them
 only if you want the extra local storage and context behavior they add.
+
+## Compatibility reductions
+
+Pi 0.99.0+ and 1.x use their native compaction cards. The private presentation
+patch for older Pi versions has been retired; historical custom-entry renderers,
+including `dc-shrink-compaction`, remain readable.
+
+The published package includes `lib/**` without an export map. Removing
+`lib/compaction-card-dedupe.ts`, `lib/runtime-probe.ts`, and
+`lib/compiler/optional-selector.ts` intentionally breaks direct imports of those
+files. `compileSessionJsonl()` now takes four arguments; selector choice is
+removed. Offline quality uses `evaluateBaselineQuality()`, optional report schema
+2 and aggregate schema 4. `--semantic`, `--semantic-worker`, and checkpoint-worker
+`coverage` selection are retired and fail explicitly. Ordinary and checkpoint
+benchmarks remain available. Existing receipts and persisted data are preserved.
 
 ## Install
 

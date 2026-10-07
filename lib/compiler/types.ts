@@ -118,8 +118,6 @@ export interface ConversationResult {
   signatureObservations?: Array<import("./type-signatures.ts").SignatureObservation>;
   /** Bounded exported-declaration catalog from successful paired results; wire-summary only, never persisted. */
   typeSignatures?: import("./type-signatures.ts").TypeSignatureCatalog;
-  /** Internal source chronology for string-valued optional records. */
-  selectionSourceSequences?: Record<string, number>;
   /** Authoritative obligations captured before display reduction; never persisted. */
   resumePlan?: ResumePlan;
   /** Internal whole source excerpts; serialized only in the text summary. */

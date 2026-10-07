@@ -7,7 +7,6 @@ import { LexicalBudget } from "./lexical-budget.ts";
 import { visibleUserIntents } from "./display-projection.ts";
 import { resolvedFrontierIntent } from "./conversation-reducer.ts";
 import { evaluatePreconditions } from "./observed-readiness.ts";
-import { prefilterOptionalRecords, selectOptionalRecords, type OptionalSelectionRecord, type OptionalRecordKind } from "./optional-selector.ts";
 import type { ObservationSnapshot } from "./types.ts";
 import { TARGET_RESUME_SUMMARY_CODE_POINTS, sanitize, sliceU16 } from "./helpers.ts";
 import { type ToolCallFingerprint, type ToolResultEntry, type SessionMeta, type ResumeIndex, type ConversationResult } from "./types.ts";
@@ -506,9 +505,6 @@ function formatRetainedContext(conv: ConversationResult, measure = false): Rende
 export interface SummaryProjection {
   structured: ParsedStructuredDistillHandoff | null;
   handoffBlock: string;
-  blocks?: WeakMap<object, Map<string, RenderedSection>>;
-  identities?: WeakMap<object, number>;
-  nextIdentity?: number;
   measureOnly?: boolean;
   renderedCost?: number;
 }
@@ -544,25 +540,6 @@ export function formatSummary(meta: SessionMeta, conv: ConversationResult, userF
   const measure = projection?.measureOnly ?? false;
   parts.push(measure ? codePointLength(SUMMARY_SCOPE_NOTE) : SUMMARY_SCOPE_NOTE, "");
   if (conv.checkpoint) { const text = renderCheckpoint(conv.checkpoint); if (text) parts.push(measure ? codePointLength(text) : text, ""); }
-  const identity = (value: object) => {
-    if (!projection) return 0;
-    projection.identities ??= new WeakMap();
-    let id = projection.identities.get(value);
-    if (id === undefined) { id = projection.nextIdentity = (projection.nextIdentity ?? 0) + 1; projection.identities.set(value, id); }
-    return id;
-  };
-  const cached = (owner: object, key: string, render: () => RenderedSection): RenderedSection => {
-    if (!projection) return render();
-    projection.blocks ??= new WeakMap();
-    let entries = projection.blocks.get(owner);
-    if (!entries) { entries = new Map(); projection.blocks.set(owner, entries); }
-    key = `${measure ? "count" : "wire"}:${key}`;
-    const prior = entries.get(key);
-    if (prior !== undefined) return prior;
-    const value = render();
-    if (entries.size >= 2) entries.delete(entries.keys().next().value!);
-    entries.set(key, value); return value;
-  };
   const { structured, handoffBlock } = projection ?? prepareSummaryProjection(meta, conv);
   const metaSink = new SectionSink(measure);
   if (meta.id || meta.cwd || meta.model || meta.timestamp) {
@@ -578,12 +555,12 @@ export function formatSummary(meta: SessionMeta, conv: ConversationResult, userF
     parts.push(sink.line().raw("</goal-state>").value(), "");
   }
   if (userFocus?.trim()) parts.push(new SectionSink(measure).raw("## User Focus\n").escaped(sliceU16(userFocus.trim(), 2_048)).value(), "");
-  const prior = (!meta.priorSummaries.length || conv.terminalComplete || hasTerminalNoWorkCompletion(conv.turns)) ? "" : cached(meta.priorSummaries, `prior:${conv.turns.length === 0}`, () => {
+  const prior = (!meta.priorSummaries.length || conv.terminalComplete || hasTerminalNoWorkCompletion(conv.turns)) ? "" : (() => {
     const text = formatPriorSummaries(meta.priorSummaries, conv.turns.length === 0);
     return measure ? codePointLength(text) : text;
-  });
+  })();
   if (prior) parts.push(prior, "");
-  parts.push(cached(conv.turns, "conversation", () => {
+  parts.push((() => {
     const sink = new SectionSink(measure);
     sink.raw("## Conversation");
     if (conv.turns.length) {
@@ -602,38 +579,38 @@ export function formatSummary(meta: SessionMeta, conv: ConversationResult, userF
       }
     }
     return sink.value();
-  }));
+  })());
   for (const block of [
-    cached(conv.turns, `retained:${identity(conv.retainedContext ?? conv.turns)}`, () => formatRetainedContext(conv, measure)),
-    cached(conv.readFiles, `files:${identity(conv.modifiedFiles)}:${conv.omittedReadFiles}:${conv.omittedModifiedFiles}:${conv.pathRoot ?? ""}`, () => formatFileMarkers(
+    formatRetainedContext(conv, measure),
+    formatFileMarkers(
       conv.readFiles,
       conv.modifiedFiles,
       conv.omittedReadFiles,
       conv.omittedModifiedFiles,
       conv.pathRoot, measure,
-    )),
-    cached(conv.recentToolCalls, "calls", () => formatRecentToolCalls(conv.recentToolCalls, measure)),
-    cached(conv.recentToolResults, "results", () => formatRecentToolResults(conv.recentToolResults, measure)),
-    cached(conv.workingTree, "working-tree", () => markerBlock("working-tree", conv.workingTree, measure)),
-    cached(conv.sourceAnchors, "source-anchors", () => markerBlock("source-anchors", conv.sourceAnchors, measure)),
-    cached(conv.activeTasks, "active-tasks", () => markerBlock("active-tasks", conv.activeTasks, measure)),
-    cached(conv.literalAnchors, "literal-anchors", () => markerBlock("literal-anchors", conv.literalAnchors, measure)),
-    cached(conv.resumeIndex, `resume-index:${identity(conv.turns)}`, () => {
+    ),
+    formatRecentToolCalls(conv.recentToolCalls, measure),
+    formatRecentToolResults(conv.recentToolResults, measure),
+    markerBlock("working-tree", conv.workingTree, measure),
+    markerBlock("source-anchors", conv.sourceAnchors, measure),
+    markerBlock("active-tasks", conv.activeTasks, measure),
+    markerBlock("literal-anchors", conv.literalAnchors, measure),
+    (() => {
       const contexts = contextTurnIndexes(conv);
       return formatResumeIndex(conv.resumeIndex, conv.turns.filter((_, index) => !contexts.has(index)), measure);
-    }),
-    meta.id ? cached(meta, "recovery", () => new SectionSink(measure)
+    })(),
+    meta.id ? new SectionSink(measure)
       .raw("<full-session-recovery>\nFull transcript: `ctxgo show session --provider pi --provider-session ").escaped(shellQuote(meta.id!))
       .raw("`\nSource JSONL: `ctxgo locate session --provider pi --provider-session ").escaped(shellQuote(meta.id!))
-      .raw("`\n</full-session-recovery>").value()) : "",
+      .raw("`\n</full-session-recovery>").value() : "",
     markerBlock("summary-omissions", conv.budgetOmissions, measure),
     exactLineMarkerBlock("change-impact", conv.changeImpact ?? [], measure),
-    cached(conv.verification, "verification", () => exactLineMarkerBlock("verification", conv.verification, measure)),
-    conv.typeSignatures ? cached(conv.typeSignatures, `type-signatures:${conv.typeSignatures.entries.length}:${conv.typeSignatures.omittedFiles}:${conv.typeSignatures.omittedSignatures}`, () => formatTypeSignaturesSection(conv.typeSignatures!, conv.pathRoot, measure)) : "",
-    cached(conv, "request-candidate", () => renderCandidateSection(meta, conv, measure)),
+    exactLineMarkerBlock("verification", conv.verification, measure),
+    conv.typeSignatures ? formatTypeSignaturesSection(conv.typeSignatures!, conv.pathRoot, measure) : "",
+    renderCandidateSection(meta, conv, measure),
     measure ? codePointLength(handoffBlock) : handoffBlock,
-    cached(conv.resumeRisks, "resume-risks", () => markerBlock("resume-risks", conv.resumeRisks, measure)),
-    cached(conv.resumeTasks, "resume-tasks", () => exactLineMarkerBlock("resume-tasks", filterGeneratedTasks(conv.resumeTasks, structured), measure)),
+    markerBlock("resume-risks", conv.resumeRisks, measure),
+    exactLineMarkerBlock("resume-tasks", filterGeneratedTasks(conv.resumeTasks, structured), measure),
   ]) {
     if (block) parts.push("", block);
   }
@@ -651,8 +628,8 @@ export function enforceOperatingBudget(
   conv: ConversationResult,
   userFocus?: string,
   recallEnabled = true,
-  selection: "baseline" | "coverage" = "baseline",
 ): void {
+  if (arguments.length > 4) throw new TypeError("enforceOperatingBudget no longer accepts a selector argument");
   conv.lexical ??= new LexicalBudget();
   conv.terminalComplete ??= hasTerminalNoWorkCompletion(conv.turns);
   conv.resumePlan ??= buildResumePlan({ ...conv, terminalComplete: conv.terminalComplete });
@@ -709,9 +686,8 @@ export function enforceOperatingBudget(
   refreshResume();
   // Reserve room for the omission receipt, separator and optional recall note.
   const target = TARGET_RESUME_SUMMARY_CODE_POINTS - 1_024;
-  if (selection === "coverage") selectCoverageRecords(meta, conv, userFocus, target, refreshResume, note);
   const measureCurrent = () => {
-    // Evictions mutate arrays in place; each state gets a fresh projection/cache.
+    // Evictions mutate arrays in place; each state gets a fresh projection.
     const projection = prepareSummaryProjection(meta, conv);
     projection.measureOnly = true;
     formatSummary(meta, conv, userFocus, projection);
@@ -806,137 +782,6 @@ function evictRetainedContext(conv: ConversationResult): boolean {
   const index = excerpts.findIndex((_, i) => i !== newestOutcome && i !== newestProposal);
   if (index < 0) return false;
   excerpts.splice(index, 1); return true;
-}
-
-/** Production coverage selection; explicit baseline selection remains available offline. */
-function selectCoverageRecords(meta: SessionMeta, conv: ConversationResult, userFocus: string | undefined, target: number, refresh: () => void, note: (label: string) => void): void {
-  type Row = { id: string; key: keyof ConversationResult; value: unknown; text: string; kind: OptionalRecordKind; optional: boolean; priority: number; sequence: number };
-  const rows: Row[] = [];
-  const removableTurns = new Map(conversationEvictionCandidates(conv.turns, userFocus ?? meta.handoff, conv.lexical).map((item) => [item.index, item.priority]));
-  const frontier = selectAssistantFrontier(conv.turns);
-  const add = (key: keyof ConversationResult, kind: OptionalRecordKind, values: readonly unknown[], describe: (value: any) => string, optional: (value: any, index: number) => boolean = () => true) => {
-    values.forEach((value, index) => rows.push({ id: `${key}:${index}`, key, kind, value, text: describe(value), optional: optional(value, index), priority: key === "turns" ? removableTurns.get(index) ?? 0 : 0, sequence: typeof value === "object" && value && "sourceSequence" in value ? (value as { sourceSequence?: number }).sourceSequence ?? index : conv.selectionSourceSequences?.[`${key}\0${describe(value)}`] ?? index }));
-  };
-  add("turns", "conversation", conv.turns, (turn) => turn.text, (_, index) => removableTurns.has(index) && !frontier.pinned.includes(index) && !conv.turns[index].protectedRequest);
-  const context = conv.retainedContext ?? [];
-  const newestOutcome = context.findLastIndex((item) => item.kind === "outcome");
-  const newestProposal = context.findLastIndex((item) => item.kind === "proposal");
-  add("retainedContext", "retained-context", context, (item) => item.text, (_, index) => index !== newestOutcome && index !== newestProposal);
-  add("recentToolCalls", "tool-call", conv.recentToolCalls, (item) => `${item.name}:${item.key}`);
-  add("recentToolResults", "tool-result", conv.recentToolResults, (item) => `${item.toolName}: ${item.text}`, (item) => !item.artifactReceipt && !item.isError);
-  add("readFiles", "file-observation", conv.readFiles, String);
-  add("modifiedFiles", "file-observation", conv.modifiedFiles, String);
-  add("workingTree", "working-tree", conv.workingTree, String);
-  add("sourceAnchors", "anchor", conv.sourceAnchors, String);
-  add("literalAnchors", "anchor", conv.literalAnchors, String);
-  const isProtectedVerification = verificationProtection(conv.checkpoint);
-  add("verification", "stale-verification", conv.verification, String, (line) => !isProtectedVerification(line)
-    && line.startsWith("PASS ") && line.includes("[freshness: not established"));
-  // When every bounded candidate already fits, greedy admission selects all of
-  // them (including zero-gain records). One exact rendering establishes that
-  // result without rebuilding the complete summary once for every candidate.
-  const optional = rows.filter((row) => row.optional);
-  const kindCounts = new Map<OptionalRecordKind, number>();
-  for (const row of optional) kindCounts.set(row.kind, (kindCounts.get(row.kind) ?? 0) + 1);
-  const projection = prepareSummaryProjection(meta, conv);
-  // Count exactly the same escaped sections and separators without allocating
-  // a complete joined summary on each trial. Final wire output uses the renderer.
-  projection.measureOnly = true;
-  const renderedCost = (working: ConversationResult) => {
-    formatSummary(meta, working, userFocus, projection);
-    return projection.renderedCost!;
-  };
-  if (optional.length <= 256 && [...kindCounts.values()].every((count) => count <= 32) && renderedCost(conv) <= target) return;
-  const groupedRows = new Map<keyof ConversationResult, Row[]>();
-  for (const row of rows) {
-    const group = groupedRows.get(row.key) ?? [];
-    group.push(row); groupedRows.set(row.key, group);
-  }
-  const buildCache = new Map<string, ConversationResult>();
-  const groupCache = new Map<keyof ConversationResult, Map<string, unknown[]>>();
-  const derivedCache = new Map<string, Pick<ConversationResult, "resumeIndex" | "resumeTasks" | "pathRoot">>();
-  const query = resolvedFrontierIntent(conv.turns, userFocus ?? meta.handoff);
-  const lexical = conv.lexical ??= new LexicalBudget();
-  const frontierFeatures = lexical.tokenize(query);
-  const frontierFeatureSet = new Set(frontierFeatures);
-  // Nonmatching lexical tokens can never contribute frontier coverage or
-  // prefilter relevance. Avoid retaining them across a large candidate inventory.
-  const features = (row: Row) => ({ frontier: lexical.tokenize(row.text).filter((feature) => frontierFeatureSet.has(feature)), evidence: [row.kind], paths: row.kind === "file-observation" ? [row.text] : [] });
-  const derivedKeys = new Set(["turns", "readFiles", "modifiedFiles", "recentToolCalls", "verification", "workingTree", "sourceAnchors"]);
-  const initialReadOmissions = conv.omittedReadFiles;
-  const initialModifiedOmissions = conv.omittedModifiedFiles;
-  const build = (ids: readonly string[]) => {
-    const cacheKey = [...ids].sort().join("\0");
-    const cached = buildCache.get(cacheKey);
-    if (cached) return { ...cached };
-    const selected = new Set(ids);
-    const working = { ...conv };
-    for (const [key, group] of groupedRows) {
-      let groupKey = "";
-      // Mandatory membership is fixed across every trial. Cache identity only
-      // needs the bounded optional membership, not repeated mandatory IDs.
-      for (const row of group) if (row.optional && selected.has(row.id)) groupKey += `${groupKey ? "\0" : ""}${row.id}`;
-      let entries = groupCache.get(key);
-      if (!entries) { entries = new Map(); groupCache.set(key, entries); }
-      let values = entries.get(groupKey);
-      if (!values) {
-        values = [];
-        for (const row of group) if (!row.optional || selected.has(row.id)) values.push(row.value);
-        if (entries.size >= 2) entries.delete(entries.keys().next().value!);
-        entries.set(groupKey, values);
-      }
-      (working as any)[key] = values;
-    }
-    working.omittedReadFiles = initialReadOmissions;
-    working.omittedModifiedFiles = initialModifiedOmissions;
-    let derivedKey = "";
-    for (const row of rows) {
-      const retained = !row.optional || selected.has(row.id);
-      if (!retained && row.key === "readFiles") working.omittedReadFiles++;
-      if (!retained && row.key === "modifiedFiles") working.omittedModifiedFiles++;
-      if (retained && row.optional && derivedKeys.has(row.key)) derivedKey += `${derivedKey ? "\0" : ""}${row.id}`;
-    }
-    const derived = derivedCache.get(derivedKey);
-    if (derived) Object.assign(working, derived);
-    else {
-      working.resumeIndex = buildResumeIndex(working.turns, working.readFiles, working.modifiedFiles, working.recentToolCalls, working.lexical);
-      if (!conv.resumeIndex.recallQueries.length) working.resumeIndex.recallQueries = [];
-      working.pathRoot = choosePathRoot([...working.readFiles, ...working.modifiedFiles, ...working.resumeIndex.activeFiles], meta.cwd);
-      working.resumeTasks = buildResumeTasks({ ...working, recallEnabled: conv.resumeIndex.recallQueries.length > 0 });
-      if (derivedCache.size >= 2) derivedCache.delete(derivedCache.keys().next().value!);
-      derivedCache.set(derivedKey, { resumeIndex: working.resumeIndex, resumeTasks: working.resumeTasks, pathRoot: working.pathRoot });
-    }
-    // Only the immediately preceding exact states can be reused by final checks.
-    // Keep retention bounded independently of candidate count.
-    if (buildCache.size >= 2) buildCache.delete(buildCache.keys().next().value!);
-    buildCache.set(cacheKey, working);
-    return { ...working };
-  };
-  const mandatory = rows.filter((row) => !row.optional);
-  // Admission ranking ignores cost. Defer escaped singleton cost allocation
-  // until a pressured admitted pool actually needs the greedy selector.
-  const candidates: OptionalSelectionRecord[] = optional.map((row) => ({ id: row.id, kind: row.kind, sourceSequence: row.sequence, structuralPriority: row.priority, renderedCost: 1, features: features(row) }));
-  const admitted = prefilterOptionalRecords({ candidates, frontierFeatures });
-  const admittedIds = new Set(admitted.candidateIds);
-  const apply = (ids: readonly string[]) => {
-    Object.assign(conv, build(ids));
-    const selected = new Set(ids);
-    for (const row of rows) if (row.optional && !selected.has(row.id) && row.key !== "readFiles" && row.key !== "modifiedFiles") note(row.kind);
-    refresh();
-  };
-  const allAdmitted = build(admitted.candidateIds);
-  allAdmitted.budgetOmissions = Object.entries(admitted.omittedCounts).filter(([, count]) => count > 0).map(([kind, count]) => `${count} ${kind} records omitted by bounded coverage selection`);
-  if (renderedCost(allAdmitted) <= target) { apply(admitted.candidateIds); return; }
-  const mandatoryCost = renderedCost(build([]));
-  for (const candidate of candidates) if (admittedIds.has(candidate.id)) candidate.renderedCost = Math.max(1, renderedCost(build([candidate.id])) - mandatoryCost);
-  const result = selectOptionalRecords({ mandatory: mandatory.map((row) => ({ id: row.id, features: features(row) })), candidates, frontierFeatures, renderedBudget: target,
-    renderCost: (ids, omissions) => {
-      const working = build(ids);
-      working.budgetOmissions = Object.entries(omissions).filter(([, count]) => count > 0).map(([kind, count]) => `${count} ${kind} records omitted by bounded coverage selection`);
-      return renderedCost(working);
-    },
-  });
-  apply(result.selectedIds);
 }
 
 /** Suppress only an exact explicitly named structured task ID, never similar prose. */

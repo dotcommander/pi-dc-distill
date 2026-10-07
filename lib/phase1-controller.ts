@@ -1,12 +1,12 @@
 import { isDeepStrictEqual } from "node:util";
 import { randomUUID } from "node:crypto";
 import type { ExtensionAPI, ExtensionContext, SessionEntry } from "./sdk.ts";
-import type { CompactionCardDedupeHandle } from "./compaction-card-dedupe.ts";
 import { Monitor } from "./monitor.ts";
 import { Diag, diagnosticSessionLabel } from "./diag-support.ts";
 import {
   DEFAULT_PI_COMPACTION_SETTINGS, DEFAULT_DISTILL_FEATURE_SETTINGS,
   resolvePiCompactionSettings, resolveDistillFeatureSettings,
+  normalizeEffectiveCompactionSettings, effectiveCompactionSettingsEqual,
   type PiCompactionSettings, type DistillFeatureSettings,
 } from "./settings.ts";
 import { TRIGGER_POLICY_VERSION, assessCompaction, resolveTriggerThresholds, type CompactEvaluation, validateTriggerGeometry } from "./trigger.ts";
@@ -68,7 +68,6 @@ export class Phase1Controller {
   private preparing = false;
   private preparationCancelled = false;
   private committing = false;
-  compactionCardDedupe: CompactionCardDedupeHandle | null = null;
 
   constructor(readonly pi: ExtensionAPI, private readonly options: Phase1Options = {}) {
     this.clock = options.clock ?? Date.now;
@@ -94,7 +93,6 @@ export class Phase1Controller {
   start(ctx: ExtensionContext): SessionLease | null {
     const id = this.sessionId(ctx);
     if (!id || (this.ownerSessionId !== null && this.ownerSessionId !== id)) return null;
-    this.disposeUI();
     this.generation++;
     this.contextRevision++;
     this.ownerSessionId = id;
@@ -139,21 +137,7 @@ export class Phase1Controller {
     this.preparing = false;
     this.preparationCancelled = false;
     this.committing = false;
-    this.disposeUI();
     return true;
-  }
-  private disposeUI(): void {
-    const handle = this.compactionCardDedupe;
-    this.compactionCardDedupe = null;
-    try { handle?.dispose(); } catch { /* Compatibility cleanup is best effort. */ }
-  }
-  attachUI(handle: CompactionCardDedupeHandle | null, lease: SessionLease, ctx: ExtensionContext): void {
-    if (!this.isCurrent(lease, ctx)) {
-      try { handle?.dispose(); } catch { /* Late handle must not revive ownership. */ }
-      return;
-    }
-    this.disposeUI();
-    this.compactionCardDedupe = handle;
   }
   contextChanged(ctx: ExtensionContext): void {
     if (!this.isOwner(ctx)) return;
@@ -250,20 +234,12 @@ export class Phase1Controller {
   }
   refreshSettings(ctx: ExtensionContext): boolean {
     try {
-      this.compactionSettings = this.options.loadCompactionSettings?.(ctx.cwd)
-        ?? resolvePiCompactionSettings(this.pi.getSettings(), ctx.model);
-      this.compactionSettings = { ...this.compactionSettings, keepRecentTokens: this.compactionSettings.keepRecentTokens === undefined ? 20_000 : this.compactionSettings.keepRecentTokens };
-      // Injected settings obey the same effective contract as host snapshots.
-      if (typeof this.compactionSettings.enabled !== "boolean"
-        || !Number.isSafeInteger(this.compactionSettings.reserveTokens)
-        || this.compactionSettings.reserveTokens < 0
-        || !Number.isSafeInteger(this.compactionSettings.keepRecentTokens)
-        || this.compactionSettings.keepRecentTokens! < 0) throw new Error("Invalid effective compaction settings");
+      this.compactionSettings = normalizeEffectiveCompactionSettings(
+        this.options.loadCompactionSettings?.(ctx.cwd)
+          ?? resolvePiCompactionSettings(this.pi.getSettings(), ctx.model));
       this.settingsValid = true;
       this.settingsError = null;
-      if (this.compilerPause && (this.compilerPause.ticket.settings.enabled !== this.compactionSettings.enabled
-        || this.compilerPause.ticket.settings.reserveTokens !== this.compactionSettings.reserveTokens
-        || this.compilerPause.ticket.settings.keepRecentTokens !== this.compactionSettings.keepRecentTokens)) this.compilerPause = null;
+      if (this.compilerPause && !effectiveCompactionSettingsEqual(this.compilerPause.ticket.settings, this.compactionSettings)) this.compilerPause = null;
     } catch (error) {
       this.settingsValid = false;
       try { this.settingsError = error instanceof Error ? error.message : String(error); }
@@ -312,9 +288,7 @@ export class Phase1Controller {
     if (!this.ownsAttempt(ticket, ctx) || ticket.contextRevision !== this.contextRevision
       || ticket.modelIdentity !== this.modelIdentity(ctx)) return false;
     this.refreshSettings(ctx);
-    if (ticket.settings.enabled !== this.compactionSettings.enabled
-      || ticket.settings.reserveTokens !== this.compactionSettings.reserveTokens
-      || ticket.settings.keepRecentTokens !== this.compactionSettings.keepRecentTokens) return false;
+    if (!effectiveCompactionSettingsEqual(ticket.settings, this.compactionSettings)) return false;
     if (!checkBranch) return true;
     try { return ticket.branchAnchor === (ctx.sessionManager.getBranch().at(-1)?.id ?? null); }
     catch { return false; }
@@ -362,9 +336,7 @@ export class Phase1Controller {
       if (ticket.contextRevision !== this.contextRevision) return { accepted: false, reason: "context-revision-changed" };
       if (ticket.modelIdentity !== this.modelIdentity(ctx)) return { accepted: false, reason: "model-changed" };
       this.refreshSettings(ctx);
-      if (ticket.settings.enabled !== this.compactionSettings.enabled
-        || ticket.settings.reserveTokens !== this.compactionSettings.reserveTokens
-        || ticket.settings.keepRecentTokens !== this.compactionSettings.keepRecentTokens) return { accepted: false, reason: "settings-changed" };
+      if (!effectiveCompactionSettingsEqual(ticket.settings, this.compactionSettings)) return { accepted: false, reason: "settings-changed" };
       this.committing = true;
       return { accepted: true };
     } catch { return { accepted: false, reason: "snapshot-unavailable" }; }

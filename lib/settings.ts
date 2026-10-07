@@ -12,6 +12,29 @@ export const DEFAULT_PI_COMPACTION_SETTINGS: PiCompactionSettings = {
   keepRecentTokens: 20_000,
 };
 
+/** Validate the effective snapshot, including settings injected by callers. */
+export function normalizeEffectiveCompactionSettings(
+  settings: Readonly<PiCompactionSettings>,
+): Required<PiCompactionSettings> {
+  const keepRecentTokens = settings.keepRecentTokens === undefined ? 20_000 : settings.keepRecentTokens;
+  if (typeof settings.enabled !== "boolean"
+    || !Number.isSafeInteger(settings.reserveTokens) || settings.reserveTokens < 0
+    || !Number.isSafeInteger(keepRecentTokens) || keepRecentTokens < 0) {
+    throw new Error("Invalid effective compaction settings");
+  }
+  return { enabled: settings.enabled, reserveTokens: settings.reserveTokens, keepRecentTokens };
+}
+
+/** Identity is the valid effective policy, independent of omitted defaults. */
+export function effectiveCompactionSettingsEqual(
+  left: Readonly<PiCompactionSettings>, right: Readonly<PiCompactionSettings>,
+): boolean {
+  const a = normalizeEffectiveCompactionSettings(left);
+  const b = normalizeEffectiveCompactionSettings(right);
+  return a.enabled === b.enabled && a.reserveTokens === b.reserveTokens
+    && a.keepRecentTokens === b.keepRecentTokens;
+}
+
 /** Minimum gap between autonomous compactions. Pi has no equivalent setting. */
 export const COMPACTION_COOLDOWN_MS = 120_000;
 /** Raw-dump retention when DC_DISTILL_DUMPS enables diagnostic dumps. */
@@ -47,8 +70,8 @@ export function resolvePiCompactionSettings(
   validate(asRecord(entry).keepRecentTokens, `compaction.modelOverrides["${key}"].keepRecentTokens`);
   const enabled = compaction.enabled ?? true;
   if (typeof enabled !== "boolean") throw new Error("Invalid compaction.enabled: expected a boolean.");
-  return { enabled, reserveTokens: (override ?? ordinary ?? 16_384) as number,
-    keepRecentTokens: (asRecord(entry).keepRecentTokens ?? compaction.keepRecentTokens ?? 20_000) as number };
+  return normalizeEffectiveCompactionSettings({ enabled, reserveTokens: (override ?? ordinary ?? 16_384) as number,
+    keepRecentTokens: (asRecord(entry).keepRecentTokens ?? compaction.keepRecentTokens ?? 20_000) as number });
 }
 
 export function resolveDistillFeatureSettings(settings: unknown): DistillFeatureSettings {

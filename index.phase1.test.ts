@@ -38,7 +38,7 @@ function fixture(options: Parameters<typeof createDistillExtension>[0] = {}) {
   createDistillExtension({ storeFactory: () => store,
     loadCompactionSettings: () => ({ enabled: true, reserveTokens: 16_384 }),
     loadFeatureSettings: () => ({ recall: { enabled: false }, toolOutput: { enabled: false } }),
-    installCompactionDedupe: async () => null, ...options })(stub.pi);
+    ...options })(stub.pi);
   return { stub, store, logs, dumps };
 }
 const compactCalls = (stub: ReturnType<typeof createStubCtx>) => stub.calls.filter((call) => call.api === "ctx.compact");
@@ -66,34 +66,16 @@ describe("Phase 1 host adapter regression boundaries", () => {
     await simulate.hook(disabled.stub, "agent_settled", {});
     expect(compactCalls(disabled.stub)).toHaveLength(0);
   });
-  test("shutdown during initialization cannot install compatibility or restore ownership", async () => {
-    let installations = 0;
-    const { stub, store } = fixture({ installCompactionDedupe: async () => { installations++; return null; } });
+  test("shutdown during initialization cannot restore ownership", async () => {
+    const { stub, store } = fixture();
     const init = deferred<any>();
     store.initialize = () => init.promise;
     const starting = simulate.hook(stub, "session_start", {});
     await simulate.hook(stub, "session_shutdown", {});
     init.resolve({ status: "skipped", errors: [] });
     await starting;
-    expect(installations).toBe(0);
     expect((await simulate.hook(stub, "session_before_compact", event()))[0]).toEqual({ cancel: true });
     expect(continuationCalls(stub)).toHaveLength(0);
-  });
-  test("shutdown disposes a compatibility handle that arrives late", async () => {
-    const handle = deferred<any>();
-    const installationStarted = deferred<void>();
-    let disposed = 0;
-    const { stub } = fixture({ installCompactionDedupe: () => {
-      installationStarted.resolve();
-      return handle.promise;
-    } });
-    const starting = simulate.hook(stub, "session_start", {});
-    await installationStarted.promise;
-    await simulate.hook(stub, "session_shutdown", {});
-    handle.resolve({ dispose: () => { disposed++; } });
-    await starting;
-    expect(disposed).toBe(1);
-    expect((await simulate.hook(stub, "session_before_compact", event()))[0]).toEqual({ cancel: true });
   });
   test("missing session identity cancels interception and never initializes storage", async () => {
     const { stub, store } = fixture();

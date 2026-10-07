@@ -4,7 +4,7 @@ import { compileSessionJsonl } from "../local-compact.ts";
 import { QUALITY_CORPUS, QUALITY_DECOYS, QUALITY_BOUNDARY_INPUTS, type QualityFixture } from "./quality-corpus.ts";
 
 const hash = (text: string) => createHash("sha256").update(text).digest("hex");
-export const qualitySeal = () => ({ schema: 1, corpusHash: hash(JSON.stringify(QUALITY_CORPUS)), oracleHash: hash(JSON.stringify(QUALITY_CORPUS.map(({ id, oracle }) => ({ id, oracle })))), boundaryHash: hash(JSON.stringify(QUALITY_BOUNDARY_INPUTS)), decoyHash: hash(JSON.stringify(QUALITY_DECOYS)), comparisons: QUALITY_CORPUS.length * 4, repeats: 3, minimumPressureImprovementPercentagePoints: 5 });
+export const qualitySeal = () => ({ schema: 1, corpusHash: hash(JSON.stringify(QUALITY_CORPUS)), oracleHash: hash(JSON.stringify(QUALITY_CORPUS.map(({ id, oracle }) => ({ id, oracle })))), boundaryHash: hash(JSON.stringify(QUALITY_BOUNDARY_INPUTS)), decoyHash: hash(JSON.stringify(QUALITY_DECOYS)), comparisons: QUALITY_CORPUS.length * 4, repeats: 3 });
 export function markerProblems(summary: string): string[] {
   const stack: string[] = [], problems: string[] = [];
   for (const match of summary.matchAll(/<(\/?)([a-z][a-z-]*)(?:\s[^<>]*?)?>/g)) {
@@ -62,37 +62,31 @@ function inspect(fixture: QualityFixture, summary: string) {
   }
   return { problems, optionalHits: fixture.oracle.optionalFacts.filter(fact => summary.includes(fact)).length, optionalTotal: fixture.oracle.optionalFacts.length };
 }
-export function evaluateSelectorQuality() {
-  const seal = qualitySeal(); // captured BEFORE either strategy executes
+export function evaluateBaselineQuality() {
+  const seal = qualitySeal(); // captured before compiling the frozen corpus
   const comparisons: Array<Record<string, unknown>> = [];
   const failures: string[] = [];
-  let pressureBaseline = 0, pressureCoverage = 0, pressureTotal = 0;
+  let pressureBaseline = 0, pressureTotal = 0;
   for (const fixture of QUALITY_CORPUS) for (const focused of [false, true]) for (const recallEnabled of [false, true]) {
     const input = canonicalizeCompactionSource(fixture.source);
     const key = `${fixture.id}:focus=${focused}:recall=${recallEnabled}`;
-    const outputs = {} as Record<"baseline" | "coverage", { summary: string; hash: string; optionalHits: number; optionalTotal: number; problems: string[] }>;
-    for (const selection of ["baseline", "coverage"] as const) {
-      const runs: ReturnType<typeof compileSessionJsonl>[] = [];
-      const compileProblems: string[] = [];
-      for (let repeat = 0; repeat < 3; repeat++) {
-        try { runs.push(compileSessionJsonl(input.bytes, focused ? fixture.focus : undefined, undefined, recallEnabled, selection)); }
-        catch (error) { compileProblems.push(`repeat ${repeat + 1}: compilation failed: ${error instanceof Error ? error.message : String(error)}`); }
-      }
-      const summary = runs[0]?.summary ?? "";
-      const inspected = inspect(fixture, summary);
-      inspected.problems.push(...compileProblems);
-      if (runs.some(run => JSON.stringify(run) !== JSON.stringify(runs[0]))) inspected.problems.push("nonidentical output across three repeats");
-      for (const problem of inspected.problems) failures.push(`${key}:${selection}: ${problem}`);
-      outputs[selection] = { summary, hash: hash(summary), ...inspected };
+    const runs: ReturnType<typeof compileSessionJsonl>[] = [];
+    const compileProblems: string[] = [];
+    for (let repeat = 0; repeat < 3; repeat++) {
+      try { runs.push(compileSessionJsonl(input.bytes, focused ? fixture.focus : undefined, undefined, recallEnabled)); }
+      catch (error) { compileProblems.push(`repeat ${repeat + 1}: compilation failed: ${error instanceof Error ? error.message : String(error)}`); }
     }
-    if (outputs.coverage.optionalHits < outputs.baseline.optionalHits) failures.push(`${key}: optional-fact recall decreased`);
+    const summary = runs[0]?.summary ?? "";
+    const inspected = inspect(fixture, summary);
+    inspected.problems.push(...compileProblems);
+    if (runs.some(run => JSON.stringify(run) !== JSON.stringify(runs[0]))) inspected.problems.push("nonidentical output across three repeats");
+    for (const problem of inspected.problems) failures.push(`${key}:baseline: ${problem}`);
+    const baseline = { summary, hash: hash(summary), ...inspected };
     if (fixture.oracle.pressure) {
-      pressureBaseline += outputs.baseline.optionalHits; pressureCoverage += outputs.coverage.optionalHits; pressureTotal += outputs.baseline.optionalTotal;
+      pressureBaseline += baseline.optionalHits; pressureTotal += baseline.optionalTotal;
     }
-    comparisons.push({ id: key, inputHash: hash(input.bytes), digestScope: input.digestScope, pressure: fixture.oracle.pressure, ...outputs });
+    comparisons.push({ id: key, inputHash: hash(input.bytes), digestScope: input.digestScope, pressure: fixture.oracle.pressure, baseline });
   }
-  const improvementPercentagePoints = pressureTotal ? (pressureCoverage - pressureBaseline) / pressureTotal * 100 : 0;
-  if (improvementPercentagePoints < 5) failures.push(`pressure optional-fact improvement ${improvementPercentagePoints.toFixed(2)} percentage points below 5`);
   if (JSON.stringify(seal) !== JSON.stringify(qualitySeal())) failures.push("frozen corpus or independent oracle changed during evaluation");
-  return { schema: 1, seal, runtime: { bun: Bun.version, platform: process.platform, arch: process.arch, execPath: process.execPath }, passed: failures.length === 0, failures, pressure: { baselineHits: pressureBaseline, coverageHits: pressureCoverage, total: pressureTotal, improvementPercentagePoints }, comparisons };
+  return { schema: 2, seal, runtime: { bun: Bun.version, platform: process.platform, arch: process.arch, execPath: process.execPath }, passed: failures.length === 0, failures, pressure: { baselineHits: pressureBaseline, total: pressureTotal }, comparisons };
 }

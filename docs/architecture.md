@@ -433,11 +433,11 @@ and review, not by the peer ranges.
 
 Pi 0.99.0+ and 1.x (including 1.0.0, 1.0.2, 1.0.3, and subsequent releases) render
 compaction natively with their built-in summary component. The extension leaves
-their InteractiveMode prototype unchanged. Tests drive the installed host's
+their InteractiveMode prototype unchanged. Tests drive the project-local pinned SDK's
 compaction handler and render its expanded native component to verify deterministic
-metrics. Earlier presentation shims remain as historical compatibility code, not a
-claim of support for those SDK versions. Unreviewed older host versions (< 0.99)
-do not receive a private presentation patch.
+metrics. This fixture is separate from installed native-TUI acceptance. The private presentation shim and runtime probe for hosts below 0.99
+are removed. Historical custom-entry renderers, including `dc-shrink-compaction`,
+remain available; notifications and transactional success effects are unchanged.
 
 The opt-in RPC suite under `tests/e2e` is excluded from this contract's gates.
 Its fixtures still assert v13/schema-v1 and need a separately authorized refresh
@@ -529,3 +529,21 @@ Continuation intent creation, submission, and observed work are separate states.
 Later genuine user input or manual/foreign compaction supersedes older intent.
 The crash interval between host acceptance and durable journal acknowledgement
 remains uncertain; process fences cannot make restart delivery crash-atomic.
+
+## Baseline policy and compatibility reductions
+
+The compiler exposes one baseline eviction policy. `compileSessionJsonl()` takes
+four arguments, and selector-oriented projection identity/cache state is removed.
+Shared numeric measurement still accounts for the exact escaped rendered text;
+protected observations, type signatures, Unicode boundaries and typed overflow
+rejections retain their existing contracts. Details remain version 15, checkpoint
+schema 2 and trigger policy 3.
+
+The package publishes `lib/**` without an export map. Removal of the optional
+selector, private card shim and runtime probe is an intentional compatibility cut
+for direct-file importers; repository-local non-use is not a global export claim.
+Offline quality now uses `evaluateBaselineQuality()`: nested optional schema 2
+contains baseline results and `pressure: { baselineHits, total }`; aggregate schema
+4 retains checkpoint, survival, optional, passed and failures. Historical receipts
+and stored data remain untouched. Recall/focus echo, persisted tool-output previews,
+Goal UI, inline/saved handoffs, historical readers and migrations remain available.

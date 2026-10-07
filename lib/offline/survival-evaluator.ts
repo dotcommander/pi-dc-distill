@@ -63,8 +63,8 @@ export function evaluateSurvivalQuality() {
         const curve = { fixture: fixture.id, selection, generation, inputHash: hash(input.bytes), state: { hits: 0, total: protectedFacts.length }, summary: { protected: { hits: 0, total: protectedFacts.length }, prose: { hits: 0, total: 0 }, anchor: { hits: 0, total: 0 } } } as (typeof curves)[number];
         curves.push(curve);
         try {
-          const result = compileSessionJsonl(input.bytes, undefined, undefined, false, 'baseline');
-          const repeated = compileSessionJsonl(input.bytes, undefined, undefined, false, 'baseline');
+          const result = compileSessionJsonl(input.bytes, undefined, undefined, false);
+          const repeated = compileSessionJsonl(input.bytes, undefined, undefined, false);
           if (JSON.stringify(result) !== JSON.stringify(repeated)) failures.push(`${fixture.id}:${generation}:${selection}: nondeterministic output`);
           for (const problem of markerProblems(result.summary)) failures.push(`${fixture.id}:${generation}:${selection}: ${problem}`);
           curve.summaryDigest = result.summaryDigest;

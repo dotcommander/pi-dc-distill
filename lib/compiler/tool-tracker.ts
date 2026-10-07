@@ -5,7 +5,7 @@ import { collectSourceAnchorsFromValue, collectActiveTasks } from "./anchors.ts"
 import { LEGACY_OUTPUT_NOTICE_PREFIX } from "../legacy.ts";
 import { codePointLength } from "../unicode.ts";
 import { basename, isAbsolute, resolve, normalize } from "node:path";
-import { analyzeShell, shellSegmentHasUnsafeOptions, shellSegmentHasUnsafeCheckOptions } from "./shell-analysis.ts";
+import { analyzeShell, type ShellAnalysis, shellSegmentHasUnsafeOptions, shellSegmentHasUnsafeCheckOptions } from "./shell-analysis.ts";
 import { classifyToolEffect, fileReadTools, fileWriteTools, fileCreateTools, isShellTool } from "./tool-effects.ts";
 export { fileWriteTools } from "./tool-effects.ts";
 
@@ -87,7 +87,10 @@ function stripCdPrefix(command: string): string {
 }
 
 export function effectiveShellCwd(command: string, fallback?: string): string | undefined {
-  const analysis = analyzeShell(command);
+  return shellCwdFromAnalysis(analyzeShell(command), fallback);
+}
+
+function shellCwdFromAnalysis(analysis: Readonly<ShellAnalysis>, fallback?: string): string | undefined {
   const first = analysis.segments[0];
   if (!analysis.supported || first?.[0] !== "cd" || first.length !== 2 || analysis.operators[0] !== "&&") return fallback;
   const path = first[1];
@@ -197,7 +200,10 @@ function isCheckSegment(args: string[]): boolean {
 }
 
 export function isVerificationCommand(command: string): boolean {
-  const analysis = analyzeShell(command);
+  return isVerificationAnalysis(analyzeShell(command));
+}
+
+function isVerificationAnalysis(analysis: Readonly<ShellAnalysis>): boolean {
   if (!analysis.supported || analysis.operators.some((operator) => operator !== "&&") || analysis.operators.length !== analysis.segments.length - 1) return false;
   const segments = analysis.segments;
   const leadingCd = segments[0]?.[0] === "cd";
@@ -207,8 +213,7 @@ export function isVerificationCommand(command: string): boolean {
 }
 
 /** Opaque recipes and emitting builds remain diagnostics, never fresh passes. */
-function canEstablishFreshVerification(command: string): boolean {
-  const analysis = analyzeShell(command);
+function canEstablishFreshVerification(analysis: Readonly<ShellAnalysis>): boolean {
   return analysis.supported && analysis.segments.every((args) => {
     if (args[0] === "cd") return true;
     if (args[0] === "just" || (args[0] === "go" && args[1] === "build")) return false;
@@ -227,7 +232,10 @@ function canEstablishFreshVerification(command: string): boolean {
 
 /** One executable probe, optionally behind a literal leading cd. */
 export function gitProbeScope(command: string): string | undefined {
-  const analysis = analyzeShell(command);
+  return gitScopeFromAnalysis(analyzeShell(command));
+}
+
+function gitScopeFromAnalysis(analysis: Readonly<ShellAnalysis>): string | undefined {
   if (!analysis.supported) return undefined;
   const segments = analysis.segments;
   const leadingCd = segments[0]?.[0] === "cd";
@@ -258,9 +266,14 @@ function summarizeResultLines(result: string, empty: string): string {
 export function verificationIdentity(call: PendingToolCall, sessionCwd?: string): string | undefined {
   const command = shellCommand(call);
   if (!command) return undefined;
-  const cwd = effectiveShellCwd(command, argString(call.args, "cwd") ?? sessionCwd);
-  if (analyzeShell(command).segments[0]?.[0] === "cd" && !cwd) return undefined;
-  return JSON.stringify([call.name, command, cwd ?? null]);
+  const analysis = analyzeShell(command);
+  const cwd = shellCwdFromAnalysis(analysis, argString(call.args, "cwd") ?? sessionCwd);
+  return verificationIdentityFromAnalysis(call.name, analysis, cwd);
+}
+
+function verificationIdentityFromAnalysis(runner: string, analysis: Readonly<ShellAnalysis>, cwd?: string): string | undefined {
+  if (analysis.segments[0]?.[0] === "cd" && !cwd) return undefined;
+  return JSON.stringify([runner, analysis.command, cwd ?? null]);
 }
 
 function collectShellMarkers(
@@ -278,10 +291,13 @@ function collectShellMarkers(
 ): boolean {
   const command = shellCommand(call);
   if (!command) return false;
-  const cwd = effectiveShellCwd(command, argString(call.args, "cwd") ?? sessionCwd);
+  // This local analysis is shared without mutation; tool-effect classification
+  // remains independent at submission and completion.
+  const analysis: Readonly<ShellAnalysis> = analyzeShell(command);
+  const cwd = shellCwdFromAnalysis(analysis, argString(call.args, "cwd") ?? sessionCwd);
   let captured = false;
-  if (isVerificationCommand(command)) {
-    const identity = verificationIdentity(call, sessionCwd);
+  if (isVerificationAnalysis(analysis)) {
+    const identity = verificationIdentityFromAnalysis(call.name, analysis, cwd);
     if (identity) {
       const observed = observation ?? observeVerification(result, isError);
       verification.delete(identity);
@@ -293,12 +309,12 @@ function collectShellMarkers(
         cwd,
         evidence: observed.evidence,
         mutationEpoch,
-        freshnessEstablished: fresh && canEstablishFreshVerification(command) && Boolean(cwd && isAbsolute(cwd)),
+        freshnessEstablished: fresh && canEstablishFreshVerification(analysis) && Boolean(cwd && isAbsolute(cwd)),
       });
     }
     captured = true;
   }
-  const gitScope = gitProbeScope(command);
+  const gitScope = gitScopeFromAnalysis(analysis);
   if (gitScope && !isError && observation?.status !== "INCOMPLETE" && observation?.status !== "FAIL") {
     const evidence = summarizeResultLines(result, "no output from scoped probe; working-tree cleanliness not established");
     if (state) state.git.push({ command, cwd, scope: gitScope, evidence, mutationEpoch, freshnessEstablished: fresh && Boolean(cwd && isAbsolute(cwd)) });

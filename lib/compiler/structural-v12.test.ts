@@ -79,12 +79,6 @@ test("unknown formerly hidden tools preserve call/result chronology and fence ex
   }
 });
 
-test("production compilation uses the baseline selector", () => {
-  const input = JSON.stringify({ type: "message", message: { role: "user", content: "Keep exact parser decisions." } });
-  expect(compileSessionJsonl(input, undefined, undefined, false)).toEqual(compileSessionJsonl(input, undefined, undefined, false, "baseline"));
-});
-
-
 test("malformed decoded Unicode is rejected without rewriting lexical identities", () => {
   for (const text of ["invalid \ud800", "invalid \udfff"]) {
     const input = JSON.stringify({ type: "message", message: { role: "user", content: text } });

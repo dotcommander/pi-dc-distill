@@ -369,14 +369,15 @@ paths, larger list first, then fails closed if necessary. File lists retain at
 most 50 newest paths each and recent tool calls at most 20. Omitted paths are
 counted, not sliced into misleading partial paths.
 
-## Optional coverage selector and adoption
+## Baseline selection and historical coverage adoption
 
 Version 12 uses deterministic baseline selection after coverage failed the
 ordinary-workload performance gate. `runStrategies()` remains single-strategy;
-coverage remains available through the offline evaluator.
+the rejected coverage selector and selector choice are now removed. Offline
+quality checks baseline correctness only.
 Procedural conversation reduction and protected overflow handling are unchanged.
 
-The pure candidate selector uses monotone weighted coverage: frontier technical
+The historical candidate selector used monotone weighted coverage: frontier technical
 features weight 4, evidence categories 2 and distinct transcript path identities
 1. Repeated features add no gain. Greedy marginal gain divided by rendered cost
 breaks ties by higher gain, lower cost, newer source sequence and stable ID.
@@ -389,7 +390,7 @@ observations, working-tree observations, anchors and stale verification.
 Complete rendering accounts for escaping, headings and omission notices within
 the 8,192-code-point target and existing reserve; whole optional records are
 removed and omissions reported. Protected records, balanced markers and the hard
-ceiling remain enforced. Adoption requires the sealed 12-source/48-comparison
+ceiling remain enforced. Historical adoption required the sealed 12-source/48-comparison
 oracle with mandatory and safety assertions, three identical repeats, no
 individual optional-recall regression and at least 5 percentage points aggregate
 pressure improvement. Separate semantic performance comparison uses the four
@@ -426,20 +427,28 @@ before and after the wire boundary.
 That version-11 decision adopted coverage. Version 12 restores baseline production
 selection: its coverage ordinary-workload p95 was 3.292 ms against the sealed
 3.039958 ms limit (baseline 2.039958 ms). The other three workloads passed.
-Coverage remains available offline; workloads, thresholds, and oracles are unchanged.
+The coverage implementation has since been retired. Historical receipts and their
+original workload thresholds remain evidence for that historical decision only.
 This local receipt does not establish installed Pi or provider behavior.
 The historical version-11 final gate used unchanged source identity
 `bda964f611f1892ba7abb024024165d25dd13557fdf535c2aecc27b076ec23f9`.
 Earlier failed performance receipts are preserved as historical evidence, not
 current acceptance. An earlier report affected by a transient source edit was
 invalidated. The scripts retain raw samples and runtime identity.
-Reproduce quality and the separate semantic performance comparison with a fresh
-artifact directory and unique labels:
+Current baseline quality uses fresh artifact directories and unique labels:
 
 ```bash
-bun scripts/evaluate-selector.ts /absolute/path/to/artifacts quality-v11
-bun scripts/benchmark-compiler.ts --semantic /absolute/path/to/artifacts semantic-v11
+bun run distill:quality /absolute/path/to/artifacts quality-baseline
 ```
+
+It evaluates 13 fixtures under both focus and recall settings, three repeats each
+(52 comparisons), retaining mandatory facts, safety, marker/reference/order checks,
+noise checks and optional-hit telemetry. Nested optional report schema 2 contains
+baseline results and `pressure: { baselineHits, total }`; aggregate schema 4 retains
+checkpoint, survival, optional, passed and failure reporting. Comparative gains
+and adoption thresholds are removed. `--semantic`, `--semantic-worker`, and
+checkpoint-worker `coverage` selection now fail explicitly. The retained benchmark
+paths are described in [Compiler benchmarks](compiler-benchmark.md).
 
 These historical offline gates do not establish installed Pi behavior or model
 resumption quality. Their recorded checks describe that version-11 phase only;

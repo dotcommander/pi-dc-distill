@@ -5,6 +5,8 @@ import {
   DEFAULT_DISTILL_FEATURE_SETTINGS,
   mergeDistillFeatureSettings,
   normalizeDistillFeatureSettings,
+  normalizeEffectiveCompactionSettings,
+  effectiveCompactionSettingsEqual,
   dumpsEnabled,
   resolvePiCompactionSettings,
   resolveDistillFeatureSettings,
@@ -41,6 +43,29 @@ describe("Pi compaction settings", () => {
       expect(() => resolvePiCompactionSettings({ compaction }, model)).toThrow();
     }
     expect(() => resolvePiCompactionSettings({ compaction: { enabled: "false" } })).toThrow();
+  });
+
+  test("normalizes omitted effective defaults and compares policy identity", () => {
+    const omitted = { enabled: true, reserveTokens: 16_384 };
+    expect(normalizeEffectiveCompactionSettings(omitted)).toEqual({
+      enabled: true, reserveTokens: 16_384, keepRecentTokens: 20_000,
+    });
+    expect(omitted).not.toHaveProperty("keepRecentTokens");
+    expect(effectiveCompactionSettingsEqual(omitted, { ...omitted, keepRecentTokens: 20_000 })).toBe(true);
+    for (const changed of [{ ...omitted, enabled: false }, { ...omitted, reserveTokens: 0 },
+      { ...omitted, keepRecentTokens: 0 }]) {
+      expect(effectiveCompactionSettingsEqual(omitted, changed)).toBe(false);
+    }
+  });
+
+  test("effective normalization preserves strict validation and diagnostic wording", () => {
+    for (const invalid of [{ enabled: "true", reserveTokens: 16_384 },
+      { enabled: true, reserveTokens: -1 }, { enabled: true, reserveTokens: 1.5 },
+      { enabled: true, reserveTokens: 16_384, keepRecentTokens: null },
+      { enabled: true, reserveTokens: 16_384, keepRecentTokens: Infinity }]) {
+      expect(() => normalizeEffectiveCompactionSettings(invalid as any))
+        .toThrow("Invalid effective compaction settings");
+    }
   });
 
   test("enables raw dumps only through the explicit environment switch", () => {

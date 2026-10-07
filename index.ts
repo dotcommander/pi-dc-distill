@@ -29,10 +29,6 @@ import {
   CompactionCancelledError,
 } from "./lib/compaction-source.ts";
 import {
-  installPiCompactionCardDedupe,
-  type CompactionCardDedupeHandle,
-} from "./lib/compaction-card-dedupe.ts";
-import {
   compactionCardSpec,
   COMPACTION_CARD_TYPE,
   type CompactionCardDetails,
@@ -79,8 +75,6 @@ interface ApiUsage {
 
 interface PendingCompaction {
   readonly ticket: AttemptTicket;
-  readonly attemptId: string;
-  readonly sessionId: string;
   readonly firstKeptEntryId: string;
   readonly summaryDigest: string;
   readonly checkpoint: ResumeCheckpointV1;
@@ -89,7 +83,6 @@ interface PendingCompaction {
   readonly wireSummary: string;
   readonly canonicalInput: string;
   readonly ts: string;
-  readonly autonomous: boolean;
   readonly tokensBefore: number;
   readonly tokensAfter: number;
   readonly apiTokensBefore?: number;
@@ -306,7 +299,6 @@ export interface DistillExtensionOptions {
   loadCompactionSettings?: (cwd: string) => PiCompactionSettings;
   loadFeatureSettings?: (cwd: string) => DistillFeatureSettings;
   outputArtifactRoot?: (cwd: string) => string;
-  installCompactionDedupe?: () => Promise<CompactionCardDedupeHandle | null>;
 }
 
 function createExtension(pi: ExtensionAPI, options: DistillExtensionOptions = {}) {
@@ -446,8 +438,6 @@ function createExtension(pi: ExtensionAPI, options: DistillExtensionOptions = {}
           const checkpointSections = checkpointSectionLedger(checkpoint);
           runtime.pending = Object.freeze({
             ticket,
-            attemptId,
-            sessionId: ticket.lease.sessionId,
             firstKeptEntryId: preparation.firstKeptEntryId,
             summaryDigest,
             checkpoint,
@@ -456,7 +446,6 @@ function createExtension(pi: ExtensionAPI, options: DistillExtensionOptions = {}
             wireSummary: wire.wireSummary,
             canonicalInput: canonical.bytes,
             ts: new Date().toISOString(),
-            autonomous: ticket.autonomous,
             tokensBefore: preparation.tokensBefore,
             tokensAfter: wire.tokensAfter,
             apiTokensBefore: apiTokensBefore || undefined,
@@ -590,16 +579,6 @@ function createExtension(pi: ExtensionAPI, options: DistillExtensionOptions = {}
           runtime.lastFailure = `Legacy migration will retry: ${errorText(error)}`;
         }
         if (!runtime.isCurrent(lease, ctx)) return;
-        if (ctx.mode === "tui") {
-          try {
-            const handle = await (options.installCompactionDedupe?.() ?? installPiCompactionCardDedupe());
-            runtime.attachUI(handle, lease, ctx);
-          } catch (error) {
-            if (!runtime.isCurrent(lease, ctx)) return;
-            try { Diag.warn("dc-distill", "Pi compaction-card compatibility skipped", error); } catch { /* Best effort. */ }
-          }
-        }
-        if (!runtime.isCurrent(lease, ctx)) return;
         try {
           await reconcileRecall(runtime, ctx);
         } finally {
@@ -696,7 +675,7 @@ function createExtension(pi: ExtensionAPI, options: DistillExtensionOptions = {}
         const pending = runtime.pending;
         const incomingDetails = event.compactionEntry.details as Record<string, unknown> | undefined;
         if (!pending || !event.fromExtension || incomingDetails?.compactor !== "dc-distill"
-          || incomingDetails?.version !== VERSION || incomingDetails?.attemptId !== pending.attemptId) {
+          || incomingDetails?.version !== VERSION || incomingDetails?.attemptId !== pending.ticket.attemptId) {
           runtime.observeHostCompaction(ctx, event.compactionEntry,
             incomingDetails?.compactor !== "dc-distill" || incomingDetails?.version !== VERSION);
         }
@@ -746,7 +725,7 @@ function createExtension(pi: ExtensionAPI, options: DistillExtensionOptions = {}
         } catch { /* Unknown ownership cannot authorize a commit. */ }
         const matches = branchMatches && checkpointMatches && details.compactor === "dc-distill"
           && details.version === VERSION
-          && details.attemptId === pending.attemptId
+          && details.attemptId === pending.ticket.attemptId
           && entry.firstKeptEntryId === pending.firstKeptEntryId
           && sha256Hex(entry.summary) === pending.summaryDigest
           && details.summaryDigest === pending.summaryDigest;
@@ -778,10 +757,10 @@ function createExtension(pi: ExtensionAPI, options: DistillExtensionOptions = {}
           runtime.recordCommittedCompaction(fullContextAfter ?? pending.tokensAfter, entry.id);
           runtime.clearCompilerPauseAfterCommit(ctx, entry.id);
           runtime.lastFailure = null;
-          if (pending.autonomous) reconcileContinuation(runtime, ctx, pending.attemptId);
+          if (pending.ticket.autonomous) reconcileContinuation(runtime, ctx, pending.ticket.attemptId);
           await independentEffect(runtime, "Compaction log", () => store?.appendLog({
             ts: pending.ts,
-            sessionId: pending.sessionId,
+            sessionId: pending.ticket.lease.sessionId,
             tier: pending.tier,
             before: pending.tokensBefore,
             after: pending.tokensAfter,
@@ -811,7 +790,7 @@ function createExtension(pi: ExtensionAPI, options: DistillExtensionOptions = {}
             {
               enabled: dumpsEnabled(),
               maxDumps: DUMP_RETENTION,
-              attemptId: pending.attemptId,
+              attemptId: pending.ticket.attemptId,
             },
           ));
           if (!runtime.ownsAttempt(ticket, ctx)) return;
@@ -823,7 +802,7 @@ function createExtension(pi: ExtensionAPI, options: DistillExtensionOptions = {}
               : `${formatInteger(fullContextAfter)} observed post-commit; delta ${formatInteger(fullContextAfter - pending.tokensAfter)}`;
             await independentEffect(runtime, "Compaction notification", () => Notify.user(ctx, `Shrunk: ${pending.metric} (${observation})`, "info"));
           }
-          if (pending.autonomous) reconcileContinuation(runtime, ctx, pending.attemptId);
+          if (pending.ticket.autonomous) reconcileContinuation(runtime, ctx, pending.ticket.attemptId);
         } finally {
           if (releaseReservation) clearAttempt(runtime, ticket);
         }

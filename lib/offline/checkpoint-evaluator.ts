@@ -64,8 +64,8 @@ export function evaluateCheckpointQuality() {
       };
       const input = canonicalizeCompactionSource(source);
       try {
-        const result = compileSessionJsonl(input.bytes, undefined, undefined, false, 'baseline');
-        const repeated = compileSessionJsonl(input.bytes, undefined, undefined, false, 'baseline');
+        const result = compileSessionJsonl(input.bytes, undefined, undefined, false);
+        const repeated = compileSessionJsonl(input.bytes, undefined, undefined, false);
         const problems = inspectCheckpointOracle(result.checkpoint, result.summary, cycle.oracle);
         const invariantProblems = markerProblems(result.summary);
         if (JSON.stringify(result) !== JSON.stringify(repeated)) invariantProblems.push('nondeterministic output');

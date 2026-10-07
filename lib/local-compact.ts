@@ -5,7 +5,7 @@ import { RECALL_NOTE, COMPILE_SEPARATOR, MAX_STRUCTURED_SUMMARY_CODE_POINTS, che
 import { KIND_USER, KIND_ASSISTANT, KIND_TOOL_CALL, KIND_TOOL_RESULT, KIND_THINKING, KIND_COMPACTION, type NormalizedBlock, type ConversationTurn, type ToolCallFingerprint, type ToolResultEntry, type ConversationResult, type LocalCompileResult, type ToolAdjacent, type PendingToolCall, type VerificationReceipt } from "./compiler/types.ts";
 import { CompactionInputError } from "./compiler/errors.ts";
 import { normalizeSessionJsonl, filterNoise, compressToolResults } from "./compiler/normalizer.ts";
-import { extractPath, pathIdentity, snapshotObservations, transcriptChangeImpact, renderVerificationReceipt, createEvidenceState, renderEvidenceRisks, renderGitObservations, limitedVerificationSlice, shellCommand, isVerificationCommand, verificationIdentity, effectiveShellCwd, collectConversationToolCall, collectConversationToolResult, popPendingToolCall } from "./compiler/tool-tracker.ts";
+import { extractPath, pathIdentity, snapshotObservations, transcriptChangeImpact, createEvidenceState, renderEvidenceRisks, renderGitObservations, limitedVerificationSlice, shellCommand, isVerificationCommand, verificationIdentity, effectiveShellCwd, collectConversationToolCall, collectConversationToolResult, popPendingToolCall } from "./compiler/tool-tracker.ts";
 import { collectSourceAnchorsFromUserText, collectLiteralAnchors, collectTaskAgentNotification } from "./compiler/anchors.ts";
 import { extractSignals, isReferentialImplementation, conversationEvictionCandidates, turnPreviewLimit, trimTurnWithLimit, compactAssistantTurns, hasTerminalNoWorkCompletion, classifyRequestGroups, removeCompletedHistoricalRequests } from "./compiler/conversation-reducer.ts";
 import { buildResumeIndex, buildResumeTasks, buildResumePlan } from "./compiler/resume-index.ts";
@@ -77,20 +77,6 @@ function extractConversation(blocks: NormalizedBlock[], sessionCwd?: string, pre
   let mutationEpoch = 0;
   const lastErrorRun: { current?: ToolResultEntry } = {};
 
-  const selectionSourceSequences: Record<string, number> = {};
-  const stampedCounts = new Map<OrderedSet, number>();
-  const stampedSets = [readFiles, modifiedFiles, createdFiles, sourceAnchors, workingTree];
-  const stampedNames = ["readFiles", "modifiedFiles", "modifiedFiles", "sourceAnchors", "workingTree"];
-  const stampStrings = (sequence: number) => {
-    for (let index = 0; index < stampedSets.length; index++) {
-      const values = stampedSets[index];
-      const count = values.size;
-      for (let valueIndex = stampedCounts.get(values) ?? 0; valueIndex < count; valueIndex++) {
-        selectionSourceSequences[`${stampedNames[index]}\0${values.at(valueIndex)!}`] ??= sequence;
-      }
-      stampedCounts.set(values, count);
-    }
-  };
   for (let sourceSequence = 0; sourceSequence < blocks.length; sourceSequence++) {
     const block = blocks[sourceSequence];
     block.sourceSequence = sourceSequence;
@@ -140,7 +126,6 @@ function extractConversation(blocks: NormalizedBlock[], sessionCwd?: string, pre
       omittedErrorResults = collected.omittedErrorResults;
       omittedRecentResults = collected.omittedRecentResults;
       mutationEpoch = collected.mutationEpoch;
-      stampStrings(sourceSequence);
       // Type-signature provenance: the file lists grow only for successful
       // paired results, and fileReads carries the per-observation identity
       // chronology. The identity join lets later re-reads refresh the text of
@@ -181,7 +166,6 @@ function extractConversation(blocks: NormalizedBlock[], sessionCwd?: string, pre
         pendingFiles,
         pendingError,
       );
-      stampStrings(sourceSequence);
       if (!recorded) continue;
       pendingTools = [];
       pendingFiles = [];
@@ -281,19 +265,11 @@ function extractConversation(blocks: NormalizedBlock[], sessionCwd?: string, pre
     customType: turn.customType,
   })));
 
-  for (const anchor of literalAnchors) {
-    const source = finalTurns.findLast((turn) => turn.text.includes(anchor));
-    if (source?.sourceSequence !== undefined) selectionSourceSequences[`literalAnchors\0${anchor}`] = source.sourceSequence;
-  }
-
   const boundedReadFiles = newestLimited(readFiles.slice(), 50);
   const boundedModifiedFiles = newestLimited([...modifiedFiles.slice(), ...createdFiles.slice()], 50);
   let finalReadFiles = terminalComplete ? [] : boundedReadFiles.values;
   let finalModifiedFiles = terminalComplete ? [] : boundedModifiedFiles.values;
   const finalVerification = terminalComplete ? [] : limitedVerificationSlice(verification, mutationEpoch);
-  for (const receipt of verification.values()) {
-    if (receipt.sourceSequence !== undefined) selectionSourceSequences[`verification\0${renderVerificationReceipt(receipt, mutationEpoch)}`] = receipt.sourceSequence;
-  }
   let finalWorkingTree = terminalComplete ? [] : limitedSetSlice(workingTree, 10, "working-tree rows");
   let finalSourceAnchors = terminalComplete ? [] : limitedSetSlice(sourceAnchors, 10, "source anchors");
   const finalActiveTasks = terminalComplete ? [] : limitedSetSlice(activeTasks, 10, "active tasks");
@@ -317,7 +293,6 @@ function extractConversation(blocks: NormalizedBlock[], sessionCwd?: string, pre
   const observationSnapshot = Object.freeze({...currentSnapshot,
     verification: Object.freeze([...verificationHistory, ...currentSnapshot.verification.filter(r => r.status === "INCOMPLETE" && r.sourceSequence === undefined)]), pendingMutations: pendingCalls.filter(call=>call.potentiallyModifying).map(call=>({...call}))});
   return {
-    selectionSourceSequences,
     signatureObservations,
     observationSnapshot,
     changeImpact: transcriptChangeImpact(observationSnapshot),
@@ -461,7 +436,8 @@ function typeSignatureMarkerFromPriorSummary(authenticatedPriorSummary: string |
   return scanSections(prior).sections.get("type-signatures") ?? null;
 }
 
-export function compileSessionJsonl(content: string, userFocus?: string, signal?: AbortSignal, recallEnabled = true, selection: "baseline" | "coverage" = "baseline"): LocalCompileResult {
+export function compileSessionJsonl(content: string, userFocus?: string, signal?: AbortSignal, recallEnabled = true): LocalCompileResult {
+  if (arguments.length > 4) throw new TypeError("compileSessionJsonl no longer accepts a selector argument");
   checkAbort(signal);
   if (!content.trim()) throw new CompactionInputError("compaction input is empty");
   const normalized = normalizeSessionJsonl(content, signal);
@@ -513,7 +489,7 @@ export function compileSessionJsonl(content: string, userFocus?: string, signal?
     conv.resumeIndex.recallQueries = [];
     conv.resumeTasks = buildResumeTasks({ ...conv, recallEnabled });
   }
-  enforceOperatingBudget(normalized.meta, conv, userFocus, recallEnabled, selection);
+  enforceOperatingBudget(normalized.meta, conv, userFocus, recallEnabled);
   checkAbort(signal);
   const summary = enforceSummaryLimit(() => `${formatSummary(normalized.meta, conv, userFocus)}${recallEnabled ? `${COMPILE_SEPARATOR}${RECALL_NOTE}` : ""}`, conv);
   checkAbort(signal);
