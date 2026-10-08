@@ -1,5 +1,5 @@
 import { readFileSync, realpathSync, statSync } from 'node:fs';
-import { builtinModules } from 'node:module';
+import { isBuiltin } from 'node:module';
 import { dirname, isAbsolute, relative, resolve } from 'node:path';
 
 export interface Manifest {
@@ -9,7 +9,6 @@ export interface Manifest {
   peerDependencies?: Record<string, string>;
 }
 
-const builtins = new Set(builtinModules.map(name => name.replace(/^node:/, '')));
 function object(value: unknown): value is Record<string, unknown> { return value !== null && typeof value === 'object' && !Array.isArray(value); }
 function contained(root: string, path: string): boolean { const rel = relative(root, path); return rel !== '..' && !rel.startsWith('../') && !isAbsolute(rel); }
 export function canonicalFile(root: string, path: string): string {
@@ -26,8 +25,7 @@ function exportTarget(value: unknown): string {
   throw new Error('no import/default package export');
 }
 export function resolveImport(root: string, from: string, specifier: string, manifest: Manifest): string {
-  const builtin = specifier.replace(/^node:/, '');
-  if (builtins.has(builtin)) return `node:${builtin}`;
+  if (isBuiltin(specifier)) return specifier.startsWith('node:') ? specifier : `node:${specifier}`;
   if (specifier.startsWith('node:')) throw new Error('unknown builtin');
   if (specifier.startsWith('./') || specifier.startsWith('../')) {
     const path = resolve(dirname(resolve(root, from)), specifier);

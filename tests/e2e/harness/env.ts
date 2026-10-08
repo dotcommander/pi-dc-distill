@@ -9,8 +9,9 @@
 import { existsSync, mkdirSync, mkdtempSync, readdirSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
+import { fileURLToPath } from "node:url";
 
-const HARNESS_DIR = resolve(new URL(".", import.meta.url).pathname);
+const HARNESS_DIR = fileURLToPath(new URL(".", import.meta.url));
 
 export const REPO_ROOT = resolve(HARNESS_DIR, "..", "..", "..");
 export const EXTENSION = resolve(process.env.DISTILL_EXTENSION_PATH ?? join(REPO_ROOT, "index.ts"));

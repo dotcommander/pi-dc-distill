@@ -9,6 +9,7 @@ After all edits and semantic review repairs, one verifier runs the full suite on
 ```bash
 bun test
 bun x tsc --noEmit
+bun x tsc -p tsconfig.runtime.json --noEmit
 bun run distill:architecture
 git diff --check
 npm pack --dry-run --json

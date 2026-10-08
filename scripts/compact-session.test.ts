@@ -2,6 +2,7 @@ import { describe, expect, test } from "bun:test";
 import { mkdtemp, mkdir, readFile, writeFile, utimes, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { fileURLToPath } from "node:url";
 import { compactSavedSession, parseSavedSession, runSessionCli, sessionDirectory, latestSavedSession, readCompactionSettings } from "./compact-session.ts";
 import { decodeSummary } from "../lib/local-compact.ts";
 import { createDistillExtension } from "../index.ts";
@@ -138,7 +139,7 @@ describe("read-only native saved-session compaction", () => {
       expect(new Set(outputs).size).toBe(1);
       const expectedOutput = outputs[0];
       if (expectedOutput === undefined) throw new Error("Missing file-input CLI fixture output");
-      const cli = Bun.spawn([process.execPath, new URL("./compact-session.ts", import.meta.url).pathname, newest],
+      const cli = Bun.spawn([process.execPath, fileURLToPath(new URL("./compact-session.ts", import.meta.url)), newest],
         { cwd, env: { ...process.env, ...env }, stdout: "pipe", stderr: "pipe" });
       const [stdout, stderr, exit] = await Promise.all([new Response(cli.stdout).text(), new Response(cli.stderr).text(), cli.exited]);
       expect(exit).toBe(0); expect(stdout).toBe(expectedOutput); expect(stderr).toContain("capacity=unknown");
