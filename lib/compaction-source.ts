@@ -3,26 +3,24 @@ import { isDeepStrictEqual } from "node:util";
 import { buildSessionProjection, type SessionEntry } from "./sdk.ts";
 import { decodeSummary } from "./compiler/budget-formatter.ts";
 import { normalizeMessage } from "./compiler/normalizer.ts";
-import { certifyToolPairs } from "./compiler/tool-tracker.ts";
+import { certifyMessageGroups } from "./compiler/tool-certification.ts";
 import { CompactionInputError } from "./compiler/errors.ts";
 import { checkAbort, isRecord, MAX_INPUT_BYTES, MAX_SOURCE_MESSAGES, validateStructuralInput } from "./compiler/helpers.ts";
-import type { CompactionSource, NormalizedRecord } from "./compiler/types.ts";
+import type { CompactionSource, RawNormalizedRecord, CertifiedRecord, CertifiedMessageGroups } from "./compiler/types.ts";
 
 export type { CompactionSource } from "./compiler/types.ts";
-type AgentMessage = Record<string, unknown>;
 export interface CompactionSourceInput {
-  previousSummary?: string;
-  messagesToSummarize?: unknown[];
-  turnPrefixMessages?: unknown[];
+  previousSummary?: string | undefined;
+  messagesToSummarize?: unknown[] | undefined;
+  turnPrefixMessages?: unknown[] | undefined;
   firstKeptEntryId: string;
   branchEntries: SessionEntry[];
   cwd: string;
-  signal?: AbortSignal;
+  signal?: AbortSignal | undefined;
 }
 
-/** The host's active projection and exact preparation partition are the only inputs. */
-export function buildCompactionSource(input: CompactionSourceInput): CompactionSource {
-  checkAbort(input.signal);
+type ProjectionEntry = ReturnType<typeof buildSessionProjection>["entries"][number];
+function projectPreparation(input: CompactionSourceInput): { messages: unknown[]; prefix: unknown[]; prior: ProjectionEntry["sourceEntry"] | undefined } {
   const messages = input.messagesToSummarize ?? [];
   const prefix = input.turnPrefixMessages ?? [];
   if (!Array.isArray(messages) || !Array.isArray(prefix) || !Array.isArray(input.branchEntries))
@@ -40,7 +38,7 @@ export function buildCompactionSource(input: CompactionSourceInput): CompactionS
   validateStructuralInput(projected.map(entry => ({ id: entry.sourceEntry.id, messages: entry.messages })));
   validateStructuralInput([messages, prefix]);
   const previous = projected.findIndex(entry => entry.sourceEntry.type === "compaction" && entry.messages.length > 0);
-  const prior = previous >= 0 ? projected[previous].sourceEntry : undefined;
+  const prior = previous >= 0 ? projected[previous]!.sourceEntry : undefined;
   if ((prior?.type === "compaction" ? prior.summary : undefined) !== input.previousSummary)
     throw new CompactionInputError("inconsistent_projection: previous summary differs from preparation");
   const start = previous + 1;
@@ -48,8 +46,8 @@ export function buildCompactionSource(input: CompactionSourceInput): CompactionS
   if (typeof input.firstKeptEntryId !== "string" || !input.firstKeptEntryId || end < start)
     throw new CompactionInputError("inconsistent_projection: missing discarded boundary");
   const discarded = projected.slice(start, end);
-  const flatten = (entries: typeof discarded): AgentMessage[] => entries.flatMap(entry => entry.sourceEntry.type === "compaction"
-    ? [] : entry.messages.filter(message => message.role !== "system")) as unknown as AgentMessage[];
+  const flatten = (entries: typeof discarded): unknown[] => entries.flatMap(entry => entry.sourceEntry.type === "compaction"
+    ? [] : entry.messages.filter(message => message.role !== "system"));
   if (!isDeepStrictEqual(flatten(discarded), [...messages, ...prefix]))
     throw new CompactionInputError("inconsistent_projection: preparation partitions differ from projected messages");
   let count = 0;
@@ -59,12 +57,12 @@ export function buildCompactionSource(input: CompactionSourceInput): CompactionS
     if (count === messages.length) partitionExists = true;
   }
   if (!partitionExists) throw new CompactionInputError("inconsistent_projection: partition splits a projected entry");
-  // Legacy handoff custom entries are state-only: they project no messages and
-  // simply contribute nothing, never blocking compaction.
-  const session = { cwd: input.cwd };
-  validateStructuralInput(session);
+  return { messages, prefix, prior };
+}
+
+function admitPredecessor(prior: ProjectionEntry["sourceEntry"] | undefined): { predecessor: CompactionSource["predecessor"]; nativePrior: CertifiedRecord[] } {
   let predecessor: CompactionSource["predecessor"] = null;
-  const nativePrior: NormalizedRecord[] = [];
+  const nativePrior: CertifiedRecord[] = [];
   if (prior?.type === "compaction") {
     validateStructuralInput(prior);
     const details = isRecord(prior.details) ? prior.details : undefined;
@@ -77,8 +75,12 @@ export function buildCompactionSource(input: CompactionSourceInput): CompactionS
     }
     if (predecessor === null) nativePrior.push({ kind: "native-summary", text: prior.summary });
   }
-  const groups = [...messages, ...prefix].map(message => {
-    checkAbort(input.signal);
+  return { predecessor, nativePrior };
+}
+
+function normalizeGroups(messages: readonly unknown[], signal?: AbortSignal): RawNormalizedRecord[][] {
+  return messages.map((message): RawNormalizedRecord[] => {
+    checkAbort(signal);
     try {
       if (!isRecord(message)) throw new CompactionInputError("invalid preparation message");
       return normalizeMessage(message);
@@ -98,20 +100,25 @@ export function buildCompactionSource(input: CompactionSourceInput): CompactionS
       // truncation provenance instead of masquerading as a complete record.
       let mined = "";
       try { mined = JSON.stringify(message) ?? ""; } catch { mined = ""; }
-      return [{ kind: "custom", text: mined || String(message) }] as NormalizedRecord[];
+      return [{ kind: "custom", text: mined || String(message) }];
     }
   });
-  const duplicateCallIds = certifyToolPairs(groups.flat());
+}
+
+function budgetGroups(
+  { groups, duplicateCallIds }: CertifiedMessageGroups, nativePrior: CertifiedRecord[],
+  predecessor: CompactionSource["predecessor"], session: CompactionSource["session"], signal?: AbortSignal,
+): CompactionSource {
   let omittedInputRecords = groups.reduce((total, group) => total + group.length, 0);
   const base = { records: nativePrior, predecessor, duplicateCallIds, omittedInputRecords, session };
   // Bytes measure this typed envelope only; no serialization/reparse compiler route.
   let used = Buffer.byteLength(JSON.stringify(base));
   if (used > MAX_INPUT_BYTES) throw new CompactionInputError("mandatory metadata exceeds input envelope", "protected_overflow");
-  const admitted: NormalizedRecord[][] = [];
+  const admitted: (readonly CertifiedRecord[])[] = [];
   let admittedCount = nativePrior.length;
   for (let index = groups.length - 1; index >= 0; index--) {
-    checkAbort(input.signal);
-    const group = groups[index];
+    checkAbort(signal);
+    const group = groups[index]!;
     if (!group.length) continue;
     const remaining = omittedInputRecords - group.length;
     const cost = Buffer.byteLength(JSON.stringify(group)) - 2 + (admittedCount ? 1 : 0)
@@ -124,4 +131,16 @@ export function buildCompactionSource(input: CompactionSourceInput): CompactionS
   }
   admitted.reverse(); // ingestion walked newest-first; chronological order for the result
   return { records: [...nativePrior, ...admitted.flat()], predecessor, duplicateCallIds, omittedInputRecords, session };
+}
+
+/** The host's active projection and exact preparation partition are the only inputs. */
+export function buildCompactionSource(input: CompactionSourceInput): CompactionSource {
+  checkAbort(input.signal);
+  const { messages, prefix, prior } = projectPreparation(input);
+  const session = { cwd: input.cwd };
+  validateStructuralInput(session);
+  const { predecessor, nativePrior } = admitPredecessor(prior);
+  const rawGroups = normalizeGroups([...messages, ...prefix], input.signal);
+  const certified = certifyMessageGroups(rawGroups);
+  return budgetGroups(certified, nativePrior, predecessor, session, input.signal);
 }

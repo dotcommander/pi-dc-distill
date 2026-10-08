@@ -42,28 +42,42 @@ export type ToolPairing =
   | { state: "identified"; id: string }
   | { state: "certified-idless"; key: number }
   | { state: "unpairable" };
-interface RecordText { text: string; textShortened?: boolean }
+interface RecordText { text: string; textShortened?: boolean | undefined }
 export interface ToolCallRecord extends RecordText {
   kind: "tool-call";
   name: string;
   args: Record<string, unknown>;
-  callId?: string;
+  callId?: string | undefined;
   pairing: ToolPairing;
 }
 export interface ToolResultRecord extends RecordText {
   kind: "tool-result";
   name: string;
-  callId?: string;
+  callId?: string | undefined;
   pairing: ToolPairing;
-  isError?: boolean;
+  isError?: boolean | undefined;
 }
 export type NormalizedRecord =
-  | (RecordText & { kind: "user"; nativeUserText?: boolean })
+  | (RecordText & { kind: "user"; nativeUserText?: boolean | undefined })
   | (RecordText & { kind: "assistant" | "custom" | "branch-summary" | "native-summary" })
   | ToolCallRecord | ToolResultRecord
-  | (RecordText & { kind: "bash"; command: string; output: string; exitCode?: number; cancelled?: boolean; cwd?: string });
+  | (RecordText & { kind: "bash"; command: string; output: string; exitCode?: number | undefined; cancelled?: boolean | undefined; cwd?: string | undefined });
+/** Normalization never claims tool-pair identity; certification is a separate phase. */
+export type RawNormalizedRecord =
+  | Exclude<NormalizedRecord, ToolCallRecord | ToolResultRecord>
+  | Omit<ToolCallRecord, "pairing">
+  | Omit<ToolResultRecord, "pairing">;
+type ReadonlyRecord<T> = T extends ToolCallRecord
+  ? Readonly<Omit<T, "args" | "pairing">> & { readonly args: Readonly<Record<string, unknown>>; readonly pairing: Readonly<ToolPairing> }
+  : T extends ToolResultRecord ? Readonly<Omit<T, "pairing">> & { readonly pairing: Readonly<ToolPairing> }
+  : Readonly<T>;
+export type CertifiedRecord = ReadonlyRecord<NormalizedRecord>;
+export interface CertifiedMessageGroups {
+  readonly groups: readonly (readonly CertifiedRecord[])[];
+  readonly duplicateCallIds: readonly string[];
+}
 export interface CompactionSource {
-  records: NormalizedRecord[];
+  records: readonly CertifiedRecord[];
   predecessor: DcDistillSummary | null;
   /** Includes ambiguity in validated records dropped by whole-record input bounding. */
   duplicateCallIds: readonly string[];
@@ -74,7 +88,7 @@ export interface ObservationFacts {
   files: { read: FileFact[]; modified: FileFact[] };
   commands: CommandFact[];
 }
-export interface CompileOptions { focus?: string | null; signal?: AbortSignal }
+export interface CompileOptions { focus?: string | null | undefined; signal?: AbortSignal | undefined }
 export interface LocalCompileResult { summary: string; document: DcDistillSummary }
 export interface CompactionDetails {
   compactor: "dc-distill";

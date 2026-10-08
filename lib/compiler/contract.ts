@@ -1,0 +1,18 @@
+export const SUMMARY_FORMAT = "dc-distill-summary" as const;
+export const SUMMARY_NOTICE = "Selected conversation excerpts and observations; incomplete." as const;
+export const SUMMARY_COLUMNS = "columns: records=kind|origin|cut|text ; files=section id|origin|cut|create|path ; commands=cmd id|origin|cut|runner|status|cwd|command|result" as const;
+export const MAX_INPUT_BYTES = 20 * 1024 * 1024;
+export const MAX_SOURCE_MESSAGES = 50_000;
+export const MAX_STRUCTURED_SUMMARY_CODE_POINTS = 65_536;
+export const TARGET_RESUME_SUMMARY_CODE_POINTS = 8_192;
+export const MAX_TEXT_CODE_POINTS = 2_048;
+export const MAX_FILE_PATH_CODE_POINTS = 512;
+export const MAX_READ_FILES = 50;
+export const MAX_MODIFIED_FILES = 50;
+export const MAX_COMMANDS = 10;
+export const MAX_COMMAND_RUNNER_CODE_POINTS = 128;
+export const MAX_COMMAND_CODE_POINTS = 512;
+export const MAX_COMMAND_CWD_CODE_POINTS = 512;
+export const MAX_COMMAND_RESULT_CODE_POINTS = 300;
+export const OPTIONAL_FACTS_CODE_POINTS = 2_048;
+export const RECORD_KINDS = ["user", "assistant", "tool-call", "tool-result", "bash", "custom", "branch-summary", "native-summary"] as const;

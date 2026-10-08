@@ -1,13 +1,20 @@
+import { certifyMessageGroups } from "./tool-certification.ts";
 import { sha256Identity } from "../sha256.ts";
 import { describe, expect, test } from "bun:test";
 import { emptyOmissions } from "./helpers.ts";
-import { certifyToolPairs, extractObservations } from "./tool-tracker.ts";
-import type { CompactionSource, DcDistillSummary, NormalizedRecord } from "./types.ts";
+import { extractObservations } from "./tool-tracker.ts";
+import type { CompactionSource, DcDistillSummary, NormalizedRecord, CertifiedRecord } from "./types.ts";
 
-function source(records: NormalizedRecord[], overrides: Partial<CompactionSource> = {}, certify = true): CompactionSource {
-  const duplicateCallIds = certify ? certifyToolPairs(records) : [];
-  return { records, predecessor: null, duplicateCallIds, omittedInputRecords: 0,
-    session: { cwd: "/project" }, ...overrides };
+function requiredAt<T>(values: readonly T[], index: number): T {
+  const value = values[index];
+  if (value === undefined) throw new Error(`Missing fixture row ${index}`);
+  return value;
+}
+
+function source(records: readonly CertifiedRecord[], overrides: Partial<CompactionSource> = {}, certify = true): CompactionSource {
+  const certified = certify ? certifyMessageGroups([records]) : { groups: [records], duplicateCallIds: [] };
+  return { records: certified.groups.flat(), predecessor: null, duplicateCallIds: certified.duplicateCallIds,
+    omittedInputRecords: 0, session: { cwd: "/project" }, ...overrides };
 }
 
 function call(name: string, args: Record<string, unknown>, callId?: string): Extract<NormalizedRecord, { kind: "tool-call" }> {
@@ -23,25 +30,27 @@ function predecessor(): DcDistillSummary {
 
 describe("lightweight observations", () => {
   test("certifies sequential pairs with exact raw names independently of explicit IDs", () => {
-    const records = [call("read", { path: "first" }), result("read", undefined, false),
+    const rawRecords = [call("read", { path: "first" }), result("read", undefined, false),
       call("READ", { path: "uppercase" }), call("read", { path: "second" }),
       call("read", { path: "identified" }, "id"), result("read", "id", false),
       result("read", undefined, false), result("READ", undefined, false)];
-    certifyToolPairs(records);
+    const records = certifyMessageGroups([rawRecords]).groups.flat();
     expect(records.map(record => record.kind === "tool-call" || record.kind === "tool-result" ? record.pairing.state === "certified-idless" ? record.pairing.key : undefined : undefined)).toEqual([0, 0, 2, 1, undefined, undefined, 1, 2]);
     expect(extractObservations(source(records)).files.read.map(row => row.path)).toEqual(["first", "identified", "second", "uppercase"]);
   });
   test("certified pairs cannot be redirected when an earlier result or unique call is omitted", () => {
-    const records = [call("read", { path: "first" }), result("read", undefined, false),
+    const rawRecords = [call("read", { path: "first" }), result("read", undefined, false),
       call("read", { path: "second" }), result("read", undefined, false)];
-    certifyToolPairs(records);
-    expect(extractObservations(source([records[0], records[2], records[3]], {}, false)).files.read.map(row => row.path)).toEqual(["second"]);
-    expect(extractObservations(source([records[0], records[1], records[3]], {}, false)).files.read.map(row => row.path)).toEqual(["first"]);
+    const records = certifyMessageGroups([rawRecords]).groups.flat();
+    expect(extractObservations(source([requiredAt(records, 0), requiredAt(records, 2), requiredAt(records, 3)], {}, false)).files.read.map(row => row.path)).toEqual(["second"]);
+    expect(extractObservations(source([requiredAt(records, 0), requiredAt(records, 1), requiredAt(records, 3)], {}, false)).files.read.map(row => row.path)).toEqual(["first"]);
     const extra = result("read", undefined, false);
     if (extra.kind === "tool-result") extra.pairing = { state: "unpairable" };
-    expect(extractObservations(source([records[0], extra], {}, false)).files.read).toEqual([]);
+    expect(extractObservations(source([requiredAt(records, 0), extra], {}, false)).files.read).toEqual([]);
     // A certificate requires a matching raw tool name, even with a shared key.
-    expect(extractObservations(source([records[0], { ...records[1], name: "READ" }], {}, false)).files.read).toEqual([]);
+    const firstResult = requiredAt(records, 1);
+    if (firstResult.kind !== "tool-result") throw new Error("Expected certified result fixture");
+    expect(extractObservations(source([requiredAt(records, 0), { ...firstResult, name: "READ" }], {}, false)).files.read).toEqual([]);
   });
   test("requires exact raw name, unique ID, and explicit successful result for files", () => {
     const facts = extractObservations(source([
@@ -59,8 +68,8 @@ describe("lightweight observations", () => {
       [call("read", { path: "x" }, "a"), result("read", "a", false), result("read", "a", false)],
     ]) expect(extractObservations(source(records)).files.read).toEqual([]);
     const full = [call("read", { path: "x" }, "a"), result("read", "a", false), call("read", { path: "y" }, "a")];
-    const duplicateCallIds = certifyToolPairs(full);
-    expect(extractObservations(source(full.slice(0, 2), { duplicateCallIds, omittedInputRecords: 1 }, false)).files.read).toEqual([]);
+    const certified = certifyMessageGroups([full]);
+    expect(extractObservations(source(certified.groups.flat().slice(0, 2), { duplicateCallIds: certified.duplicateCallIds, omittedInputRecords: 1 }, false)).files.read).toEqual([]);
   });
 
   test("ID-less certification requires exactly one pending call with the same raw name", () => {
@@ -77,7 +86,7 @@ describe("lightweight observations", () => {
     const aliases = ["edit", "write", "edit_file", "write_file", "multiedit", "write_to_file", "replace_file_content", "patch_file", "create_file"];
     const records = aliases.flatMap((name, i) => [call(name, { file_path: `${name}.ts`, TargetFile: "ignored" }, String(i)), result(name, String(i), false)]);
     const facts = extractObservations(source([...records, call("view_file", { path: "first", file_path: "ignored" }, "r"), result("view_file", "r", false)]));
-    expect(facts.files.read[0].path).toBe("first");
+    expect(requiredAt(facts.files.read, 0).path).toBe("first");
     expect(facts.files.modified.map((row) => [row.path, row.createCapable])).toEqual(aliases.map((name) => [`${name}.ts`, ["write", "write_file", "write_to_file", "create_file"].includes(name)]));
   });
 
@@ -92,10 +101,10 @@ describe("lightweight observations", () => {
       call("read", { path: "x", cwd: "/other" }, "f"), result("read", "f", false),
     ]));
     expect(facts.files.read.map((row) => row.path)).toEqual([long, long, "x", "./x", "x"]);
-    expect(facts.files.read[0].identityDigest).toBe(sha256Identity(JSON.stringify(["dc-distill-file", `${long}a`, "/project"])));
-    expect(facts.files.read[0].identityDigest).not.toBe(facts.files.read[1].identityDigest);
-    expect(facts.files.read[0].shortened).toBe(true);
-    expect(facts.files.read[2].identityDigest).not.toBe(facts.files.read[4].identityDigest);
+    expect(requiredAt(facts.files.read, 0).identityDigest).toBe(sha256Identity(JSON.stringify(["dc-distill-file", `${long}a`, "/project"])));
+    expect(requiredAt(facts.files.read, 0).identityDigest).not.toBe(requiredAt(facts.files.read, 1).identityDigest);
+    expect(requiredAt(facts.files.read, 0).shortened).toBe(true);
+    expect(requiredAt(facts.files.read, 2).identityDigest).not.toBe(requiredAt(facts.files.read, 4).identityDigest);
   });
 
   test("command outcomes follow the recorded result and preserve exact command and cwd", () => {
@@ -104,9 +113,10 @@ describe("lightweight observations", () => {
     const commands = extractObservations(source(records)).commands;
     expect(commands.map((row) => row.status)).toEqual(["success", "error", "unknown", "success"]);
     expect(commands.every((row) => row.cwd === "/launch" && row.command === "cd elsewhere && false")).toBe(true);
-    expect(commands[0].identityDigest).toBe(sha256Identity(JSON.stringify(["dc-distill-command", "bash", "cd elsewhere && false", "/launch"])));
+    expect(requiredAt(commands, 0).identityDigest).toBe(sha256Identity(JSON.stringify(["dc-distill-command", "bash", "cd elsewhere && false", "/launch"])));
     const unknown = extractObservations(source([call("shell", { cmd: "go test" }, "x"), result("shell", "x", false)],
-      { session: { cwd: "" } })).commands[0];
+      { session: { cwd: "" } })).commands.at(0);
+    if (!unknown) throw new Error("Missing command observation");
     expect(unknown.cwd).toBeNull();
     expect(unknown.identityDigest).toBe(sha256Identity(JSON.stringify(["dc-distill-command", "shell", "go test", null])));
   });
@@ -130,11 +140,11 @@ describe("lightweight observations", () => {
     prior.records = [{ kind: "tool-call", text: '{"name":"read","callId":"a","args":{"path":"invented"}}', shortened: false, origin: "current" }];
     const facts = extractObservations(source([result("read", "a", false)], { predecessor: prior }));
     expect(facts.files.read).toEqual(first.files.read.map((row) => ({ ...row, origin: "prior" })));
-    expect(facts.commands[0].origin).toBe("prior");
-    expect(prior.files.read[0].origin).toBe("current");
+    expect(requiredAt(facts.commands, 0).origin).toBe("prior");
+    expect(requiredAt(prior.files.read, 0).origin).toBe("current");
     const refreshed = extractObservations(source([call("read", { path: "x" }, "new"), result("read", "new", false)], { predecessor: prior }));
     expect(refreshed.files.read).toHaveLength(1);
-    expect(refreshed.files.read[0].origin).toBe("current");
+    expect(requiredAt(refreshed.files.read, 0).origin).toBe("current");
   });
 
   test("command identity precedes bounded display and repeated receipts remain distinct", () => {
@@ -145,10 +155,10 @@ describe("lightweight observations", () => {
       call("bash", { command, cwd }, "b"), result("bash", "b", true),
     ]));
     expect(facts.commands).toHaveLength(2);
-    expect(facts.commands[0].identityDigest).toBe(sha256Identity(JSON.stringify(["dc-distill-command", "bash", command, cwd])));
-    expect(Array.from(facts.commands[0].command)).toHaveLength(512);
-    expect(Array.from(facts.commands[0].result)).toHaveLength(300);
-    expect(facts.commands[0].cwd).toHaveLength(512);
-    expect(facts.commands[0].shortened).toBe(true);
+    expect(requiredAt(facts.commands, 0).identityDigest).toBe(sha256Identity(JSON.stringify(["dc-distill-command", "bash", command, cwd])));
+    expect(Array.from(requiredAt(facts.commands, 0).command)).toHaveLength(512);
+    expect(Array.from(requiredAt(facts.commands, 0).result)).toHaveLength(300);
+    expect(requiredAt(facts.commands, 0).cwd).toHaveLength(512);
+    expect(requiredAt(facts.commands, 0).shortened).toBe(true);
   });
 });

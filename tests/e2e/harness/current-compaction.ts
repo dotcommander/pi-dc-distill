@@ -7,17 +7,17 @@ const SUMMARY_NOTICE = "Selected conversation excerpts and observations; incompl
 const SUMMARY_COLUMNS = "columns: records=kind|origin|cut|text ; files=section id|origin|cut|create|path ; commands=cmd id|origin|cut|runner|status|cwd|command|result";
 const RECORD_KINDS = ["user", "assistant", "tool-call", "tool-result", "bash", "custom", "branch-summary", "native-summary"];
 
-function object(value: unknown): Record<string, any> {
+function object(value: unknown): Record<string, unknown> {
   assert(value && typeof value === "object" && !Array.isArray(value));
-  return value as Record<string, any>;
+  return value as Record<string, unknown>;
 }
-function keys(value: Record<string, any>, expected: string[]): void {
+function keys(value: Record<string, unknown>, expected: string[]): void {
   assert.deepEqual(Object.keys(value).sort(), [...expected].sort());
 }
-function text(value: unknown, maximum: number): void {
-  assert.equal(typeof value, "string");
-  assert(!/[\uD800-\uDBFF](?![\uDC00-\uDFFF])|(?<![\uD800-\uDBFF])[\uDC00-\uDFFF]/u.test(value as string), "malformed Unicode");
-  assert(Array.from(value as string).length <= maximum, "display exceeds bound");
+function text(value: unknown, maximum: number): asserts value is string {
+  assert(typeof value === "string");
+  assert(!/[\uD800-\uDBFF](?![\uDC00-\uDFFF])|(?<![\uD800-\uDBFF])[\uDC00-\uDFFF]/u.test(value), "malformed Unicode");
+  assert(Array.from(value).length <= maximum, "display exceeds bound");
 }
 function originField(value: string): string {
   assert(["current", "prior"].includes(value), "bad origin");
@@ -50,20 +50,30 @@ function unescape(value: string): string {
   return out;
 }
 
-export function assertCurrentCompaction(summary: unknown, details: unknown): Record<string, any> {
+interface Observation { origin: string; shortened: boolean; text: string }
+interface FileObservation { identityDigest: string; origin: string; shortened: boolean; createCapable: boolean; path: string }
+interface CommandObservation { identityDigest: string; origin: string; shortened: boolean; runner: string; status: string; cwd: string | null; command: string; result: string }
+export interface AcceptedSummary {
+  format: string; notice: string; focus: string | null; latestRequest: Observation | null;
+  records: Array<Observation & { kind: string }>;
+  files: { read: FileObservation[]; modified: FileObservation[] };
+  commands: CommandObservation[];
+  omitted: { inputRecords: number; excerpts: number; readFiles: number; modifiedFiles: number; commands: number } | null;
+}
+export function assertCurrentCompaction(summary: unknown, details: unknown): AcceptedSummary {
   text(summary, 65536);
   const d = object(details);
   keys(d, ["compactor", "summaryDigest", "tokensAfter", "tokensAfterSource", "capacityStatus",
     ...(d.contextWindow === undefined ? [] : ["contextWindow"])]);
   assert.equal(d.compactor, "dc-distill");
-  assert.equal(d.summaryDigest, createHash("sha256").update(summary as string).digest("hex"));
-  assert(Number.isFinite(d.tokensAfter) && d.tokensAfter >= 0);
+  assert.equal(d.summaryDigest, createHash("sha256").update(summary).digest("hex"));
+  assert(typeof d.tokensAfter === "number" && Number.isFinite(d.tokensAfter) && d.tokensAfter >= 0);
   assert.equal(d.tokensAfterSource, "pi-rebuilt-message-estimate");
-  assert(["unknown", "within-window"].includes(d.capacityStatus));
-  if (d.contextWindow !== undefined) assert(Number.isFinite(d.contextWindow) && d.contextWindow > 0);
-  if (d.capacityStatus === "within-window") assert(d.contextWindow !== undefined && d.tokensAfter <= d.contextWindow);
+  assert(d.capacityStatus === "unknown" || d.capacityStatus === "within-window");
+  if (d.contextWindow !== undefined) assert(typeof d.contextWindow === "number" && Number.isFinite(d.contextWindow) && d.contextWindow > 0);
+  if (d.capacityStatus === "within-window") assert(typeof d.contextWindow === "number" && d.tokensAfter <= d.contextWindow);
 
-  const lines = (summary as string).split("\n");
+  const lines = summary.split("\n");
   let index = 0;
   const take = (): string => {
     assert.ok(index < lines.length, "truncated summary");
@@ -72,7 +82,7 @@ export function assertCurrentCompaction(summary: unknown, details: unknown): Rec
   assert.equal(take(), `<${SUMMARY_FORMAT}>`, "missing opening tag");
   assert.equal(take(), `notice: ${SUMMARY_NOTICE}`, "wrong notice constant");
   assert.equal(take(), SUMMARY_COLUMNS, "wrong columns legend");
-  const document: Record<string, any> = { format: SUMMARY_FORMAT, notice: SUMMARY_NOTICE, focus: null, latestRequest: null,
+  const document: AcceptedSummary = { format: SUMMARY_FORMAT, notice: SUMMARY_NOTICE, focus: null, latestRequest: null,
     records: [], files: { read: [], modified: [] }, commands: [], omitted: null };
   if (lines[index]?.startsWith("focus: ")) text(document.focus = unescape(take().slice(7)), 2048);
   if (lines[index]?.startsWith("latest-request: ")) {
@@ -91,7 +101,7 @@ export function assertCurrentCompaction(summary: unknown, details: unknown): Rec
     const fields = take().split(" | ");
     assert.equal(fields.length, 4, "bad record row");
     assert(RECORD_KINDS.includes(fields[0]!), "bad record kind");
-    const row = { kind: fields[0], origin: originField(fields[1]!), shortened: cut(fields[2]!), text: unescape(fields[3]!) };
+    const row = { kind: fields[0]!, origin: originField(fields[1]!), shortened: cut(fields[2]!), text: unescape(fields[3]!) };
     text(row.text, 2048);
     document.records.push(row);
   }

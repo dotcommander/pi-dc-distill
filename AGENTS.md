@@ -12,7 +12,7 @@ At planning and phase boundaries, dispatch genuinely independent native agents w
 2. Live input comes only from `event.preparation` and active `event.branchEntries`; never read session files in the hook.
 3. Source, compiler, cancellation, and capacity failures cancel compaction; never fall through to Pi's default LLM compactor.
 4. Pi's native compaction card is the sole success display. No extension notifications, durable success artifacts, or storage writes remain.
-5. Child sessions cancel interception. Preserve primary-session identity, lifecycle generation, and preparation ownership checks.
+5. Owned instances reject foreign sessions; known child launchers disable extensions. Do not infer child status from `parentSession` (legitimate forks share it). Independently launched children explicitly loading the extension remain unsupported without host provenance. Preserve primary-session identity, lifecycle generation, and preparation ownership checks.
 
 ## Source and current contract
 
@@ -36,7 +36,7 @@ Preserve preparation lifecycle hooks, primary ownership, generation, replacement
 
 ## Scope and development
 
-Production allowlist: `index.ts`; `lib/{compaction-source,local-compact,sdk,unicode,sha256}.ts`; `lib/compiler/{types,normalizer,tool-tracker,budget-formatter,helpers,signal,errors}.ts`. Package exports only the root extension and publishes its explicit runtime allowlist plus README/license. No replay binary, offline historical evaluator, benchmark program, recall, preview, focus injection, storage, dump, migration, or custom card remains.
+Production allowlist: `index.ts`; `lib/{compaction-source,local-compact,sdk,unicode,sha256}.ts`; `lib/compiler/{types,normalizer,tool-tracker,budget-formatter,helpers,signal,errors,contract,validation,summary-codec,eviction,tool-certification,message-decoder,cwd}.ts`. Runtime helpers: `lib/runtime/{ownership,capacity,diagnostics}.ts`. Package exports only the root extension and publishes its explicit runtime allowlist plus README/license. No replay binary, offline historical evaluator, benchmark program, recall, preview, focus injection, storage, dump, migration, or custom card remains.
 
 Use fresh sessions with the new extension; existing incompatible sessions use the old extension. Do not load both together. Preserve `.work`, receipts, stored data, session files, excluded historical docs, and the `CLAUDE.md` symlink. Active docs are indexed in `docs/index.md`; historical specs/ADRs/benchmarks/assets are excluded from the current contract and package.
 
@@ -47,6 +47,7 @@ After all edits and semantic review repairs, one verifier runs the approved full
 ```bash
 bun test
 bun x tsc --noEmit
+bun x tsc -p tsconfig.runtime.json --noEmit
 bun run distill:architecture
 git diff --check
 npm pack --dry-run --json
@@ -54,3 +55,5 @@ bun run distill:e2e
 ```
 
 After repairs rerun affected gates only. E2e uses isolated scripted-provider scenarios and available installed Pi; it is separate from unit discovery and requires no paid provider for deterministic-compiler QA. Fixture and static evidence do not prove installed-host behavior. Runtime acceptance instructions are owned by `tests/e2e/README.md`.
+
+Architecture loading is limited to static ES imports/reexports, canonical relative `.ts` files, normalized Node builtins, and declared project-local root packages resolved through exports import/default condition order (or explicit main without exports). Reject unsupported loaders, unresolved targets, cycles, compiler effect/SDK/runtime paths, and development-only dependencies except peers. See `docs/architecture.md` for the bounded grammar. Optional `DC_DISTILL_DEBUG=1` emits fixed cancellation codes to stderr only and cannot escape cancellation.

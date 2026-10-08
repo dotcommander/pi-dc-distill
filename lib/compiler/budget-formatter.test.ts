@@ -1,6 +1,7 @@
+import { certifyMessageGroups } from "./tool-certification.ts";
 import { describe, expect, test } from "bun:test";
 import { buildSummary, decodeSummary, encodeSummary, evictOldestOptional } from "./budget-formatter.ts";
-import { certifyToolPairs, extractObservations } from "./tool-tracker.ts";
+import { extractObservations } from "./tool-tracker.ts";
 import { emptyOmissions, SUMMARY_COLUMNS, SUMMARY_FORMAT, SUMMARY_NOTICE, TARGET_RESUME_SUMMARY_CODE_POINTS } from "./helpers.ts";
 import { codePointLength } from "../unicode.ts";
 import type { CompactionSource, DcDistillSummary, ObservationFacts } from "./types.ts";
@@ -56,7 +57,7 @@ describe("serialized selection and carry", () => {
   test("shortening preserves Unicode and budgets count escaping", () => {
     const input = source();
     input.records = Array.from({ length: 12 }, (_, index) => ({ kind: "assistant" as const, text: `${index}${"\u0000".repeat(2047)}` }));
-    input.records.push({ kind: "user", text: "😀".repeat(3000), nativeUserText: true });
+    input.records = [...input.records, { kind: "user", text: "😀".repeat(3000), nativeUserText: true }];
     const selected = buildSummary(input, facts());
     expect(codePointLength(selected.latestRequest!.text)).toBe(2048);
     expect(selected.latestRequest!.shortened).toBe(true);
@@ -83,7 +84,7 @@ describe("serialized selection and carry", () => {
       ...Array.from({ length: 40 }, (_, index) => ({ kind: "assistant" as const, text: index % 3 === 0 ? `diff --git a/x${index} b/x${index}\n--- a/x${index}\n+++ b/x${index}\n@@ -1 +1 @@\n-old\n+new ${index}\n context ` + "z".repeat(400) : index % 3 === 1 ? `note ${index} 😀 | \\ tail ` + "y".repeat(380) : `error: boom ${index}` })),
       { kind: "user", text: "newest request", nativeUserText: true },
     ];
-    const document = buildSummary(input, (certifyToolPairs(input.records), extractObservations(input)));
+    const document = buildSummary(input, (certify(input), extractObservations(input)));
     // No predecessor or facts, so the operating limit is exactly the target.
     expect(codePointLength(encodeSummary(document))).toBeLessThanOrEqual(TARGET_RESUME_SUMMARY_CODE_POINTS);
     const order = new Map(input.records.map((record, position) => [record.text, position]));
@@ -103,7 +104,7 @@ describe("serialized selection and carry", () => {
   test("large-input excerpt timing smoke test", () => {
     const input = source();
     input.records = Array.from({ length: 64_000 }, (_, index) => ({ kind: "assistant" as const, text: `progress update ${index} ` + "x".repeat(100) }));
-    input.records.push({ kind: "user", text: "latest request", nativeUserText: true });
+    input.records = [...input.records, { kind: "user", text: "latest request", nativeUserText: true }];
     const start = performance.now();
     const document = buildSummary(input, facts());
     const elapsed = performance.now() - start;
@@ -302,7 +303,7 @@ describe("serialized selection and carry", () => {
       { kind: "tool-result", name: "read", text: "module contents", isError: false, pairing: { state: "unpairable" } },
     ];
     for (const input of [absent, mismatch, duplicate, forbidden]) {
-      const document = buildSummary(input, (certifyToolPairs(input.records), extractObservations(input)));
+      const document = buildSummary(input, (certify(input), extractObservations(input)));
       const encoded = encodeSummary(document);
       expect(encoded.includes("[repeat:")).toBe(false);
       expect(encoded.includes("last ok")).toBe(false);
@@ -423,3 +424,9 @@ test("incremental fact admission matches full serialization across escaping and 
     }
   }
 });
+
+function certify(input: CompactionSource): void {
+  const certified = certifyMessageGroups([input.records]);
+  input.records = certified.groups.flat();
+  input.duplicateCallIds = certified.duplicateCallIds;
+}

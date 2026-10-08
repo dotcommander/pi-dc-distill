@@ -13,7 +13,7 @@ import { join, resolve } from "node:path";
 const HARNESS_DIR = resolve(new URL(".", import.meta.url).pathname);
 
 export const REPO_ROOT = resolve(HARNESS_DIR, "..", "..", "..");
-export const EXTENSION = join(REPO_ROOT, "index.ts");
+export const EXTENSION = resolve(process.env.DISTILL_EXTENSION_PATH ?? join(REPO_ROOT, "index.ts"));
 export const FAKE_PROVIDER = join(HARNESS_DIR, "fake-provider.ts");
 
 

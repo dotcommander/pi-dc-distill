@@ -16,6 +16,20 @@ Select a particular installed package and expected host version:
 DISTILL_PI_PACKAGE="$PWD/node_modules/@earendil-works/pi-coding-agent" DISTILL_PI_EXPECT_VERSION=0.99.2 bun run distill:e2e
 ```
 
+The harness loads the checkout's `index.ts` by default. Set the harness-only
+`DISTILL_EXTENSION_PATH` to test an extracted package's actual entrypoint:
+
+```sh
+DISTILL_EXTENSION_PATH=/absolute/scratch/package/index.ts DISTILL_PI_PACKAGE="$PWD/node_modules/@earendil-works/pi-coding-agent" DISTILL_PI_EXPECT_VERSION=0.99.2 bun run distill:e2e
+```
+
+Create a real scratch tarball with `npm pack --pack-destination <scratch>`, inspect
+its file list, and extract it before this invocation. The extracted package may
+use a scratch `node_modules` symlink to this checkout's already installed local
+peers; do not install new dependencies or substitute checkout source files.
+The provider and fault extensions continue to come from the harness checkout.
+`DISTILL_EXTENSION_PATH` changes only the test launcher, not production behavior.
+
 For another installation, supply its package root and actual manifest version.
 `DISTILL_PI_NODE` selects Node. Without a package root,
 `DISTILL_PI_EXECUTABLE` selects the CLI (default `pi`), without a manifest-version
@@ -29,7 +43,26 @@ no provider summarization, and no extension commands, continuation or storage.
 The interception scenarios check native threshold, overflow and overflow-error
 retry requests. Preparation faults preceding dc-distill exercise its cancellation
 boundary: no default summarizer request, no append, no durable extension artifact,
-and a subsequent usable native prompt. A deliberately small model window checks
+and a subsequent usable native prompt. The getter faults use Pi's actual shared extension-runner context to throw on
+model, model context-window, session-manager and preparation reads. Each getter
+restores its original descriptor before throwing, so the follow-up prompt checks
+host recovery without leaving a poisoned context or model. The provider summary
+spy reads normalized SDK system messages and traces every request.
+
+The lifecycle suite exercises cancelled and failed switch/fork boundaries,
+successful replacement, and legitimate new/fork sessions whose journal headers
+contain `parentSession`. Each scenario requires exactly one deterministic append,
+zero provider summary requests, and successful subsequent prompting. Synthetic
+foreign starts, closed old runtimes and reload ownership are covered at the
+runtime unit boundary; RPC acceptance does not synthesize host provenance or
+claim those synthetic events occurred in the installed runner.
+
+An owned extension instance rejects foreign sessions. Known child launchers
+must disable extensions. `parentSession` is not child provenance: legitimate
+user forks also carry it. Independently launched children that explicitly load
+the extension remain unsupported without host provenance.
+
+A deliberately small model window checks
 that an oversized retained tail cancels when mandatory rebuilt context cannot fit.
 
 The acceptance oracle has no production imports. It independently checks the

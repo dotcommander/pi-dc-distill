@@ -8,6 +8,12 @@ import type { DcDistillSummary } from "./compiler/types.ts";
 import { extractObservations } from "./compiler/tool-tracker.ts";
 import { codePointLength } from "./unicode.ts";
 
+function requiredAt<T>(values: readonly T[], index: number): T {
+  const value = values[index];
+  if (value === undefined) throw new Error(`Missing fixture row ${index}`);
+  return value;
+}
+
 type Message = Record<string, unknown>;
 function packet(messages: Message[], split = messages.length): CompactionSourceInput {
   const entries = [...messages, { role: "user", content: "RETAINED" }].map((message, index) => ({
@@ -26,7 +32,7 @@ function document(): DcDistillSummary {
 function withPrior(summary: string, details?: Record<string, unknown>): CompactionSourceInput {
   const input = packet([{ role: "user", content: "discarded" }]);
   const entries = input.branchEntries as unknown as Record<string, unknown>[];
-  entries[0].parentId = "prior";
+  requiredAt(entries, 0).parentId = "prior";
   entries.unshift({ type: "compaction", id: "prior", parentId: null, timestamp: "2026-01-01",
     summary, firstKeptEntryId: "prior", tokensBefore: 1000, details });
   return { ...input, previousSummary: summary };
@@ -47,7 +53,7 @@ describe("preparation-owned typed input", () => {
     mismatch.messagesToSummarize = [{ role: "user", content: "different" }];
     expect(() => buildCompactionSource(mismatch)).toThrow("inconsistent_projection");
     const duplicate = packet([{ role: "user", content: "original" }]);
-    duplicate.branchEntries[1].id = duplicate.branchEntries[0].id;
+    requiredAt(duplicate.branchEntries, 1).id = requiredAt(duplicate.branchEntries, 0).id;
     expect(() => buildCompactionSource(duplicate)).toThrow("duplicate");
     expect(() => buildCompactionSource({ ...packet([]), firstKeptEntryId: "missing" })).toThrow("discarded boundary");
     expect(() => buildCompactionSource({ ...withPrior("prior"), previousSummary: "other" })).toThrow("previous summary");
@@ -58,7 +64,7 @@ describe("preparation-owned typed input", () => {
     entries.push({ type: "context_edit", id: "edit", parentId: "entry-1", timestamp: "2026-01-01",
       targetId: "entry-0", replacement: { content: "replacement" } });
     input.messagesToSummarize = [{ role: "user", content: "replacement" }];
-    expect(buildCompactionSource(input).records[0].text).toBe("replacement");
+    expect(buildCompactionSource(input).records.at(0)?.text).toBe("replacement");
   });
   test("preserves custom, branch and native summary records without deriving authority", () => {
     const messages = [{ role: "custom", content: "custom" }, { role: "branchSummary", summary: "branch" },
@@ -75,7 +81,7 @@ describe("preparation-owned typed input", () => {
     const damaged = summary.split("\n").slice(0, 5).join("\n");
     const degradedDamaged = buildCompactionSource(withPrior(damaged, { compactor: "dc-distill", summaryDigest: sha256Hex(damaged) }));
     expect(degradedDamaged.predecessor).toBeNull();
-    expect(degradedDamaged.records[0].text).toBe(damaged);
+    expect(degradedDamaged.records.at(0)?.text).toBe(damaged);
     // Old JSON formats mine nothing and degrade to attributed text.
     const legacy = JSON.stringify(document());
     const degraded = buildCompactionSource(withPrior(legacy, { compactor: "dc-distill", version: 15 }));
@@ -126,7 +132,7 @@ describe("preparation-owned typed input", () => {
     const native = buildCompactionSource(withPrior("native prose"));
     expect(native.predecessor).toBeNull();
     expect(native.records[0]).toEqual({ kind: "native-summary", text: "native prose" });
-    expect(buildCompactionSource(withPrior("foreign prose", { compactor: "other" })).records[0].text).toBe("foreign prose");
+    expect(buildCompactionSource(withPrior("foreign prose", { compactor: "other" })).records.at(0)?.text).toBe("foreign prose");
   });
   test("active old handoffs contribute nothing and never block", () => {
     for (const customType of ["dc-distill-handoff", "dc-shrink-handoff"]) {
@@ -139,11 +145,11 @@ describe("preparation-owned typed input", () => {
   test("superseded incompatible state and handoffs outside projection do not block", () => {
     const input = withPrior("native predecessor");
     const entries = input.branchEntries as unknown as Record<string, unknown>[];
-    entries[0].parentId = "old-handoff";
+    requiredAt(entries, 0).parentId = "old-handoff";
     entries.unshift({ type: "compaction", id: "old", parentId: null, timestamp: "2026-01-01", summary: "old summary",
       firstKeptEntryId: "old", tokensBefore: 1, details: { compactor: "dc-distill", version: 15 } },
       { type: "custom", id: "old-handoff", parentId: "old", timestamp: "2026-01-01", customType: "dc-distill-handoff" });
-    expect(buildCompactionSource(input).records[0].text).toBe("native predecessor");
+    expect(buildCompactionSource(input).records.at(0)?.text).toBe("native predecessor");
   });
   test("observes cancellation and the message-count guard", () => {
     const controller = new AbortController(); controller.abort();
@@ -198,7 +204,7 @@ describe("20 MiB whole-message envelope", () => {
     expect(source.records.map(record => record.text)).toEqual(["older complete"]);
     expect(source.omittedInputRecords).toBe(1);
     expect(Buffer.byteLength(JSON.stringify(source))).toBeLessThanOrEqual(MAX_INPUT_BYTES);
-    expect(buildCompactionSource(input).records[0].text).toBe("mandatory native prior");
+    expect(buildCompactionSource(input).records.at(0)?.text).toBe("mandatory native prior");
   });
   test("admits the exact byte boundary including multibyte characters", () => {
     const empty = buildCompactionSource(packet([{ role: "user", content: "" }]));
@@ -312,5 +318,27 @@ describe("bounded display text", () => {
     ]));
     for (const record of source.records) expect(record.textShortened).toBeUndefined();
     expect(encodeSummary(buildSummary(source, extractObservations(source)))).toContain("tool-call | current | full | read ");
+  });
+});
+
+describe("malformed sibling recovery", () => {
+  test("identity-free user messages with malformed text remain attributed fallback", () => {
+    const source = buildCompactionSource(packet([{ role: "user", content: [
+      { type: "text", text: "usable text" }, { type: "text", text: 42 },
+    ] }]));
+    expect(source.records[0]).toMatchObject({ kind: "custom" });
+    expect(source.records[0]).not.toHaveProperty("nativeUserText");
+  });
+  test("malformed text beside tool identity cancels rather than erasing identity", () => {
+    expect(() => buildCompactionSource(packet([{ role: "assistant", content: [
+      { type: "text", text: 42 }, { type: "toolCall", id: "identity", name: "read", arguments: { path: "x" } },
+    ] }]))).toThrow(CompactionInputError);
+    expect(() => buildCompactionSource(packet([{ role: "toolResult", toolCallId: "identity", toolName: "read", content: [
+      { type: "text", text: "usable result" }, { type: "text", text: 42 },
+    ] }]))).toThrow(CompactionInputError);
+  });
+  test("unfamiliar roles preserve attributed fallback", () => {
+    expect(buildCompactionSource(packet([{ role: "future-role", content: "future text" }])).records[0])
+      .toMatchObject({ kind: "custom", text: '{"role":"future-role","content":"future text"}' });
   });
 });

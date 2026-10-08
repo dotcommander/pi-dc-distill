@@ -2,7 +2,15 @@ import { describe, expect, test } from "bun:test";
 import { createDistillExtension, prospectiveTokenEstimator } from "./index.ts";
 import { createPreparationHarness } from "./tests/harness/fake-pi.ts";
 import { buildSessionContext, buildSessionProjection, estimateTokens, getCurrentSystemMessage } from "./lib/sdk.ts";
-import type { CompactionEntry, SessionEntry } from "./lib/sdk.ts";
+import type { CompactionEntry, SessionEntry, SessionBeforeCompactResult } from "./lib/sdk.ts";
+import type { CompactionDetails } from "./lib/compiler/types.ts";
+
+/** Validate the harness boundary before inspecting the typed compaction result. */
+function compactionResult(value: unknown): SessionBeforeCompactResult & { compaction: NonNullable<SessionBeforeCompactResult["compaction"]> & { details: CompactionDetails } } {
+  if (typeof value !== "object" || value === null || !("compaction" in value) || !value.compaction)
+    throw new Error("Expected compaction result");
+  return value as SessionBeforeCompactResult & { compaction: NonNullable<SessionBeforeCompactResult["compaction"]> & { details: CompactionDetails } };
+}
 
 /** Reference semantics: a full rebuild per estimate, exactly as the eviction loop
  *  previously did. The estimator must reproduce these numbers bit-for-bit. */
@@ -76,7 +84,7 @@ describe("prospective token estimator", () => {
 });
 
 
-function preparedHost() {
+function preparedHost(startReason = "startup") {
   const host = createPreparationHarness();
   createDistillExtension()(host.pi);
   const branch: SessionEntry[] = ["Preserve the user constraint", "continue", "retained native tail"].map((text, i) => ({
@@ -90,15 +98,21 @@ function preparedHost() {
     signal: new AbortController().signal,
     branchEntries: branch,
     preparation: {
-      messagesToSummarize: branch.slice(0, 2).map(entry => (entry as any).message),
+      messagesToSummarize: branch.slice(0, 2).flatMap(entry => entry.type === "message" ? [entry.message] : []),
       turnPrefixMessages: [], firstKeptEntryId: "prepared-2", tokensBefore: 10000,
     },
   };
-  host.emit("session_start", { reason: "startup" });
+  host.emit("session_start", { reason: startReason });
   return { host, event };
 }
 
 describe("preparation ownership and lifecycle", () => {
+  test("fresh replacement, reload and legitimate fork runtimes bind on their first start", () => {
+    for (const reason of ["new", "resume", "reload", "fork"]) {
+      const { host, event } = preparedHost(reason);
+      expect(compactionResult(host.emit("session_before_compact", event)).compaction).toBeDefined();
+    }
+  });
   test("registers only preparation/lifecycle hooks, with no success notification hooks", () => {
     const { host } = preparedHost();
     expect([...host.hooks.keys()].sort()).toEqual([
@@ -109,7 +123,7 @@ describe("preparation ownership and lifecycle", () => {
   test("intercepts missing and unfamiliar request reasons with minimal details", () => {
     const { host, event } = preparedHost();
     for (const reason of [undefined, "manual", "threshold", "future-reason"]) {
-      const result = host.emit("session_before_compact", { ...event, reason }) as any;
+      const result = compactionResult(host.emit("session_before_compact", { ...event, reason }));
       expect(result.compaction?.summary).toContain("<dc-distill-summary>");
       expect(Object.keys(result.compaction.details).sort()).toEqual([
         "capacityStatus", "compactor", "contextWindow", "summaryDigest", "tokensAfter", "tokensAfterSource",
@@ -124,17 +138,38 @@ describe("preparation ownership and lifecycle", () => {
     host.emit("session_shutdown");
     expect(host.emit("session_before_compact", event)).toEqual({ cancel: true });
     host.setSession("primary");
-    expect((host.emit("session_before_compact", event) as any).compaction).toBeDefined();
+    expect(compactionResult(host.emit("session_before_compact", event)).compaction).toBeDefined();
   });
-  test("authorized switch and fork replacement adopt the new primary", () => {
+  test("switch and fork never authorize adoption in the old runtime", () => {
     for (const [hook, reason] of [["session_before_switch", "resume"], ["session_before_fork", "fork"]]) {
       const { host, event } = preparedHost();
       host.emit(hook!);
       host.setSession("replacement");
       host.emit("session_start", { reason });
-      expect((host.emit("session_before_compact", event) as any).compaction).toBeDefined();
-      host.emit("session_shutdown");
       expect(host.emit("session_before_compact", event)).toEqual({ cancel: true });
+      host.setSession("primary");
+      expect(compactionResult(host.emit("session_before_compact", event)).compaction).toBeDefined();
+    }
+  });
+  test("shutdown closes an instance even if a later start names the former owner", () => {
+    const { host, event } = preparedHost();
+    host.emit("session_shutdown");
+    host.emit("session_start", { reason: "reload" });
+    expect(host.emit("session_before_compact", event)).toEqual({ cancel: true });
+  });
+  test("throwing model snapshots cancel and subsequent requests recover", () => {
+    for (const target of ["model", "contextWindow"]) {
+      const { host, event } = preparedHost();
+      const model = host.ctx.model;
+      const object = target === "model" ? host.ctx : model!;
+      const property = target === "model" ? "model" : "contextWindow";
+      const original = Object.getOwnPropertyDescriptor(object, property)!;
+      Object.defineProperty(object, property, { configurable: true, get() {
+        Object.defineProperty(object, property, original);
+        throw new Error("private host data");
+      } });
+      expect(host.emit("session_before_compact", event)).toEqual({ cancel: true });
+      expect(compactionResult(host.emit("session_before_compact", event)).compaction).toBeDefined();
     }
   });
   test("relevant synchronous lifecycle changes invalidate preparation", () => {
@@ -170,7 +205,7 @@ describe("preparation ownership and lifecycle", () => {
   test("unknown capacity remains explicit", () => {
     const { host, event } = preparedHost();
     host.ctx.model = undefined;
-    const result = host.emit("session_before_compact", event) as any;
+    const result = compactionResult(host.emit("session_before_compact", event));
     expect(result.compaction.details.capacityStatus).toBe("unknown");
     expect(result.compaction.details.contextWindow).toBeUndefined();
   });

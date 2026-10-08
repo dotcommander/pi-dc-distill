@@ -5,13 +5,13 @@
     "moduleResolution": "bundler",
     "allowImportingTsExtensions": true,
     "noEmit": true,
-    "strict": false,
+    "strict": true,
     "strictNullChecks": true,
     "skipLibCheck": true,
     "esModuleInterop": true,
     "isolatedModules": true,
     "lib": [
-      "ES2023",
+      "ES2024",
       "DOM"
     ],
     "types": [
@@ -21,23 +21,10 @@
     "typeRoots": [
       "./node_modules/@types"
     ],
-    "paths": {
-      "typebox": [
-        "./node_modules/typebox"
-      ],
-      "@earendil-works/pi-agent-core": [
-        "./node_modules/@earendil-works/pi-agent-core"
-      ],
-      "@earendil-works/pi-coding-agent": [
-        "./node_modules/@earendil-works/pi-coding-agent"
-      ],
-      "@earendil-works/pi-ai": [
-        "./node_modules/@earendil-works/pi-ai"
-      ],
-      "@earendil-works/pi-tui": [
-        "./node_modules/@earendil-works/pi-tui"
-      ]
-    }
+    "noUncheckedIndexedAccess": true,
+    "exactOptionalPropertyTypes": true,
+    "verbatimModuleSyntax": true,
+    "erasableSyntaxOnly": true
   },
   "include": [
     "**/*.ts"

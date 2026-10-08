@@ -1,6 +1,6 @@
 import { expect, test } from "bun:test";
 import { compileCompactionSource, decodeSummary } from "./local-compact.ts";
-import { certifyToolPairs } from "./compiler/tool-tracker.ts";
+import { certifyMessageGroups } from "./compiler/tool-certification.ts";
 import type { CompactionSource } from "./compiler/types.ts";
 
 function source(): CompactionSource {
@@ -17,17 +17,19 @@ test("typed compile returns exact current wire document deterministically", () =
 test("compiler refuses cancellation and malformed Unicode before extraction", () => {
   const controller = new AbortController(); controller.abort();
   expect(() => compileCompactionSource(source(), { signal: controller.signal })).toThrow();
-  const malformed = source(); malformed.records[0]!.text = "\ud800";
+  const malformed = source(); malformed.records = [{ kind: "user", text: "\ud800", nativeUserText: true }];
   expect(() => compileCompactionSource(malformed)).toThrow();
   expect(() => compileCompactionSource(source(), { focus: "\udfff" })).toThrow();
 });
 test("facts are extracted from full input before excerpt shortening", () => {
   const input = source();
-  input.records.push(
+  input.records = [...input.records,
     { kind: "tool-call", text: "display", name: "read", pairing: { state: "identified", id: "call" }, callId: "call", args: { path: `/long/${"x".repeat(700)}` } },
     { kind: "tool-result", text: "ok", name: "read", pairing: { state: "identified", id: "call" }, callId: "call", isError: false },
-  );
-  certifyToolPairs(input.records);
+  ];
+  const certified = certifyMessageGroups([input.records]);
+  input.records = certified.groups.flat();
+  input.duplicateCallIds = certified.duplicateCallIds;
   const result = compileCompactionSource(input);
   expect(result.document.files.read).toHaveLength(1);
   expect(result.document.files.read[0]!.path.length).toBe(512);
@@ -45,7 +47,7 @@ test("prior displays cannot produce fresh observations", () => {
 });
 test("new native requests replace prior request context without reordering carried excerpts", () => {
   const input = source();
-  input.records.push({ kind: "assistant", text: "Response to prior request" });
+  input.records = [...input.records, { kind: "assistant", text: "Response to prior request" }];
   const prior = compileCompactionSource(input).document;
   prior.omitted.excerpts = 4;
   const next = source();

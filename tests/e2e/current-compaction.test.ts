@@ -54,12 +54,12 @@ test("independent oracle accepts exact unversioned text contract", () => {
   expect(() => assertCurrentCompaction(minimal().summary, minimal().details)).not.toThrow();
 });
 for (const [name, corrupt] of [
-  ["numbered details", (d: any) => { d.version = 15; }],
-  ["retired attempt identity", (d: any) => { d.attemptId = "obsolete"; }],
-  ["checkpoint", (d: any) => { d.checkpoint = {}; }],
-  ["wrong digest", (d: any) => { d.summaryDigest = "0".repeat(64); }],
-  ["foreign owner", (d: any) => { d.compactor = "foreign"; }],
-  ["known overflow", (d: any) => { d.tokensAfter = 1001; }],
+  ["numbered details", (d: Record<string, unknown>) => { d.version = 15; }],
+  ["retired attempt identity", (d: Record<string, unknown>) => { d.attemptId = "obsolete"; }],
+  ["checkpoint", (d: Record<string, unknown>) => { d.checkpoint = {}; }],
+  ["wrong digest", (d: Record<string, unknown>) => { d.summaryDigest = "0".repeat(64); }],
+  ["foreign owner", (d: Record<string, unknown>) => { d.compactor = "foreign"; }],
+  ["known overflow", (d: Record<string, unknown>) => { d.tokensAfter = 1001; }],
 ] as const) test(`oracle rejects ${name}`, () => {
   const f = full(); corrupt(f.details); expect(() => assertCurrentCompaction(f.summary, f.details)).toThrow();
 });

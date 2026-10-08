@@ -63,7 +63,7 @@ The `omitted:` counters count candidates lost before or during selection, not fa
 
 ## Configuration and state
 
-There is no extension configuration. Pi owns compaction triggering, cut selection, and rebuilt context; the extension registers no commands or tools and reads no settings. The compiler's fixed bounds are policy, not knobs: a 20 MiB whole-record input envelope, an 8,192-code-point operating target, and a 65,536-code-point hard serialized limit. Live input comes only from `event.preparation` and the active branch entries — the extension never reads the session file.
+There is no compiler policy configuration. Pi owns compaction triggering, cut selection, and rebuilt context; the extension registers no commands or tools and reads no settings. The compiler's fixed bounds are policy, not knobs: a 20 MiB whole-record input envelope, an 8,192-code-point operating target, and a 65,536-code-point hard serialized limit. Live input comes only from `event.preparation` and the active branch entries — the extension never reads the session file.
 
 ## Verification and development
 
@@ -78,6 +78,7 @@ After implementation and semantic review, the verifier runs the gate list once:
 ```bash
 bun test
 bun x tsc --noEmit
+bun x tsc -p tsconfig.runtime.json --noEmit
 bun run distill:architecture
 git diff --check
 npm pack --dry-run --json
@@ -95,3 +96,5 @@ Repairs rerun affected gates only. The e2e suite drives an installed Pi through 
 - Existing incompatible sessions keep the old extension; never load both together.
 
 More: [documentation index](docs/index.md), [usage](docs/usage.md), [troubleshooting](docs/troubleshooting.md).
+
+Optional `DC_DISTILL_DEBUG=1` emits only fixed cancellation codes to stderr, silently by default. Known child launchers disable extensions; owned instances reject foreign sessions. Legitimate forks are supported and are not identified as children by `parentSession`. Independently launched children explicitly loading the extension need host provenance and are unsupported. See [architecture](docs/architecture.md) for lifecycle and import grammar.

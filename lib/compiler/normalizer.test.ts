@@ -13,12 +13,14 @@ describe("typed message normalization", () => {
       { type: "toolCall", id: "exact-id", name: "read_file", arguments: { file_path: path } },
     ] })[0];
     expect(record).toMatchObject({ kind: "tool-call", name: "read_file", callId: "exact-id", args: { file_path: path } });
+    if (!record) throw new Error("Missing normalized call");
     expect(record.text).toContain("😀"); // display fits: no clip, no provenance flag
     expect(record.textShortened).toBeUndefined();
     const output = "x".repeat(3000);
     const result = normalizeMessage({ role: "toolResult", toolName: "read_file", toolCallId: "exact-id", isError: false,
       content: [{ type: "text", text: output }] })[0];
     expect(result).toMatchObject({ kind: "tool-result", text: "x".repeat(2048), isError: false });
+    if (!result) throw new Error("Missing normalized result");
     expect(result.textShortened).toBe(true);
   });
   test("missing outcome is unknown and native bash retains integer exit/cancellation", () => {
@@ -33,5 +35,32 @@ describe("typed message normalization", () => {
   });
   test("retains role-specific validation without repeating source structural certification", () => {
     expect(() => normalizeMessage({ role: "assistant", content: [{ type: "toolCall", name: "bash", arguments: null }] })).toThrow("tool call");
+  });
+});
+
+describe("checked content boundary", () => {
+  test("valid user text cannot hide a malformed sibling", () => {
+    expect(() => normalizeMessage({ role: "user", content: [
+      { type: "text", text: "valid request" }, { type: "text", text: 42 },
+    ] })).toThrow("message text");
+    expect(() => normalizeMessage({ role: "toolResult", toolName: "read", content: [
+      { type: "text", text: "valid result" }, { type: "text" },
+    ] })).toThrow("message text");
+  });
+  test("thinking and opaque blocks keep existing user and assistant selection", () => {
+    expect(normalizeMessage({ role: "user", content: [
+      { type: "thinking", thinking: "private reasoning" }, { type: "opaque", data: "unknown" },
+      { type: "image", mimeType: "image/png" }, { type: "text", text: "request" },
+    ] })).toEqual([{ kind: "user", text: "request", nativeUserText: true }]);
+    expect(normalizeMessage({ role: "assistant", content: [
+      { type: "thinking", thinking: "private reasoning" }, { type: "opaque", data: "unknown" },
+      { type: "text", text: "answer" },
+    ] })).toEqual([{ kind: "assistant", text: "answer" }]);
+  });
+  test("raw normalization has no pairing claim", () => {
+    const records = normalizeMessage({ role: "assistant", content: [
+      { type: "toolCall", name: "read", arguments: { path: "file" } },
+    ] });
+    expect(records[0]).not.toHaveProperty("pairing");
   });
 });

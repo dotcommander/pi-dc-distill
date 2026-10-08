@@ -2,7 +2,7 @@
 
 Your job is to determine why a dc-distill compaction cancelled, or why a summary looks unexpected. A source, compiler, cancellation, or capacity failure cancels compaction; the extension never lets an interception failure fall through to Pi's default LLM compactor, and it never retries, aborts a run, or sends continuation messages.
 
-There is no extension diagnostic log, recall store, raw dump, replay program, or migration command. Inspect Pi's error and the native compaction card.
+Inspect Pi's error and the native compaction card. Optional `DC_DISTILL_DEBUG=1` emits fixed cancellation codes to stderr. Diagnostics include no conversation content, paths, identifiers, exception messages, or stacks, and a failed diagnostic sink cannot escape cancellation. There is no durable diagnostic log, recall store, raw dump, replay program, or migration command.
 
 ## Compaction cancels
 

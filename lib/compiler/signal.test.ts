@@ -25,3 +25,11 @@ describe("content signal rubric", () => {
     expect(errorSignal("all good")).toBe(false);
   });
 });
+
+test("modernization preserves path, numbered-heading and error signals exactly", () => {
+  expect(signalScore("lib/example.ts")).toBe(1);
+  expect(signalScore("1. first action")).toBe(2);
+  expect(signalScore("fatal failure in lib/example.ts")).toBe(5);
+  expect(excerptScore({ kind: "tool-result", text: "fatal failure in lib/example.ts" })).toBe(4);
+  expect(errorSignal("cannot open resource")).toBe(true);
+});

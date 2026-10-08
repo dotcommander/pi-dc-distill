@@ -1,6 +1,6 @@
 # Settings
 
-There is no extension configuration. Pi owns its native compaction settings, triggering, cut selection, and rebuilt context. dc-distill handles all requests Pi emits, regardless of reason. Native `/compact` instructions supply the current focus; prior focus is not carried.
+There is no compiler policy configuration. Optional `DC_DISTILL_DEBUG=1` emits fixed cancellation codes to stderr; it is silent by default and emits no success output or source content. Pi owns its native compaction settings, triggering, cut selection, and rebuilt context. dc-distill handles all requests Pi emits, regardless of reason. Native `/compact` instructions supply the current focus; prior focus is not carried.
 
 The extension reads no legacy tool-output, recall, trigger, or dump settings. It adds no timers, tools, commands, storage, or focus injection. Existing stored data is preserved and is not migrated or loaded.
 

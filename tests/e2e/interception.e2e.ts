@@ -1,14 +1,12 @@
 /** Real-host spies for native automatic interception; no autonomous cooldown wait. */
+import { readRecords as records, hostRecord, object } from "./harness/records.ts";
 import { expect, test } from "bun:test";
-import { existsSync, readFileSync } from "node:fs";
+import { existsSync } from "node:fs";
 import { join } from "node:path";
 import { RpcClient, eventsOfType } from "./harness/rpc-client.ts";
 import { assertCurrentCompaction } from "./harness/current-compaction.ts";
 import { makeTestDir, piEnv, scriptedArgs, latestSessionFile, REPO_ROOT } from "./harness/env.ts";
 
-function records(file: string): Array<Record<string, any>> {
-  return readFileSync(file, "utf8").split("\n").filter((line) => line.trim()).map((line) => JSON.parse(line));
-}
 
 for (const scenario of [
   { reason: "threshold", step: "186000", usage: 190000, retry: false },
@@ -40,7 +38,7 @@ for (const scenario of [
         expect(ends[0]?.reason).toBe(scenario.reason);
         expect(ends[0]?.aborted).toBe(false);
         expect(ends[0]?.willRetry).toBe(scenario.retry);
-        const result = ends[0]?.result as Record<string, any>;
+        const result = hostRecord(ends[0]?.result);
         expect(result.details?.compactor).toBe("dc-distill");
         assertCurrentCompaction(result.summary, result.details);
         expect(result.summary).not.toContain("FAKE-SUMMARY");
@@ -77,7 +75,7 @@ for (const scenario of [
 // Mutate the host preparation before dc-distill runs. Unlike a throwing hook,
 // this exercises dc-distill's own catch/cancel boundary rather than Pi's
 // extension-error fallback behavior.
-for (const fault of ["previous-summary", "discarded-partition", "unicode"] as const) {
+for (const fault of ["previous-summary", "discarded-partition", "unicode", "model-getter", "context-window-getter", "preparation-getter", "session-manager-getter"] as const) {
   test(`preparation fault ${fault} cancels without default summarization or success artifacts`, async () => {
     const t = makeTestDir(`preparation-${fault}`, { keepRecentTokens: 1024 });
     let passed = false;
@@ -98,7 +96,7 @@ for (const fault of ["previous-summary", "discarded-partition", "unicode"] as co
         expect(records(latestSessionFile(t)!).filter((entry) => entry.type === "compaction")).toHaveLength(0);
         expect(eventsOfType(client.events, "compaction_end").every((event) => event.aborted === true)).toBe(true);
         expect(existsSync(join(t.agentHome, "data", "dc-distill"))).toBe(false);
-        expect(client.events.some((event) => (event.message as any)?.customType === "dc-distill-continuation")).toBe(false);
+        expect(client.events.some((event) => (event.message === undefined ? undefined : object(event.message).customType) === "dc-distill-continuation")).toBe(false);
         // A cancelled attempt must still leave a usable native session.
         const since = client.mark();
         expect((await client.request({ type: "prompt", message: "Proceed with the user request after cancelled preparation." })).success).toBe(true);

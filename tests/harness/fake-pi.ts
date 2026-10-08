@@ -1,7 +1,7 @@
 /** Registration and synchronous preparation-hook harness; no fake host operations. */
 import type { ExtensionAPI, ExtensionContext, SessionEntry } from "../../lib/sdk.ts";
 
-type Hook = (event: any, ctx: ExtensionContext) => unknown;
+type Hook = (event: unknown, ctx: ExtensionContext) => unknown;
 export function createPreparationHarness() {
   const hooks = new Map<string, Hook>();
   let session = "primary";
@@ -22,6 +22,6 @@ export function createPreparationHarness() {
     pi, ctx, hooks,
     setSession(id: string) { session = id; },
     setBranch(entries: SessionEntry[]) { branch = entries; },
-    emit(name: string, event: any = {}) { return hooks.get(name)?.(event, ctx); },
+    emit(name: string, event: unknown = {}) { return hooks.get(name)?.(event, ctx); },
   };
 }

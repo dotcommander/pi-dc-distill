@@ -1,14 +1,12 @@
 /** Real installed-host lifecycle, using only the isolated local scripted provider. */
+import { readRecords as records, hostRecord, object } from "./harness/records.ts";
 import { expect, test } from "bun:test";
-import { existsSync, readFileSync, readdirSync } from "node:fs";
+import { existsSync, readdirSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { RpcClient, eventsOfType } from "./harness/rpc-client.ts";
-import { makeTestDir, piEnv, scriptedArgs, latestSessionFile, type TestDir } from "./harness/env.ts";
+import { makeTestDir, piEnv, scriptedArgs, latestSessionFile, REPO_ROOT, type TestDir } from "./harness/env.ts";
 import { assertCurrentCompaction } from "./harness/current-compaction.ts";
 
-export function records(file: string): Array<Record<string, any>> {
-  return readFileSync(file, "utf8").split("\n").filter(line => line.trim()).map(line => JSON.parse(line));
-}
 function walk(dir: string): string[] {
   return existsSync(dir) ? readdirSync(dir, { withFileTypes: true }).flatMap(entry => entry.isDirectory()
     ? walk(join(dir, entry.name)) : [join(dir, entry.name)]) : [];
@@ -18,7 +16,7 @@ export function assertNoDistillArtifacts(t: TestDir, client: RpcClient): void {
   const files = walk(t.dir);
   expect(files.filter(path => /(?:recall\.json|compact-log\.jsonl|diag\.log|(?:before|after)-dump|tool-output)/.test(path))).toEqual([]);
   expect(files.filter(path => path.includes("/data/dc-distill/"))).toEqual([]);
-  expect(client.events.some(event => (event.message as any)?.customType === "dc-distill-continuation")).toBe(false);
+  expect(client.events.some(event => (event.message === undefined ? undefined : object(event.message).customType) === "dc-distill-continuation")).toBe(false);
 }
 async function prompt(client: RpcClient, message: string): Promise<void> {
   const since = client.mark();
@@ -40,7 +38,7 @@ test("manual compaction and repeated predecessor carry use one flat current cont
       expect(response.success).toBe(true);
       const end = await client.waitFor(event => event.type === "compaction_end" && event.aborted === false,
         30000, { since });
-      const result = end.result as Record<string, any>;
+      const result = hostRecord(end.result);
       const first = assertCurrentCompaction(result.summary, result.details);
       expect(first.focus).toBe("Focus on useful excerpts 😀");
       expect(first.latestRequest?.origin).toBe("current");
@@ -50,7 +48,7 @@ test("manual compaction and repeated predecessor carry use one flat current cont
       expect(committed).toHaveLength(1);
       expect(committed[0]?.summary).toBe(result.summary);
       expect(committed[0]?.details).toEqual(result.details);
-      expect((response.data as any)?.details).toEqual(result.details);
+      expect(object(response.data).details).toEqual(result.details);
 
       for (let i = 4; i <= 6; i++) await prompt(client,
         `Request ${i}: follow the next native user instruction. ` + "new discardable context ".repeat(2000));
@@ -58,13 +56,13 @@ test("manual compaction and repeated predecessor carry use one flat current cont
       expect((await client.request({ type: "compact" })).success).toBe(true);
       const nextEnd = await client.waitFor(event => event.type === "compaction_end" && event.aborted === false,
         30000, { since: nextSince });
-      const next = nextEnd.result as Record<string, any>;
+      const next = hostRecord(nextEnd.result);
       const carried = assertCurrentCompaction(next.summary, next.details);
       expect(carried.focus).toBeNull();
       expect(carried.latestRequest?.text).toMatch(/Request [45]:/);
       expect(carried.latestRequest?.origin).toBe("current");
-      expect(carried.records.some((row: any) => row.origin === "prior")).toBe(true);
-      expect(carried.records.every((row: any) => !row.text.includes('"format":"dc-distill-summary"'))).toBe(true);
+      expect(carried.records.some((row) => row.origin === "prior")).toBe(true);
+      expect(carried.records.every((row) => !row.text.includes('"format":"dc-distill-summary"'))).toBe(true);
       expect(records(session).filter(entry => entry.type === "compaction")).toHaveLength(2);
       expect(records(t.traceFile).filter(entry => entry.kind === "summary")).toEqual([]);
       expect(records(t.traceFile)).toHaveLength(eventsOfType(client.events, "agent_start").length);
@@ -112,6 +110,7 @@ test("byte-identical abandoned sibling summary does not hide the new active comm
         activeIds.add(entry.id);
         entry = byId.get(entry.parentId);
       }
+      if (typeof current.id !== "string" || typeof abandoned.id !== "string") throw new Error("Missing compaction identity");
       expect(activeIds.has(current.id)).toBe(true);
       expect(activeIds.has(sibling)).toBe(true);
       expect(activeIds.has(abandoned.id)).toBe(false);
@@ -121,3 +120,67 @@ test("byte-identical abandoned sibling summary does not hide the new active comm
     passed = true;
   } finally { await t.finalize(passed); }
 }, 120000);
+
+// A cancelled or failed native boundary must invalidate pending preparation
+// without making the still-current runtime adopt or reject its owner.
+for (const boundary of ["cancel-switch", "cancel-fork", "failed-switch", "failed-fork", "new-parent", "fork"] as const) {
+  test(`native lifecycle ${boundary} retains usable deterministic compaction`, async () => {
+    const t = makeTestDir(`lifecycle-${boundary}`, { enabled: false, keepRecentTokens: 1024 });
+    let passed = false;
+    try {
+      const args = scriptedArgs(t, ["-e", join(REPO_ROOT, "tests/e2e/harness/lifecycle-fault.ts")]);
+      const client = new RpcClient({ args, cwd: t.dir, logFile: t.logFile, env: piEnv(t, {
+        DISTILL_FAKE_BASE: "3000", DISTILL_FAKE_STEP: "500", DISTILL_FAKE_WINDOW: "200000",
+        DISTILL_LIFECYCLE_FAULT: boundary === "cancel-switch" ? "switch" : boundary === "cancel-fork" ? "fork" : "",
+      }) });
+      try {
+        for (let i = 0; i < 3; i++) await prompt(client, `Lifecycle original turn ${i}. ` + "discardable context ".repeat(2000));
+        const original = latestSessionFile(t);
+        if (!original) throw new Error("Missing native original session");
+        const forks = object((await client.request({ type: "get_fork_messages" })).data).messages;
+        if (!Array.isArray(forks) || !forks.length) throw new Error("Missing native fork candidates");
+        const entryId = object(forks[0]).entryId;
+        if (typeof entryId !== "string") throw new Error("Missing native fork entry identity");
+        if (boundary === "cancel-switch") {
+          const response = await client.request({ type: "new_session" });
+          expect(response.success).toBe(true);
+          expect(object(response.data).cancelled).toBe(true);
+        } else if (boundary === "cancel-fork") {
+          const response = await client.request({ type: "fork", entryId });
+          expect(response.success).toBe(true);
+          expect(object(response.data).cancelled).toBe(true);
+        } else if (boundary === "failed-switch") {
+          const failedSession = join(t.dir, "invalid-cwd-session.jsonl");
+          writeFileSync(failedSession, records(original).map(entry => JSON.stringify(entry.type === "session"
+            ? { ...entry, cwd: join(t.dir, "missing-cwd") } : entry)).join("\n") + "\n");
+          expect((await client.request({ type: "switch_session", sessionPath: failedSession })).success).toBe(false);
+        } else if (boundary === "failed-fork") {
+          expect((await client.request({ type: "fork", entryId: "missing-entry" })).success).toBe(false);
+        } else {
+          const response = boundary === "new-parent"
+            ? await client.request({ type: "new_session", parentSession: original })
+            : await client.request({ type: "fork", entryId });
+          expect(response.success).toBe(true);
+          expect(object(response.data).cancelled).toBe(false);
+        }
+        for (let i = 0; i < 3; i++) await prompt(client, `Lifecycle continued turn ${i}. ` + "discardable context ".repeat(2000));
+        const since = client.mark();
+        expect((await client.request({ type: "compact" })).success).toBe(true);
+        const end = await client.waitFor(event => event.type === "compaction_end" && event.aborted === false, 30000, { since });
+        const result = hostRecord(end.result);
+        assertCurrentCompaction(result.summary, result.details);
+        expect(records(t.traceFile).filter(entry => entry.kind === "summary")).toEqual([]);
+        const journals = walk(t.sessionDir).filter(path => path.endsWith(".jsonl"));
+        const commits = journals.flatMap(records).filter(entry => entry.type === "compaction");
+        expect(commits).toHaveLength(1);
+        assertCurrentCompaction(commits[0]?.summary, commits[0]?.details);
+        if (boundary === "new-parent" || boundary === "fork") {
+          expect(journals.flatMap(records).some(entry => entry.type === "session" && entry.parentSession === original)).toBe(true);
+        }
+        await prompt(client, "Continue after lifecycle compaction.");
+        assertNoDistillArtifacts(t, client);
+      } finally { await client.close(); }
+      passed = true;
+    } finally { await t.finalize(passed); }
+  }, 120000);
+}

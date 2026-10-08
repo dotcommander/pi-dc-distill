@@ -2,7 +2,7 @@
 import { appendFileSync } from "node:fs";
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { createAssistantMessageEventStream } from "@earendil-works/pi-ai";
-import type { AssistantMessage, Context, Model, SimpleStreamOptions } from "@earendil-works/pi-ai";
+import type { Api, AssistantMessage, TranscriptContext, Model, SimpleStreamOptions } from "@earendil-works/pi-ai";
 const WINDOW = Number(process.env.DISTILL_FAKE_WINDOW ?? 200000);
 const BASE = Number(process.env.DISTILL_FAKE_BASE ?? 4000);
 const STEP = Number(process.env.DISTILL_FAKE_STEP ?? 25000);
@@ -12,7 +12,7 @@ function textOf(content: unknown): string {
   if (!Array.isArray(content)) return "";
   return content.filter(block => block?.type === "text").map(block => block.text).join("\n");
 }
-function streamScripted(model: Model<any>, context: Context, options?: SimpleStreamOptions) {
+function streamScripted(model: Model<Api>, context: TranscriptContext, options?: SimpleStreamOptions) {
   const stream = createAssistantMessageEventStream();
   const output: AssistantMessage = {
     role: "assistant", content: [], api: model.api, provider: model.provider, model: model.id,
@@ -22,7 +22,7 @@ function streamScripted(model: Model<any>, context: Context, options?: SimpleStr
   };
   setTimeout(() => {
     try {
-      const summary = /summariz|compaction summar/i.test(context.systemPrompt ?? "");
+      const summary = /summariz|compaction summar/i.test(context.messages.filter(message => message.role === "system").map(message => textOf(message.content)).join("\n"));
       const last = context.messages.at(-1);
       const lastText = textOf(last?.content);
       const carried = context.messages.some(message => textOf(message.content).startsWith(
@@ -65,5 +65,5 @@ export default function scriptedProvider(pi: ExtensionAPI): void {
   pi.registerProvider("fake", { name: "Fake scripted provider", baseUrl: "http://127.0.0.1:1/fake",
     apiKey: "fake-key", api: "openai-completions", models: [{ id: "scripted", name: "Scripted fake model",
       reasoning: false, input: ["text"], cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
-      contextWindow: WINDOW, maxTokens: 8192 }], streamSimple: streamScripted as any });
+      contextWindow: WINDOW, maxTokens: 8192 }], streamSimple: streamScripted });
 }

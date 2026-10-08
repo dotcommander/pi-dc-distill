@@ -1,13 +1,17 @@
+import { decodeMessage } from "./message-decoder.ts";
 import { CompactionInputError } from "./errors.ts";
 import { isRecord, MAX_TEXT_CODE_POINTS, shorten } from "./helpers.ts";
-import type { NormalizedRecord } from "./types.ts";
+import type { RawNormalizedRecord } from "./types.ts";
 
 function textContent(content: unknown): string {
   if (typeof content === "string") return content;
   if (!Array.isArray(content)) return "";
   return content.flatMap(block => {
     if (!isRecord(block)) throw new CompactionInputError("invalid message content block");
-    if (block.type === "text" && typeof block.text === "string") return [block.text];
+    if (block.type === "text") {
+      if (typeof block.text !== "string") throw new CompactionInputError("invalid message text");
+      return [block.text];
+    }
     if (block.type === "image") return [`[image${typeof block.mimeType === "string" ? `: ${block.mimeType}` : ""}]`];
     return [];
   }).join("\n");
@@ -20,7 +24,8 @@ function toolId(value: unknown): string | undefined {
 }
 
 /** Keep full tool identities and output until facts have been extracted. */
-export function normalizeMessage(message: Record<string, unknown>): NormalizedRecord[] {
+export function normalizeMessage(value: unknown): RawNormalizedRecord[] {
+  const message = decodeMessage(value);
   switch (message.role) {
     case "system": return [];
     case "user": {
@@ -33,7 +38,7 @@ export function normalizeMessage(message: Record<string, unknown>): NormalizedRe
     case "assistant": {
       if (typeof message.content === "string") return [{ kind: "assistant", text: message.content }];
       if (!Array.isArray(message.content)) throw new CompactionInputError("invalid assistant content");
-      return message.content.flatMap((block): NormalizedRecord[] => {
+      return message.content.flatMap((block): RawNormalizedRecord[] => {
         if (!isRecord(block)) throw new CompactionInputError("invalid assistant block");
         if (block.type === "text") {
           if (typeof block.text !== "string") throw new CompactionInputError("invalid assistant text");
@@ -47,7 +52,7 @@ export function normalizeMessage(message: Record<string, unknown>): NormalizedRe
         const callId = toolId(block.id);
         const callText = shorten(`${block.name} ${JSON.stringify(block.arguments)}`, MAX_TEXT_CODE_POINTS);
         return [{ kind: "tool-call", text: callText.text, textShortened: callText.shortened || undefined,
-          name: block.name, callId, pairing: callId === undefined ? { state: "unpairable" } : { state: "identified", id: callId }, args: block.arguments }];
+          name: block.name, callId, args: block.arguments }];
       });
     }
     case "toolResult": {
@@ -55,7 +60,7 @@ export function normalizeMessage(message: Record<string, unknown>): NormalizedRe
       const callId = toolId(message.toolCallId);
       const resultText = shorten(textContent(message.content), MAX_TEXT_CODE_POINTS);
       return [{ kind: "tool-result", text: resultText.text, textShortened: resultText.shortened || undefined, name: message.toolName,
-        callId, pairing: callId === undefined ? { state: "unpairable" } : { state: "identified", id: callId },
+        callId,
         isError: typeof message.isError === "boolean" ? message.isError : undefined }];
     }
     case "bashExecution": {

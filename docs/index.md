@@ -15,7 +15,7 @@ You are setting up or operating dc-distill, the deterministic context-compaction
 | --- | --- |
 | Install, run `/compact`, and read the summary card | [usage](usage.md) |
 | Diagnose a cancelled compaction | [troubleshooting](troubleshooting.md) |
-| Check whether anything can be configured | [settings](settings.md) — there is nothing to configure |
+| Check whether anything can be configured | [settings](settings.md) — fixed compiler policy and optional cancellation diagnostics |
 | Understand excerpt selection, fact pairing, identities, and budgets | [algorithm](algorithm.md) |
 | Understand modules, host lifecycle, capacity retry, and preparation ownership | [architecture](architecture.md) |
 | Verify behavior on an installed Pi host | [runtime acceptance](../tests/e2e/README.md) |
