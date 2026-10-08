@@ -55,7 +55,9 @@ test("new native requests replace prior request context without reordering carri
   next.records = [{ kind: "user", text: "Next request", nativeUserText: true }, { kind: "assistant", text: "Next response" }];
   const result = compileCompactionSource(next);
   expect(result.document.latestRequest?.text).toBe("Next request");
+  expect(result.document.latestRequest?.afterRecords).toBe(2);
   expect(result.document.records.map(row => [row.kind, row.text, row.origin])).toEqual([
+    ["user", "Please inspect", "prior"],
     ["assistant", "Response to prior request", "prior"],
     ["assistant", "Next response", "current"],
   ]);

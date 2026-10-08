@@ -1,6 +1,6 @@
 export const SUMMARY_FORMAT = "dc-distill-summary" as const;
 export const SUMMARY_NOTICE = "Selected conversation excerpts and observations; incomplete." as const;
-export const SUMMARY_COLUMNS = "columns: records=kind|origin|cut|text ; files=section id|origin|cut|create|path ; commands=cmd id|origin|cut|runner|status|cwd|command|result" as const;
+export const SUMMARY_COLUMNS = "columns: records=kind|origin|cut|text ; files=section id|origin|cut|create|path ; commands=cmd id|origin|cut|runner|status|cwd|command|result ; current=selected input, prior=carried context; full/cut=no known text clipping/clipped; create=yes means capable, not created; command id=runner/command/cwd tuple, not execution; cwd: leading = marks recorded text; none means unrecorded; observations are not present truth, readiness, verification or authorization; omissions=count dropped candidates, not text cuts; 9007199254740991 means at least that many; request after=N counts preceding retained records; text uses literal backslash escapes" as const;
 export const MAX_INPUT_BYTES = 20 * 1024 * 1024;
 export const MAX_SOURCE_MESSAGES = 50_000;
 export const MAX_STRUCTURED_SUMMARY_CODE_POINTS = 65_536;

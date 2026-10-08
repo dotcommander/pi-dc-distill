@@ -55,7 +55,8 @@
     "typecheck": "tsc --noEmit",
     "prepublishOnly": "bun run test && bun run typecheck",
     "distill:e2e": "bun test ./tests/e2e/lifecycle.e2e.ts ./tests/e2e/interception.e2e.ts",
-    "distill:architecture": "bun scripts/check-architecture.ts"
+    "distill:architecture": "bun scripts/check-architecture.ts",
+    "distill:session": "bun scripts/compact-session.ts"
   },
   "peerDependencies": {
     "@earendil-works/pi-coding-agent": "*",

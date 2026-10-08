@@ -4,7 +4,7 @@ import { buildSummary, decodeSummary, encodeSummary, evictOldestOptional } from 
 import { extractObservations } from "./tool-tracker.ts";
 import { emptyOmissions, SUMMARY_COLUMNS, SUMMARY_FORMAT, SUMMARY_NOTICE, TARGET_RESUME_SUMMARY_CODE_POINTS } from "./helpers.ts";
 import { codePointLength } from "../unicode.ts";
-import type { CompactionSource, DcDistillSummary, ObservationFacts } from "./types.ts";
+import type { CompactionSource, DcDistillSummary, ObservationFacts, SummaryRecord } from "./types.ts";
 
 const source = (): CompactionSource => ({ records: [], predecessor: null, duplicateCallIds: [], omittedInputRecords: 0, session: { cwd: "/project" } });
 const facts = (): ObservationFacts => ({ files: { read: [], modified: [] }, commands: [] });
@@ -29,13 +29,13 @@ describe("one current summary codec", () => {
   });
   test("canonical field order and escaping round-trip", () => {
     const value = document();
-    value.latestRequest = { origin: "current", shortened: false, text: "a | b \\ c\nd | e" };
+    value.latestRequest = { origin: "current", shortened: false, text: "a | b \\ c\nd | e", afterRecords: 0 };
     value.records = [{ kind: "tool-result", text: "\\n\\|\\", shortened: true, origin: "prior" }];
-    const alternative = { ...value, latestRequest: { text: "a | b \\ c\nd | e", shortened: false, origin: "current" as const } };
+    const alternative = { ...value, latestRequest: { text: "a | b \\ c\nd | e", shortened: false, origin: "current" as const, afterRecords: 0 } };
     expect(encodeSummary(value)).toBe(encodeSummary(alternative));
     expect(decodeSummary(encodeSummary(value))).toEqual(value);
     expect(() => decodeSummary(encodeSummary(value).replace("a \\|", "a \\q"))).toThrow();
-    expect(encodeSummary(value)).toContain(`latest-request: current full "a \\| b \\\\ c\\nd \\| e"`);
+    expect(encodeSummary(value)).toContain(`latest-request: current full after=0 "a \\| b \\\\ c\\nd \\| e"`);
   });
 
 });
@@ -49,14 +49,28 @@ describe("serialized selection and carry", () => {
       { kind: "user", text: "latest request", nativeUserText: true },
     ];
     const selected = buildSummary(input, facts(), { focus: "native focus" });
-    expect(selected.latestRequest).toEqual({ text: "latest request", shortened: false, origin: "current" });
+    expect(selected.latestRequest).toEqual({ text: "latest request", shortened: false, origin: "current", afterRecords: 2 });
     expect(selected.records.map(row => row.text)).toEqual(["older request", "response"]);
-    expect(selected.focus).toBe("native focus");
+    expect(selected.focus).toEqual({ text: "native focus", shortened: false });
     expect(buildSummary(input, facts())).toEqual(buildSummary(input, facts()));
+  });
+  test("native cut flags survive request selection, excerpt admission, and predecessor carry", () => {
+    const input = source();
+    input.records = [
+      { kind: "user", text: "older clipped request", nativeUserText: true, textShortened: true },
+      { kind: "user", text: "newest clipped request", nativeUserText: true, textShortened: true },
+    ];
+    const selected = buildSummary(input, facts());
+    expect(selected.latestRequest).toEqual({ text: "newest clipped request", shortened: true, origin: "current", afterRecords: 1 });
+    expect(selected.records).toEqual([{ kind: "user", text: "older clipped request", shortened: true, origin: "current" }]);
+    const next = source(); next.predecessor = decodeSummary(encodeSummary(selected));
+    const carried = buildSummary(next, facts());
+    expect(carried.latestRequest).toEqual({ ...selected.latestRequest!, origin: "prior" });
+    expect(carried.records).toEqual([{ ...selected.records[0]!, origin: "prior" }]);
   });
   test("shortening preserves Unicode and budgets count escaping", () => {
     const input = source();
-    input.records = Array.from({ length: 12 }, (_, index) => ({ kind: "assistant" as const, text: `${index}${"\u0000".repeat(2047)}` }));
+    input.records = Array.from({ length: 12 }, (_, index) => ({ kind: "assistant" as const, text: `${index}${"|".repeat(2047)}` }));
     input.records = [...input.records, { kind: "user", text: "😀".repeat(3000), nativeUserText: true }];
     const selected = buildSummary(input, facts());
     expect(codePointLength(selected.latestRequest!.text)).toBe(2048);
@@ -155,11 +169,16 @@ describe("serialized selection and carry", () => {
   });
   test("newest fitting excerpts survive; skipped rows count exactly once", () => {
     const input = source();
-    input.records = [{ kind: "assistant", text: "old" }, { kind: "assistant", text: "\u0000".repeat(2048) }, { kind: "assistant", text: "new" }];
+    input.records = [{ kind: "assistant", text: "old" }, { kind: "assistant", text: "😀".repeat(2048) }, { kind: "assistant", text: "new" }];
     input.omittedInputRecords = 4;
     const selected = buildSummary(input, facts());
-    expect(selected.records.map(row => row.text)).toEqual(["old", "\u0000".repeat(2048), "new"]);
+    expect(selected.records.map(row => row.text)).toEqual(["old", "😀".repeat(2048), "new"]);
     expect(selected.omitted).toEqual({ inputRecords: 4, excerpts: 0, readFiles: 0, modifiedFiles: 0, commands: 0 });
+    input.records = [{ kind: "assistant", text: "old" }, { kind: "assistant", text: "\u0000".repeat(2048) }, { kind: "assistant", text: "new" }];
+    const controlHeavy = buildSummary(input, facts());
+    expect(controlHeavy.records.map(row => row.text)).toEqual(["old", "new"]);
+    expect(controlHeavy.omitted).toEqual({ inputRecords: 4, excerpts: 1, readFiles: 0, modifiedFiles: 0, commands: 0 });
+    expect(decodeSummary(encodeSummary(controlHeavy))).toEqual(controlHeavy);
   });
   test("facts share a bounded serialized allowance and omission totals", () => {
     const observed = facts();
@@ -199,12 +218,13 @@ describe("serialized selection and carry", () => {
   });
   test("replacing the latest request preserves excerpt chronology without an omission", () => {
     const input = source(); input.predecessor = document();
-    input.predecessor.latestRequest = { text: "old request", shortened: false, origin: "current" };
+    input.predecessor.latestRequest = { text: "old request", shortened: false, origin: "current", afterRecords: 0 };
     input.predecessor.records = [{ kind: "assistant", text: "old response", shortened: false, origin: "current" }];
     input.predecessor.omitted.excerpts = 2;
     input.records = [{ kind: "assistant", text: "later response" }, { kind: "user", text: "new request", nativeUserText: true }];
     const selected = buildSummary(input, facts());
     expect(selected.records).toEqual([
+      { text: "old request", shortened: false, origin: "prior", kind: "user" },
       { text: "old response", shortened: false, origin: "prior", kind: "assistant" },
       { text: "later response", shortened: false, origin: "current", kind: "assistant" },
     ]);
@@ -228,14 +248,13 @@ describe("serialized selection and carry", () => {
     expect(value.omitted.modifiedFiles).toBe(1);
   });
   test("mandatory escaped content may exceed the operating target without truncation", () => {
-    // Field bounds cap mandatory content below the hard limit today; even its
-    // most expensive escaping remains complete when it exceeds the soft target.
+    // Mandatory pipe escapes remain complete even above the soft target.
     const input = source(); input.records = [{ kind: "user", nativeUserText: true, text: "|".repeat(2048) }];
     const selected = buildSummary(input, facts(), { focus: "|".repeat(2048) });
     expect(codePointLength(encodeSummary(selected))).toBeGreaterThan(8192);
     expect(codePointLength(encodeSummary(selected))).toBeLessThanOrEqual(65536);
     expect(selected.latestRequest?.text).toBe("|".repeat(2048));
-    expect(selected.focus).toBe("|".repeat(2048));
+    expect(selected.focus).toEqual({ text: "|".repeat(2048), shortened: false });
   });
 });
   test("foreign tool results keep their own rows", () => {
@@ -353,7 +372,7 @@ test("user excerpts claim admission newest first, including image placeholders",
 
 test("capacity eviction exhausts other optional rows before user excerpts", () => {
   const value = document();
-  value.latestRequest = { text: "continue", shortened: false, origin: "current" };
+  value.latestRequest = { text: "continue", shortened: false, origin: "current", afterRecords: 0 };
   value.records = [
     { kind: "user", text: "old constraint", shortened: false, origin: "prior" },
     { kind: "assistant", text: "ok", shortened: false, origin: "current" },
@@ -379,20 +398,30 @@ test("capacity eviction exhausts other optional rows before user excerpts", () =
   expect(value.latestRequest?.text).toBe("continue");
 });
 
-test("incremental fact admission matches full serialization across escaping and counter digits", () => {
+test("incremental admissions match complete trial serialization across escaping, Unicode, and counter digits", () => {
   // Independent cost oracle: serialize every complete trial and count the
   // actual fact lines, rather than deriving incremental costs or digit deltas.
   for (const carried of [0, 9, 99, Number.MAX_SAFE_INTEGER - 1]) {
     for (const focus of [null, "|".repeat(1500)]) {
       const input = source(); input.predecessor = document();
-      input.predecessor.omitted = { inputRecords: 0, excerpts: 0, readFiles: carried, modifiedFiles: carried, commands: carried };
+      input.predecessor.omitted = { inputRecords: 0, excerpts: carried, readFiles: carried, modifiedFiles: carried, commands: carried };
       input.records = [{ kind: "user", text: "|".repeat(2048), nativeUserText: true }];
       const observed = facts();
       observed.files.read = Array.from({ length: 12 }, (_, index) => ({ ...file(index), path: `read${index} 😀 | \\ ` + "x".repeat(index * 5) }));
       observed.files.modified = Array.from({ length: 12 }, (_, index) => ({ ...file(index + 20), path: `modified${index} | ` + "y".repeat(index * 8) }));
       observed.commands = Array.from({ length: 12 }, (_, index) => ({ identityDigest: "a".repeat(22), runner: "bash", command: `echo ${index} | 😀`, cwd: "x|y", status: "unknown" as const, result: "\n", shortened: false, origin: "current" as const }));
       observed.commands[11] = { ...observed.commands[11]!, runner: "|".repeat(128), command: "|".repeat(512), cwd: "|".repeat(512), result: "|".repeat(300) };
-      const expected = buildSummary(input, facts(), { focus });
+      const excerpts: (SummaryRecord & { kind: "user" | "assistant" })[] = Array.from({ length: 24 }, (_, index) => ({
+        kind: index < 12 ? "user" : "assistant", origin: "current", shortened: false,
+        text: `${index}\n` + (index < 12 ? "😀|\\\r\n".repeat(200) : "diff --git a/a b/b\n" + "x".repeat(1800)),
+      }));
+      const request = input.records[0]!;
+      input.records = [...excerpts.map(({ kind, text }) => ({ kind, text })), request];
+      const expected = document();
+      expected.focus = focus === null ? null : { text: focus, shortened: false };
+      expected.latestRequest = { text: request.text, origin: "current", shortened: false, afterRecords: 0 };
+      expected.omitted = { ...input.predecessor.omitted };
+      expected.omitted.excerpts = Math.min(Number.MAX_SAFE_INTEGER, carried + excerpts.length);
       const count = (category: "readFiles" | "modifiedFiles" | "commands", total: number, admitted: number) => {
         expected.omitted[category] = Math.min(Number.MAX_SAFE_INTEGER, carried + (total - admitted));
       };
@@ -414,12 +443,29 @@ test("incremental fact admission matches full serialization across escaping and 
           }
         }
       }
+      // All conversations are substantive. Independently apply user-first,
+      // then conversational recency, encoding each complete trial.
+      const admitted = new Set<number>();
+      const priority = [...Array.from({ length: 12 }, (_, i) => 11 - i), ...Array.from({ length: 12 }, (_, i) => 23 - i)];
+      for (const index of priority) {
+        admitted.add(index);
+        expected.records = excerpts.filter((_, i) => admitted.has(i));
+        expected.latestRequest!.afterRecords = expected.records.length;
+        expected.omitted.excerpts = Math.min(Number.MAX_SAFE_INTEGER, carried + (excerpts.length - admitted.size));
+        if (codePointLength(encodeSummary(expected)) > limit) {
+          admitted.delete(index);
+          expected.records = excerpts.filter((_, i) => admitted.has(i));
+          expected.latestRequest!.afterRecords = expected.records.length;
+          expected.omitted.excerpts = Math.min(Number.MAX_SAFE_INTEGER, carried + (excerpts.length - admitted.size));
+        }
+      }
       const selected = buildSummary(input, observed, { focus });
       expect(selected).toEqual(expected);
+      expect(encodeSummary(selected)).toContain(`omitted: input=0 excerpts=${selected.omitted.excerpts} reads=${selected.omitted.readFiles} modified=${selected.omitted.modifiedFiles} commands=${selected.omitted.commands}`);
       expect(selected.commands.some(row => row.command === "|".repeat(512))).toBe(false);
-      expect(selected.commands.length).toBeGreaterThan(0);
-      expect(selected.files.modified.at(-1)?.path).toBe(observed.files.modified.at(-1)?.path);
-      expect(selected.files.read.at(-1)?.path).toBe(observed.files.read.at(-1)?.path);
+      expect(selected.commands).toHaveLength(expected.commands.length);
+      expect(selected.files.modified.at(-1)?.path).toBe(expected.files.modified.at(-1)?.path);
+      expect(selected.files.read.at(-1)?.path).toBe(expected.files.read.at(-1)?.path);
       expect(decodeSummary(encodeSummary(selected))).toEqual(selected);
     }
   }
@@ -430,3 +476,234 @@ function certify(input: CompactionSource): void {
   input.records = certified.groups.flat();
   input.duplicateCallIds = certified.duplicateCallIds;
 }
+
+describe("request position and native focus", () => {
+  test("guard-only request survives continue once, with cut provenance and identical requests distinct", () => {
+    const first = source();
+    first.records = [{ kind: "user", text: "guard", nativeUserText: true, textShortened: true }];
+    let prior = buildSummary(first, facts());
+    for (const request of ["continue", "continue"]) {
+      const next = source(); next.predecessor = decodeSummary(encodeSummary(prior));
+      next.records = [{ kind: "user", text: request, nativeUserText: true }];
+      prior = buildSummary(next, facts());
+    }
+    expect(prior.records).toEqual([
+      { kind: "user", text: "guard", shortened: true, origin: "prior" },
+      { kind: "user", text: "continue", shortened: false, origin: "prior" },
+    ]);
+    expect(prior.latestRequest).toEqual({ text: "continue", shortened: false, origin: "current", afterRecords: 2 });
+    expect(prior.omitted.excerpts).toBe(0);
+  });
+  test("middle request retains chronology over carry and eviction on either side", () => {
+    const input = source(); input.records = [
+      { kind: "assistant", text: "before" },
+      { kind: "user", text: "guard", nativeUserText: true },
+      { kind: "assistant", text: "after" },
+    ];
+    const first = buildSummary(input, facts());
+    expect(first.latestRequest?.afterRecords).toBe(1);
+    const carry = source(); carry.predecessor = first;
+    const retained = buildSummary(carry, facts());
+    expect(retained.latestRequest).toEqual({ ...first.latestRequest!, origin: "prior" });
+    expect(evictOldestOptional(retained)).toBe(true);
+    expect(retained.latestRequest?.afterRecords).toBe(0);
+    expect(evictOldestOptional(retained)).toBe(true);
+    expect(retained.latestRequest?.afterRecords).toBe(0);
+    const next = source(); next.predecessor = first;
+    next.records = [{ kind: "user", text: "continue", nativeUserText: true }, { kind: "assistant", text: "new after" }];
+    const second = buildSummary(next, facts());
+    expect(second.records.map(row => row.text)).toEqual(["before", "guard", "after", "new after"]);
+    expect(second.latestRequest?.afterRecords).toBe(3);
+    const thirdInput = source(); thirdInput.predecessor = second;
+    thirdInput.records = [{ kind: "user", text: "next", nativeUserText: true }];
+    expect(buildSummary(thirdInput, facts()).records.map(row => row.text)).toEqual(["before", "guard", "after", "continue", "new after"]);
+  });
+  test("dropped displaced request increments excerpts once and never reappears", () => {
+    const input = source(); input.predecessor = document();
+    input.predecessor.latestRequest = { text: "|".repeat(2048), origin: "current", shortened: true, afterRecords: 0 };
+    input.records = [
+      { kind: "user", text: "|".repeat(2048), nativeUserText: false },
+      { kind: "user", text: "|".repeat(2048), nativeUserText: true },
+    ];
+    const first = buildSummary(input, facts());
+    expect(first.omitted.excerpts).toBe(2);
+    const next = source(); next.predecessor = first;
+    expect(buildSummary(next, facts()).omitted.excerpts).toBe(2);
+  });
+  test("no-native carry remaps a middle request under pressure and counts drops only once", () => {
+    const predecessor = document();
+    const texts = [
+      "old0" + "|".repeat(2044), "old1" + "|".repeat(2044),
+      "before small", "before medium " + "x".repeat(1900),
+      "after small", "after medium " + "x".repeat(1900),
+    ];
+    predecessor.records = texts.map(text => ({ kind: "user", text, shortened: false, origin: "current" }));
+    predecessor.latestRequest = { text: "guard", shortened: true, origin: "current", afterRecords: 4 };
+    predecessor.omitted = { inputRecords: 3, excerpts: 7, readFiles: 2, modifiedFiles: 1, commands: 4 };
+    const input = source(); input.predecessor = decodeSummary(encodeSummary(predecessor));
+
+    // Independently decide each admission by serializing the entire valid trial
+    // document, including its remapped request position and omission counters.
+    const expected = document();
+    expected.latestRequest = { ...predecessor.latestRequest, origin: "prior", afterRecords: 0 };
+    expected.omitted = { ...predecessor.omitted };
+    const admitted = new Set<number>();
+    const updateTrial = () => {
+      expected.records = predecessor.records.filter((_, index) => admitted.has(index)).map(row => ({ ...row, origin: "prior" }));
+      expected.latestRequest!.afterRecords = [...admitted].filter(index => index < predecessor.latestRequest!.afterRecords).length;
+      expected.omitted.excerpts = predecessor.omitted.excerpts + texts.length - admitted.size;
+    };
+    for (let index = texts.length - 1; index >= 0; index--) {
+      admitted.add(index); updateTrial();
+      if (codePointLength(encodeSummary(expected)) > TARGET_RESUME_SUMMARY_CODE_POINTS) {
+        admitted.delete(index); updateTrial();
+      }
+    }
+    const selected = buildSummary(input, facts());
+    expect(selected).toEqual(expected);
+    expect(selected.records.map(row => row.text)).toEqual(texts.slice(2));
+    expect(selected.latestRequest).toEqual({ text: "guard", shortened: true, origin: "prior", afterRecords: 2 });
+    expect(selected.records.some(row => row.text === "guard")).toBe(false);
+    expect(selected.omitted).toEqual({ ...predecessor.omitted, excerpts: 9 });
+
+    const carry = source(); carry.predecessor = decodeSummary(encodeSummary(selected));
+    expect(buildSummary(carry, facts())).toEqual(selected);
+    carry.records = [{ kind: "user", text: "continue", nativeUserText: true }];
+    const displaced = buildSummary(carry, facts());
+    expect(displaced.records).toEqual([
+      ...selected.records.slice(0, 2),
+      { kind: "user", text: "guard", shortened: true, origin: "prior" },
+      ...selected.records.slice(2),
+    ]);
+    expect(displaced.latestRequest).toEqual({ text: "continue", shortened: false, origin: "current", afterRecords: 5 });
+    expect(displaced.omitted).toEqual(selected.omitted);
+  });
+  test("native focus preserves the 2048 versus 2049 astral cut boundary and is never carried", () => {
+    for (const count of [2048, 2049]) {
+      const selected = buildSummary(source(), facts(), { focus: "😀".repeat(count) });
+      expect(selected.focus).toEqual({ text: "😀".repeat(2048), shortened: count === 2049 });
+      expect(decodeSummary(encodeSummary(selected))).toEqual(selected);
+      const next = source(); next.predecessor = selected;
+      expect(buildSummary(next, facts()).focus).toBeNull();
+    }
+  });
+  test("complete-document oracle covers anchor widths, omission saturation and selection on both sides", () => {
+    for (const size of [10, 100, 140]) for (const anchor of [9, 10, 99, 100]) {
+      if (anchor > size) continue;
+      const input = source(); input.predecessor = document();
+      const rows = Array.from({ length: size }, (_, index) => ({ kind: "user" as const, origin: "current" as const, shortened: false, text: `${index} 😀|\\\n` + (size === 140 ? "|".repeat(40) : "") } satisfies SummaryRecord));
+      input.records = [...rows.slice(0, anchor).map(row => ({ kind: row.kind, text: row.text })),
+        { kind: "user", text: "request", nativeUserText: true },
+        ...rows.slice(anchor).map(row => ({ kind: row.kind, text: row.text }))];
+      input.predecessor.omitted.excerpts = Number.MAX_SAFE_INTEGER;
+      const expected = document();
+      expected.latestRequest = { text: "request", shortened: false, origin: "current", afterRecords: 0 };
+      expected.omitted.excerpts = Number.MAX_SAFE_INTEGER;
+      const admitted = new Set<number>();
+      for (let index = size - 1; index >= 0; index--) {
+        admitted.add(index);
+        expected.records = rows.filter((_, i) => admitted.has(i));
+        expected.latestRequest.afterRecords = [...admitted].filter(i => i < anchor).length;
+        if (codePointLength(encodeSummary(expected)) > 8192) {
+          admitted.delete(index);
+          expected.records = rows.filter((_, i) => admitted.has(i));
+          expected.latestRequest.afterRecords = [...admitted].filter(i => i < anchor).length;
+        }
+      }
+      expect(buildSummary(input, facts())).toEqual(expected);
+    }
+  });
+});
+
+
+test("complete-document oracle favors recent conversational context over scripts", () => {
+  const input = source();
+  const rows = [
+    ...Array.from({ length: 5 }, (_, index) => ({ kind: "assistant" as const, text: `old script ${index}\n\`\`\`ts\n` + "x".repeat(1860), shortened: false, origin: "current" as const })),
+    { kind: "tool-result", text: "error: operational script\n" + "x".repeat(1860), shortened: false, origin: "current" },
+    { kind: "native-summary", text: "Earlier context remains attributed. " + "x".repeat(1860), shortened: false, origin: "current" },
+    { kind: "assistant", text: "error: recent root cause remains unresolved. " + "x".repeat(1860), shortened: false, origin: "current" },
+    { kind: "user", text: "Retain this guard. " + "x".repeat(1860), shortened: false, origin: "current" },
+  ] satisfies SummaryRecord[];
+  input.records = [...rows.map(row => row.kind === "tool-result"
+    ? { kind: "tool-result" as const, name: "bash", pairing: { state: "unpairable" as const }, text: row.text }
+    : { kind: row.kind, text: row.text }),
+    { kind: "user", text: "continue", nativeUserText: true }];
+  const expected = document();
+  expected.latestRequest = { text: "continue", shortened: false, origin: "current", afterRecords: 0 };
+  expected.omitted.excerpts = rows.length;
+  const admitted = new Set<number>();
+  // User, newest substantive conversations, then the operational error.
+  for (const index of [8, 7, 6, 4, 3, 2, 1, 0, 5]) {
+    admitted.add(index);
+    expected.records = rows.filter((_, i) => admitted.has(i));
+    expected.latestRequest.afterRecords = expected.records.length;
+    expected.omitted.excerpts = rows.length - admitted.size;
+    if (codePointLength(encodeSummary(expected)) > 8192) {
+      admitted.delete(index);
+      expected.records = rows.filter((_, i) => admitted.has(i));
+      expected.latestRequest.afterRecords = expected.records.length;
+      expected.omitted.excerpts = rows.length - admitted.size;
+    }
+  }
+  const actual = buildSummary(input, facts());
+  expect(actual).toEqual(expected);
+  expect(actual.records.some(row => row.text.startsWith("error: recent root cause"))).toBe(true);
+  expect(actual.records.some(row => row.kind === "native-summary")).toBe(true);
+  expect(actual.records.some(row => row.text.startsWith("old script"))).toBe(false);
+  expect(decodeSummary(encodeSummary(actual))).toEqual(actual);
+});
+
+test("capacity eviction removes operational rows before conversations and preserves anchors", () => {
+  const value = document();
+  value.records = [
+    { kind: "assistant", text: "```ts\nold script\n```", shortened: false, origin: "prior" },
+    { kind: "tool-result", text: "error: failed script", shortened: false, origin: "current" },
+    { kind: "assistant", text: "error: recent root cause", shortened: false, origin: "current" },
+    { kind: "bash", text: "ordinary script output", shortened: false, origin: "current" },
+    { kind: "user", text: "guard", shortened: false, origin: "prior" },
+  ];
+  value.latestRequest = { text: "continue", shortened: false, origin: "current", afterRecords: 3 };
+  expect(evictOldestOptional(value)).toBe(true);
+  expect(value.records.some(row => row.kind === "bash")).toBe(false);
+  expect(value.latestRequest.afterRecords).toBe(3);
+  expect(evictOldestOptional(value)).toBe(true);
+  expect(value.records.some(row => row.kind === "tool-result")).toBe(false);
+  expect(value.latestRequest.afterRecords).toBe(2);
+  expect(evictOldestOptional(value)).toBe(true);
+  expect(value.records.map(row => row.text)).toEqual(["error: recent root cause", "guard"]);
+  expect(value.latestRequest.afterRecords).toBe(1);
+  expect(value.omitted.excerpts).toBe(3);
+});
+
+test("selected request spans carry unchanged and displacement preserves cumulative cuts", () => {
+  const input = source();
+  input.records = [{ kind: "user", nativeUserText: true, text: "Inventory detail. ".repeat(200) + "Which value remains unknown?", textShortened: true }];
+  const first = buildSummary(input, facts());
+  expect(first.latestRequest!.text).toContain("Which value remains unknown?");
+  const carry = source(); carry.predecessor = decodeSummary(encodeSummary(first));
+  const second = buildSummary(carry, facts());
+  expect(second.latestRequest).toEqual({ ...first.latestRequest!, origin: "prior" });
+  carry.predecessor = second;
+  carry.records = [{ kind: "user", text: "continue", nativeUserText: true }];
+  const third = buildSummary(carry, facts());
+  expect(third.records).toEqual([{ kind: "user", text: first.latestRequest!.text, shortened: true, origin: "prior" }]);
+  expect(third.latestRequest!.afterRecords).toBe(1);
+  expect(third.omitted.excerpts).toBe(0);
+});
+
+
+test("opaque summaries preserve physical prefix and attribution rather than interior corrections", () => {
+  for (const kind of ["native-summary", "branch-summary"] as const) {
+    const input = source();
+    const text = "user: earlier rationale\n" + "Original attributed context. ".repeat(120) +
+      "\nassistant: the earlier attribution was incorrect; the later correction belongs to another source.";
+    input.records = [{ kind, text }, { kind: "user", text: "continue", nativeUserText: true }];
+    const value = buildSummary(input, facts());
+    expect(value.records).toEqual([{ kind, text: Array.from(text).slice(0, 2048).join(""), shortened: true, origin: "current" }]);
+    expect(value.records[0]!.text.startsWith("user: earlier rationale")).toBe(true);
+    expect(value.records[0]!.text).not.toContain("later correction");
+    expect(value.latestRequest!.text).toBe("continue");
+    expect(value.files).toEqual({ read: [], modified: [] }); expect(value.commands).toEqual([]);
+  }
+});

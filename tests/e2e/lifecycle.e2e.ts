@@ -25,14 +25,16 @@ async function prompt(client: RpcClient, message: string): Promise<void> {
 }
 
 test("manual compaction and repeated predecessor carry use one flat current contract", async () => {
-  const t = makeTestDir("manual", { keepRecentTokens: 1024 });
+  // Keep the native tail small enough to create a real cut with short requests;
+  // the two summaries can then demonstrate carry without excerpt pressure.
+  const t = makeTestDir("manual", { keepRecentTokens: 128 });
   let passed = false;
   try {
     const client = new RpcClient({ args: scriptedArgs(t), cwd: t.dir, logFile: t.logFile,
       env: piEnv(t, { DISTILL_FAKE_BASE: "3000", DISTILL_FAKE_STEP: "500", DISTILL_FAKE_WINDOW: "200000" }) });
     try {
       for (let i = 1; i <= 3; i++) await prompt(client,
-        `Request ${i}: preserve useful excerpts 😀. ` + "discardable context material ".repeat(2000));
+        `Request ${i}: preserve useful excerpts 😀. ` + "discardable context material ".repeat(20));
       const since = client.mark();
       const response = await client.request({ type: "compact", customInstructions: "Focus on useful excerpts 😀" });
       expect(response.success).toBe(true);
@@ -40,9 +42,10 @@ test("manual compaction and repeated predecessor carry use one flat current cont
         30000, { since });
       const result = hostRecord(end.result);
       const first = assertCurrentCompaction(result.summary, result.details);
-      expect(first.focus).toBe("Focus on useful excerpts 😀");
+      expect(first.focus).toEqual({ text: "Focus on useful excerpts 😀", shortened: false });
       expect(first.latestRequest?.origin).toBe("current");
       expect(first.latestRequest?.text).toMatch(/Request [12]:/);
+      expect(first.omitted?.excerpts).toBe(0);
       const session = latestSessionFile(t)!;
       const committed = records(session).filter(entry => entry.type === "compaction");
       expect(committed).toHaveLength(1);
@@ -51,7 +54,7 @@ test("manual compaction and repeated predecessor carry use one flat current cont
       expect(object(response.data).details).toEqual(result.details);
 
       for (let i = 4; i <= 6; i++) await prompt(client,
-        `Request ${i}: follow the next native user instruction. ` + "new discardable context ".repeat(2000));
+        `Request ${i}: follow the next native user instruction. ` + "new discardable context ".repeat(20));
       const nextSince = client.mark();
       expect((await client.request({ type: "compact" })).success).toBe(true);
       const nextEnd = await client.waitFor(event => event.type === "compaction_end" && event.aborted === false,
@@ -61,7 +64,9 @@ test("manual compaction and repeated predecessor carry use one flat current cont
       expect(carried.focus).toBeNull();
       expect(carried.latestRequest?.text).toMatch(/Request [45]:/);
       expect(carried.latestRequest?.origin).toBe("current");
+      expect(carried.omitted?.excerpts).toBe(0);
       expect(carried.records.some((row) => row.origin === "prior")).toBe(true);
+      expect(carried.records.filter(row => row.kind === "user" && row.origin === "prior" && row.text === first.latestRequest?.text)).toHaveLength(1);
       expect(carried.records.every((row) => !row.text.includes('"format":"dc-distill-summary"'))).toBe(true);
       expect(records(session).filter(entry => entry.type === "compaction")).toHaveLength(2);
       expect(records(t.traceFile).filter(entry => entry.kind === "summary")).toEqual([]);

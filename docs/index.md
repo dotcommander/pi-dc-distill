@@ -5,6 +5,7 @@ You are setting up or operating dc-distill, the deterministic context-compaction
 ## Limits and non-goals
 
 - Summaries are lossy, attributed observations. They establish no task readiness, verification, authorization, or current filesystem truth.
+- Verification evidence is deterministic and local: unit, typecheck, architecture, package, and scripted installed-Pi e2e gates. Paid-provider continuation quality, rendered card appearance, and live EPIPE behavior are accepted, unproven limits.
 - Pi's native compaction card is the sole success display; the extension emits no success notification.
 - There is no migration or historical format decoder. Fresh sessions use this extension; existing incompatible sessions keep the old extension.
 - The historical archive lives under `.work/docs-archive/` (see [docs README](README.md)); it is excluded from the current product contract and package publication.

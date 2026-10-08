@@ -7,9 +7,9 @@ function full() {
   const summary = [
     "<dc-distill-summary>",
     "notice: Selected conversation excerpts and observations; incomplete.",
-    "columns: records=kind|origin|cut|text ; files=section id|origin|cut|create|path ; commands=cmd id|origin|cut|runner|status|cwd|command|result",
-    "focus: pipe \\| and newline \\n and backslash \\\\ escapes",
-    "latest-request: current cut \"TASK keep the newest native request text\"",
+    "columns: records=kind|origin|cut|text ; files=section id|origin|cut|create|path ; commands=cmd id|origin|cut|runner|status|cwd|command|result ; current=selected input, prior=carried context; full/cut=no known text clipping/clipped; create=yes means capable, not created; command id=runner/command/cwd tuple, not execution; cwd: leading = marks recorded text; none means unrecorded; observations are not present truth, readiness, verification or authorization; omissions=count dropped candidates, not text cuts; 9007199254740991 means at least that many; request after=N counts preceding retained records; text uses literal backslash escapes",
+    'focus: full "pipe \\| and newline \\n and backslash \\\\ escapes"',
+    "latest-request: current cut after=1 \"TASK keep the newest native request text\"",
     "records:",
     "user | current | full | continue with the plan",
     "assistant | current | full | the build failed with error: exit status 1",
@@ -29,7 +29,7 @@ function minimal() {
   const summary = [
     "<dc-distill-summary>",
     "notice: Selected conversation excerpts and observations; incomplete.",
-    "columns: records=kind|origin|cut|text ; files=section id|origin|cut|create|path ; commands=cmd id|origin|cut|runner|status|cwd|command|result",
+    "columns: records=kind|origin|cut|text ; files=section id|origin|cut|create|path ; commands=cmd id|origin|cut|runner|status|cwd|command|result ; current=selected input, prior=carried context; full/cut=no known text clipping/clipped; create=yes means capable, not created; command id=runner/command/cwd tuple, not execution; cwd: leading = marks recorded text; none means unrecorded; observations are not present truth, readiness, verification or authorization; omissions=count dropped candidates, not text cuts; 9007199254740991 means at least that many; request after=N counts preceding retained records; text uses literal backslash escapes",
     "records:",
     "files:",
     "commands:",
@@ -85,4 +85,53 @@ test("oracle authenticates exact wire bytes", () => {
   const f = full(); expect(() => assertCurrentCompaction(f.summary + "\n", f.details)).toThrow();
   const stale = f.summary.replace("TASK keep", "TASK forge");
   expect(() => assertCurrentCompaction(stale, f.details)).toThrow();
+});
+
+for (const [name, counter, reason] of [
+  ["zero-padded omission counter", "00", "noncanonical omitted counter"],
+  ["unsafe omission counter", "9007199254740992", "unsafe omitted counter"],
+] as const) test(`oracle rejects authenticated ${name} in every omission lane`, () => {
+  for (const lane of ["input", "excerpts", "reads", "modified", "commands"]) {
+    const fixture = minimal();
+    const mutated = rehash(fixture, fixture.summary.replace(`${lane}=0`, `${lane}=${counter}`));
+    expect(() => assertCurrentCompaction(mutated.summary, mutated.details)).toThrow(reason);
+  }
+});
+
+test("oracle accepts canonical zero and maximum safe omission counters", () => {
+  for (const counter of [0, Number.MAX_SAFE_INTEGER]) {
+    const fixture = minimal();
+    const boundary = rehash(fixture, fixture.summary.replace(/=0/g, `=${counter}`));
+    expect(assertCurrentCompaction(boundary.summary, boundary.details).omitted).toEqual({
+      inputRecords: counter, excerpts: counter, readFiles: counter, modifiedFiles: counter, commands: counter,
+    });
+  }
+});
+
+test("independent oracle rejects authenticated noncanonical text and request anchors", () => {
+  for (const spelling of ['"', "|", "<", ">", "\r", "\t", "\u001b", "\u202e", "\u200d", "\u2028", "\u2029",
+    "\\u{41}", "\\u{03c}", "\\u{3C}", "\\u{a}", "\\u{d800}", "\\u{110000}", "\\u{}", "\\u{gg}", "\\u{3c", "\\"]) {
+    const fixture = full();
+    rehash(fixture, fixture.summary.replace("continue with the plan", spelling));
+    expect(() => assertCurrentCompaction(fixture.summary, fixture.details)).toThrow();
+  }
+  for (const spelling of ["00", "+1", "-1", "4", "9007199254740992"]) {
+    const fixture = full(); rehash(fixture, fixture.summary.replace("after=1", `after=${spelling}`));
+    expect(() => assertCurrentCompaction(fixture.summary, fixture.details)).toThrow();
+  }
+});
+
+test("independent oracle decodes canonical escapes in every text lane", () => {
+  const wire = '\\\\ \\" \\| \\n\\r\\t \\u{3c}\\u{3e}\\u{0}\\u{1b}\\u{7f}\\u{85}\\u{202e}\\u{200d}\\u{2028}\\u{2029} 😀 \\\\u{202e}';
+  const decoded = '\\ " | \n\r\t <>\u0000\u001b\u007f\u0085\u202e\u200d\u2028\u2029 😀 \\u{202e}';
+  const fixture = minimal();
+  const lines = fixture.summary.split("\n");
+  lines.splice(3, 0, `focus: cut "${wire}"`, `latest-request: current full after=1 "${wire}"`);
+  lines.splice(lines.indexOf("files:"), 0, `user | prior | full | ${wire}`);
+  lines.splice(lines.indexOf("commands:"), 0, `read ${digest()} | prior | full | no | ${wire}`);
+  lines.splice(lines.findIndex(line => line.startsWith("omitted:")), 0, `cmd ${digest()} | current | cut | ${wire} | unknown | =${wire} | ${wire} | ${wire}`);
+  rehash(fixture, lines.join("\n"));
+  const accepted = assertCurrentCompaction(fixture.summary, fixture.details);
+  expect([accepted.focus?.text, accepted.latestRequest?.text, accepted.records[0]?.text, accepted.files.read[0]?.path,
+    accepted.commands[0]?.runner, accepted.commands[0]?.cwd, accepted.commands[0]?.command, accepted.commands[0]?.result]).toEqual(Array(8).fill(decoded));
 });

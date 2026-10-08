@@ -56,7 +56,6 @@ export function normalizeMessage(value: unknown): RawNormalizedRecord[] {
       });
     }
     case "toolResult": {
-      if (typeof message.toolName !== "string") throw new CompactionInputError("invalid tool result name");
       const callId = toolId(message.toolCallId);
       const resultText = shorten(textContent(message.content), MAX_TEXT_CODE_POINTS);
       return [{ kind: "tool-result", text: resultText.text, textShortened: resultText.shortened || undefined, name: message.toolName,
@@ -64,7 +63,6 @@ export function normalizeMessage(value: unknown): RawNormalizedRecord[] {
         isError: typeof message.isError === "boolean" ? message.isError : undefined }];
     }
     case "bashExecution": {
-      if (typeof message.command !== "string" || typeof message.output !== "string") throw new CompactionInputError("invalid bash execution");
       const bashText = shorten(`${message.command}\n${message.output}`, MAX_TEXT_CODE_POINTS);
       return [{ kind: "bash", text: bashText.text, textShortened: bashText.shortened || undefined, command: message.command,
         output: message.output, exitCode: typeof message.exitCode === "number" && Number.isInteger(message.exitCode) ? message.exitCode : undefined,
@@ -73,7 +71,6 @@ export function normalizeMessage(value: unknown): RawNormalizedRecord[] {
     case "custom": return [{ kind: "custom", text: textContent(message.content) }];
     case "branchSummary":
     case "compactionSummary": {
-      if (typeof message.summary !== "string") throw new CompactionInputError("invalid summary message");
       return [{ kind: message.role === "branchSummary" ? "branch-summary" : "native-summary", text: message.summary }];
     }
     default: throw new CompactionInputError("unsupported source message role");

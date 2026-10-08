@@ -32,15 +32,15 @@ Expected observable result: Pi replaces the summarized prefix with its native co
 ```text
 <dc-distill-summary>
 notice: Selected conversation excerpts and observations; incomplete.
-columns: records=kind|origin|cut|text ; files=section id|origin|cut|create|path ; commands=cmd id|origin|cut|runner|status|cwd|command|result
-focus: keep the parser discussion and command outcomes
-latest-request: current full "Fix the failing parser tests in lib/parser.ts"
+columns: records=kind|origin|cut|text ; files=section id|origin|cut|create|path ; commands=cmd id|origin|cut|runner|status|cwd|command|result ; current=selected input, prior=carried context; full/cut=no known text clipping/clipped; create=yes means capable, not created; command id=runner/command/cwd tuple, not execution; cwd: leading = marks recorded text; none means unrecorded; observations are not present truth, readiness, verification or authorization; omissions=count dropped candidates, not text cuts; 9007199254740991 means at least that many; request after=N counts preceding retained records; text uses literal backslash escapes
+focus: full "keep the parser discussion and command outcomes"
+latest-request: current full after=7 "Fix the failing parser tests in lib/parser.ts"
 records:
 user | current | full | continue with the plan
 assistant | current | full | the build failed with error: exit status 1
-tool-call | current | full | read {"path":"lib/parser.ts"}
+tool-call | current | full | read {\"path\":\"lib/parser.ts\"}
 tool-result | current | full | export function parse() {}
-tool-call | current | full | read {"path":"lib/parser.ts"}
+tool-call | current | full | read {\"path\":\"lib/parser.ts\"}
 tool-result | current | full | export function parse() {}
 bash | current | full | bun test\n113 pass
 files:
@@ -51,13 +51,13 @@ omitted: input=0 excerpts=0 reads=0 modified=0 commands=0
 </dc-distill-summary>
 ```
 
-(Exact output of the current compiler pipeline, executed locally on that representative input.)
+(Representative current-format output; exact bytes are covered by compiler fixtures.)
 
-How to read it: the `columns:` line is a fixed legend for every summary. Rows are escaped single lines — the `\n` in the bash row is two literal characters, never a line break. Flags are words, not booleans (`full`/`cut`, `yes`/`no`), the request text is quoted, command rows carry a `cmd` prefix with cwd as `none` or `=`-prefixed, and row identities are 22-character base64url SHA-256 prefixes. `origin: "current"` means observed in this compaction's discarded input — not current filesystem truth.
+How to read it: the `columns:` line is a fixed legend for every summary. All text fields canonically escape backslash, quotes, pipes, LF, CR and tab; angle brackets and Unicode control, format and separator characters use lowercase `\u{hex}` escapes, including emoji joiners. Rows are escaped single lines — the `\n` in the bash row is two literal characters, never a line break. Flags are words, not booleans (`full`/`cut`, `yes`/`no`), focus and request text are quoted with their cut flags, the request carries `after=N` counting preceding retained records, command rows carry a `cmd` prefix with cwd as `none` or `=`-prefixed, and row identities are 22-character base64url SHA-256 prefixes. `origin: "current"` means observed in this compaction's discarded input — not current filesystem truth.
 
 Mechanism: the `session_before_compact` hook compiles Pi's discarded messages deterministically and returns the summary with token estimates Pi computes from its own rebuilt-context functions; Pi then appends the compaction entry and rebuilds the context. Pi's native compaction card is the sole success display; the extension emits no success notification.
 
-Next safe variation: `/compact` again later in the same session. The previous summary is carried flat — its rows return marked `origin: prior`, its facts merge with newer observations, and summaries never nest. Carrying is opportunistic and never blocks: a prior summary whose recorded digest matches and decodes in the current shape carries full structured state; all other predecessors — including damaged summaries, old JSON formats, foreign or native summaries — degrade to bounded attributed text. Fallback text does not preserve a dedicated latest-request field or structured observations. Selection rules, pairing, identities, and budgets are specified in [algorithm](docs/algorithm.md).
+Next safe variation: `/compact` again later in the same session. The previous summary is carried flat — its rows return marked `origin: prior`, its facts merge with newer observations, and summaries never nest. Replacing the dedicated request moves the old request into one prior user excerpt at its retained position, preserving its cut flag; repeated identical requests remain separate. Carrying is opportunistic and never blocks: a prior summary whose recorded digest matches and decodes in the current shape carries full structured state; all other predecessors — including damaged summaries, old JSON formats, foreign or native summaries — degrade to bounded attributed text. Fallback text does not preserve a dedicated latest-request field or structured observations. Selection rules, pairing, identities, and budgets are specified in [algorithm](docs/algorithm.md).
 
 The `omitted:` counters count candidates lost before or during selection, not failures: a summary with no visible error is not proof that every command passed, and command status can be `unknown` when no outcome was recorded. File writes flagged create-capable (`yes`) do not prove a file was created. The summary remembers what was said — it does not establish readiness, verification, or authorization.
 
@@ -72,6 +72,16 @@ Development uses Bun (1.4.0) with project-local dependencies; the Pi SDK develop
 ```bash
 bun install --frozen-lockfile
 ```
+
+For read-only inspection outside Pi, the development checkout includes a saved-session runner using Pi's native cut preparation and the same TypeScript compiler/capacity pipeline as the extension:
+
+```bash
+bun run distill:session /path/to/session.jsonl
+cat /path/to/session.jsonl | bun run distill:session -
+bun run distill:session --latest
+```
+
+Stdout contains exact canonical summary bytes; selection and capacity diagnostics go to stderr. With no input, it selects the latest saved session for the current project, which may not be active. It never changes sessions or calls a provider, and is excluded from the published package. See [usage](docs/usage.md#inspect-a-saved-session-outside-pi) for settings and branch selection.
 
 After implementation and semantic review, the verifier runs the gate list once:
 
@@ -92,7 +102,7 @@ Repairs rerun affected gates only. The e2e suite drives an installed Pi through 
 - No LLM calls anywhere in the extension. Source, compiler, cancellation, and capacity failures cancel the compaction; Pi's default LLM compactor never takes over.
 - One primary session owns the runtime; child sessions cancel interception.
 - Pi’s native compaction card is the sole success display. There are no extension notifications, timers, retries, continuation sends, storage writes, dumps, recall, checkpoints, pins, task graphs, or custom cards.
-- No replay CLI and no supported import API beyond the extension entry itself.
+- No published replay CLI and no supported import API beyond the extension entry itself; the development checkout has the read-only saved-session runner described above.
 - Existing incompatible sessions keep the old extension; never load both together.
 
 More: [documentation index](docs/index.md), [usage](docs/usage.md), [troubleshooting](docs/troubleshooting.md).

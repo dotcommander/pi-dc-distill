@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import { errorSignal, excerptScore, signalScore, SUBSTANTIVE_THRESHOLD } from "./signal.ts";
+import { errorSignal, excerptClass, excerptScore, signalScore, SUBSTANTIVE_THRESHOLD } from "./signal.ts";
 
 describe("content signal rubric", () => {
   test("diffs, code, tables, errors, architecture language score substantive", () => {
@@ -32,4 +32,11 @@ test("modernization preserves path, numbered-heading and error signals exactly",
   expect(signalScore("fatal failure in lib/example.ts")).toBe(5);
   expect(excerptScore({ kind: "tool-result", text: "fatal failure in lib/example.ts" })).toBe(4);
   expect(errorSignal("cannot open resource")).toBe(true);
+});
+
+
+test("admission classes exhaustively separate context from operations", () => {
+  expect(excerptClass("user")).toBe(3);
+  for (const kind of ["assistant", "native-summary", "branch-summary", "custom"] as const) expect(excerptClass(kind)).toBe(2);
+  for (const kind of ["tool-call", "tool-result", "bash"] as const) expect(excerptClass(kind)).toBe(1);
 });

@@ -2,6 +2,8 @@
 export type ObservationOrigin = "current" | "prior";
 export type RecordKind = "user" | "assistant" | "tool-call" | "tool-result" | "bash" | "custom" | "branch-summary" | "native-summary";
 export interface TextObservation { text: string; shortened: boolean; origin: ObservationOrigin }
+export interface LatestRequest extends TextObservation { afterRecords: number }
+export interface FocusObservation { text: string; shortened: boolean }
 export interface SummaryRecord extends TextObservation { kind: RecordKind }
 export interface FileFact {
   identityDigest: string;
@@ -30,8 +32,8 @@ export interface OmissionCounts {
 export interface DcDistillSummary {
   format: "dc-distill-summary";
   notice: "Selected conversation excerpts and observations; incomplete.";
-  focus: string | null;
-  latestRequest: TextObservation | null;
+  focus: FocusObservation | null;
+  latestRequest: LatestRequest | null;
   records: SummaryRecord[];
   files: { read: FileFact[]; modified: FileFact[] };
   commands: CommandFact[];

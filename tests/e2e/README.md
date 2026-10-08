@@ -99,3 +99,5 @@ invocation. Pi's native compaction card is the sole success display. RPC journal
 establish host append and active-branch behavior; they do not establish rendered
 card visibility. The former notification observer and native TUI launcher are
 retired. No installed package or existing session is altered by these scenarios.
+
+The independent current-format oracle checks quoted focus cut flags, bounded request position anchors, canonical scalar escaping in every text lane, and canonical safe-integer omission counters using authenticated fixtures. Repeated command tuple identities retain separate receipt outcomes.

@@ -1,3 +1,5 @@
+import type { RecordKind } from "./types.ts";
+
 /**
  * Content signal scoring for excerpt prioritization. Adapted from ctxgo's
  * compact rubric (itself descended from pi-dc-shrink's signal table): every
@@ -87,4 +89,13 @@ export function signalScore(text: string): number {
   if (score <= 0 && isShortStatus(text) && !errorSignal(text) && !arch.test(text)) score += PENALTY_SHORT;
   if (score <= 0 && isAck(text)) score += PENALTY_ACK;
   return score;
+}
+
+/** Exhaustive kind classes prevent a script's signal score outranking conversation. */
+export function excerptClass(kind: RecordKind): 1 | 2 | 3 {
+  switch (kind) {
+    case "user": return 3;
+    case "assistant": case "native-summary": case "branch-summary": case "custom": return 2;
+    case "tool-call": case "tool-result": case "bash": return 1;
+  }
 }

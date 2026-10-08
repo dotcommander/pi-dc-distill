@@ -4,7 +4,7 @@ import { createHash } from "node:crypto";
 
 const SUMMARY_FORMAT = "dc-distill-summary";
 const SUMMARY_NOTICE = "Selected conversation excerpts and observations; incomplete.";
-const SUMMARY_COLUMNS = "columns: records=kind|origin|cut|text ; files=section id|origin|cut|create|path ; commands=cmd id|origin|cut|runner|status|cwd|command|result";
+const SUMMARY_COLUMNS = "columns: records=kind|origin|cut|text ; files=section id|origin|cut|create|path ; commands=cmd id|origin|cut|runner|status|cwd|command|result ; current=selected input, prior=carried context; full/cut=no known text clipping/clipped; create=yes means capable, not created; command id=runner/command/cwd tuple, not execution; cwd: leading = marks recorded text; none means unrecorded; observations are not present truth, readiness, verification or authorization; omissions=count dropped candidates, not text cuts; 9007199254740991 means at least that many; request after=N counts preceding retained records; text uses literal backslash escapes";
 const RECORD_KINDS = ["user", "assistant", "tool-call", "tool-result", "bash", "custom", "branch-summary", "native-summary"];
 
 function object(value: unknown): Record<string, unknown> {
@@ -35,18 +35,39 @@ function digestField(value: string): string {
   assert(/^[A-Za-z0-9_-]{22}$/.test(value), "bad identity digest");
   return value;
 }
+function omissionCounter(value: string): number {
+  assert(/^(0|[1-9][0-9]*)$/.test(value), "noncanonical omitted counter");
+  const counter = Number(value);
+  assert(Number.isSafeInteger(counter), "unsafe omitted counter");
+  return counter;
+}
 function unescape(value: string): string {
-  assert(!value.endsWith("\\") || /\\\\$/.test(value), "dangling escape");
   let out = "";
+  let canonical = "";
   for (let index = 0; index < value.length; index++) {
-    const char = value[index]!;
-    if (char !== "\\") { out += char; continue; }
-    const next = value[++index];
-    if (next === "\\" || next === "|") out += next;
-    else if (next === "r") out += "\r";
-    else if (next === "n") out += "\n";
-    else assert.fail("unknown escape");
+    let char = value[index]!;
+    if (char === "\\") {
+      const next = value[++index];
+      if (next === "\\" || next === "|" || next === '"') char = next;
+      else if (next === "r") char = "\r";
+      else if (next === "n") char = "\n";
+      else if (next === "t") char = "\t";
+      else if (next === "u") {
+        const match = value.slice(index + 1).match(/^\{([0-9a-fA-F]+)\}/);
+        assert(match, "bad Unicode escape");
+        const scalar = Number.parseInt(match[1]!, 16);
+        assert(Number.isSafeInteger(scalar) && scalar <= 0x10ffff && !(scalar >= 0xd800 && scalar <= 0xdfff), "bad Unicode scalar");
+        char = String.fromCodePoint(scalar);
+        index += match[0].length;
+      } else assert.fail("unknown escape");
+    } else if (/[\uD800-\uDBFF]/.test(char) && index + 1 < value.length) {
+      char += value[++index]!;
+    }
+    out += char;
+    const special: Record<string, string> = { "\\": "\\\\", '"': '\\"', "|": "\\|", "\n": "\\n", "\r": "\\r", "\t": "\\t" };
+    canonical += special[char] ?? (/[<>\p{Cc}\p{Cf}\p{Zl}\p{Zp}]/u.test(char) ? `\\u{${char.codePointAt(0)!.toString(16)}}` : char);
   }
+  assert.equal(value, canonical, "noncanonical escaped text");
   return out;
 }
 
@@ -54,7 +75,7 @@ interface Observation { origin: string; shortened: boolean; text: string }
 interface FileObservation { identityDigest: string; origin: string; shortened: boolean; createCapable: boolean; path: string }
 interface CommandObservation { identityDigest: string; origin: string; shortened: boolean; runner: string; status: string; cwd: string | null; command: string; result: string }
 export interface AcceptedSummary {
-  format: string; notice: string; focus: string | null; latestRequest: Observation | null;
+  format: string; notice: string; focus: { text: string; shortened: boolean } | null; latestRequest: (Observation & { afterRecords: number }) | null;
   records: Array<Observation & { kind: string }>;
   files: { read: FileObservation[]; modified: FileObservation[] };
   commands: CommandObservation[];
@@ -84,15 +105,16 @@ export function assertCurrentCompaction(summary: unknown, details: unknown): Acc
   assert.equal(take(), SUMMARY_COLUMNS, "wrong columns legend");
   const document: AcceptedSummary = { format: SUMMARY_FORMAT, notice: SUMMARY_NOTICE, focus: null, latestRequest: null,
     records: [], files: { read: [], modified: [] }, commands: [], omitted: null };
-  if (lines[index]?.startsWith("focus: ")) text(document.focus = unescape(take().slice(7)), 2048);
+  if (lines[index]?.startsWith("focus: ")) {
+    const fields = take().slice(7).match(/^(full|cut) "([\s\S]*)"$/);
+    assert(fields, "bad focus field");
+    document.focus = { shortened: cut(fields[1]!), text: unescape(fields[2]!) };
+    text(document.focus.text, 2048);
+  }
   if (lines[index]?.startsWith("latest-request: ")) {
-    const line = take().slice(16);
-    const first = line.indexOf(" ");
-    const second = first < 0 ? -1 : line.indexOf(" ", first + 1);
-    assert(second >= 0, "short latest-request");
-    const quoted = line.slice(second + 1);
-    assert(quoted.startsWith('"') && quoted.endsWith('"') && quoted.length >= 2, "unquoted latest-request text");
-    const request = { origin: originField(line.slice(0, first)), shortened: cut(line.slice(first + 1, second)), text: unescape(quoted.slice(1, -1)) };
+    const fields = take().slice(16).match(/^(current|prior) (full|cut) after=(0|[1-9][0-9]*) "([\s\S]*)"$/);
+    assert(fields, "bad latest request field");
+    const request = { origin: originField(fields[1]!), shortened: cut(fields[2]!), afterRecords: omissionCounter(fields[3]!), text: unescape(fields[4]!) };
     text(request.text, 2048);
     document.latestRequest = request;
   }
@@ -105,6 +127,7 @@ export function assertCurrentCompaction(summary: unknown, details: unknown): Acc
     text(row.text, 2048);
     document.records.push(row);
   }
+  if (document.latestRequest) assert(document.latestRequest.afterRecords <= document.records.length, "request anchor out of bounds");
   take();
   while (lines[index] !== "commands:") {
     const line = take();
@@ -135,8 +158,8 @@ export function assertCurrentCompaction(summary: unknown, details: unknown): Acc
   }
   const omitted = take().slice(9).match(/^input=(\d+) excerpts=(\d+) reads=(\d+) modified=(\d+) commands=(\d+)$/);
   assert(omitted, "bad omitted counters");
-  document.omitted = { inputRecords: Number(omitted[1]), excerpts: Number(omitted[2]), readFiles: Number(omitted[3]),
-    modifiedFiles: Number(omitted[4]), commands: Number(omitted[5]) };
+  document.omitted = { inputRecords: omissionCounter(omitted[1]!), excerpts: omissionCounter(omitted[2]!), readFiles: omissionCounter(omitted[3]!),
+    modifiedFiles: omissionCounter(omitted[4]!), commands: omissionCounter(omitted[5]!) };
   assert.equal(take(), `</${SUMMARY_FORMAT}>`, "missing closing tag");
   assert.equal(index, lines.length, "trailing content after summary");
   assert(document.records.length <= 400 && document.files.read.length <= 50

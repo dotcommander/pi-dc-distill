@@ -38,6 +38,8 @@ Preserve preparation lifecycle hooks, primary ownership, generation, replacement
 
 Production allowlist: `index.ts`; `lib/{compaction-source,local-compact,sdk,unicode,sha256}.ts`; `lib/compiler/{types,normalizer,tool-tracker,budget-formatter,helpers,signal,errors,contract,validation,summary-codec,eviction,tool-certification,message-decoder,cwd}.ts`. Runtime helpers: `lib/runtime/{ownership,capacity,diagnostics}.ts`. Package exports only the root extension and publishes its explicit runtime allowlist plus README/license. No replay binary, offline historical evaluator, benchmark program, recall, preview, focus injection, storage, dump, migration, or custom card remains.
 
+Development-only `scripts/compact-session.ts` reads current version-3 saved sessions through Pi native preparation and the shared TypeScript compiler/capacity pipeline. It is excluded from the published runtime allowlist and does not change the hook's event-only input authority.
+
 Use fresh sessions with the new extension; existing incompatible sessions use the old extension. Do not load both together. Preserve `.work`, receipts, stored data, session files, excluded historical docs, and the `CLAUDE.md` symlink. Active docs are indexed in `docs/index.md`; historical specs/ADRs/benchmarks/assets are excluded from the current contract and package.
 
 Keep existing dependency versions and Pi SDK development pins at 0.99.2; host peer ranges remain `*`. Use project-local `bun install --frozen-lockfile`, never another project's node_modules. No dependency additions, publication, data deletion, or migration is authorized by implementation.

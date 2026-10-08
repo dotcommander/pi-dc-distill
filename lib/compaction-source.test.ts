@@ -82,15 +82,42 @@ describe("preparation-owned typed input", () => {
     const degradedDamaged = buildCompactionSource(withPrior(damaged, { compactor: "dc-distill", summaryDigest: sha256Hex(damaged) }));
     expect(degradedDamaged.predecessor).toBeNull();
     expect(degradedDamaged.records.at(0)?.text).toBe(damaged);
+    const noncanonical = summary.replace("input=0", "input=00");
+    const fallback = buildCompactionSource(withPrior(noncanonical, { compactor: "dc-distill", summaryDigest: sha256Hex(noncanonical) }));
+    expect(fallback.predecessor).toBeNull();
+    expect(fallback.records[0]).toEqual({ kind: "native-summary", text: noncanonical });
+    expect(extractObservations(fallback)).toEqual({ files: { read: [], modified: [] }, commands: [] });
+    const fallbackSummary = buildSummary(fallback, extractObservations(fallback));
+    expect(fallbackSummary.records[0]).toEqual({ kind: "native-summary", text: noncanonical, shortened: false, origin: "current" });
+    expect(fallbackSummary.latestRequest?.text).toBe("discarded");
     // Old JSON formats mine nothing and degrade to attributed text.
     const legacy = JSON.stringify(document());
     const degraded = buildCompactionSource(withPrior(legacy, { compactor: "dc-distill", version: 15 }));
     expect(degraded.predecessor).toBeNull();
     expect(degraded.records[0]).toEqual({ kind: "native-summary", text: legacy });
   });
+  test("matched-digest incompatible request grammar falls back without structured carry or cancellation", () => {
+    const value = document();
+    value.latestRequest = { text: "guard", origin: "current", shortened: true, afterRecords: 0 };
+    value.commands = [{ identityDigest: "A".repeat(22), runner: "bash", command: "false", cwd: null,
+      status: "error", result: "failed", shortened: false, origin: "current" }];
+    const incompatible = encodeSummary(value).replace(" after=0", "");
+    const input = withPrior(incompatible, { compactor: "dc-distill", summaryDigest: sha256Hex(incompatible) });
+    const assistant = { role: "assistant", content: "response only" };
+    input.messagesToSummarize = [assistant];
+    (input.branchEntries[1] as unknown as { message: Message }).message = assistant;
+    const source = buildCompactionSource(input);
+    expect(source.predecessor).toBeNull();
+    expect(source.records[0]).toEqual({ kind: "native-summary", text: incompatible });
+    const summary = buildSummary(source, extractObservations(source));
+    expect(summary.latestRequest).toBeNull();
+    expect(summary.commands).toEqual([]);
+    expect(summary.files).toEqual({ read: [], modified: [] });
+    expect(summary.records[0]?.kind).toBe("native-summary");
+  });
   test("unverified command-status edits never create fresh observations", () => {
     const value = document();
-    value.latestRequest = { text: "keep the original user constraint", origin: "current", shortened: false };
+    value.latestRequest = { text: "keep the original user constraint", origin: "current", shortened: false, afterRecords: 0 };
     value.commands = [{ identityDigest: "A".repeat(22), runner: "bash", command: "bun test", cwd: null,
       status: "error", result: "failed", shortened: false, origin: "current" }];
     const verified = encodeSummary(value);
