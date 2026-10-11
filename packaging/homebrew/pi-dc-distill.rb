@@ -3,8 +3,8 @@ class PiDcDistill < Formula
   homepage "https://github.com/dotcommander/pi-dc-distill"
   url "https://registry.npmjs.org/pi-dc-distill/-/pi-dc-distill-0.2.1.tgz"
   version "0.2.1"
-  # SHA-256 of the exact prepared npm tarball; confirm registry bytes before tap publication.
-  sha256 "e9f9ea9cea5764070b054f9e2cd08f62a4f6b85c1b5828b797da8ccc8d26bc9e"
+  # SHA-256 of the published 0.2.1 npm tarball (registry bytes verified).
+  sha256 "8166a7b8d67c1d7e2118579eb5518dd45326ad5b2f3ce64f116891c4c3cc6e74"
   license "MIT"
 
   def install
