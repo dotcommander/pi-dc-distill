@@ -1,4 +1,4 @@
-# Releasing 0.2.0 to npm and Homebrew
+# Releasing 0.2.1 to npm and Homebrew
 
 Release preparation makes local artifacts reviewable. Commit, tag, push, npm publication, and tap publication require explicit release authorization; preparing this release does not perform them. Keep dependency versions and the Pi SDK development pins unchanged. Install project-local dependencies only with `bun install --frozen-lockfile`.
 
@@ -23,20 +23,20 @@ After repairs rerun affected gates only. Inspect every package dry-run entry aga
 The release owner packs once into the excluded release-artifact directory. Run these commands from the repository root only when creating or intentionally replacing the prepared artifact:
 
 ```bash
-mkdir -p .work/releases/0.2.0
-npm pack --json --pack-destination .work/releases/0.2.0
-shasum -a 256 .work/releases/0.2.0/pi-dc-distill-0.2.0.tgz
+mkdir -p .work/releases/0.2.1
+npm pack --json --pack-destination .work/releases/0.2.1
+shasum -a 256 .work/releases/0.2.1/pi-dc-distill-0.2.1.tgz
 ```
 
-Record the tarball path, SHA-256, and npm pack integrity. The verifier inspects that tarball's file list and version. Set the SHA-256 in `packaging/homebrew/pi-dc-distill.rb` from the prepared bytes. The formula uses the future registry URL `https://registry.npmjs.org/pi-dc-distill/-/pi-dc-distill-0.2.0.tgz`; it is not installable before npm publication. Review the final formula and validate its Ruby syntax. Preserve the prepared tarball: subsequent source changes require a newly reviewed artifact and hash. Never silently overwrite an existing different tarball.
+Record the tarball path, SHA-256, and npm pack integrity. The verifier inspects that tarball's file list and version. Set the SHA-256 in `packaging/homebrew/pi-dc-distill.rb` from the prepared bytes. The formula uses the future registry URL `https://registry.npmjs.org/pi-dc-distill/-/pi-dc-distill-0.2.1.tgz`; it is not installable before npm publication. Review the final formula and validate its Ruby syntax. Preserve the prepared tarball: subsequent source changes require a newly reviewed artifact and hash. Never silently overwrite an existing different tarball.
 
 ## Publish after authorization
 
-1. Confirm npm authentication and that version `0.2.0` is unpublished. Publish the exact prepared tarball, without repacking the checkout:
+1. Confirm npm authentication and that version `0.2.1` is unpublished. Publish the exact prepared tarball, without repacking the checkout:
 
    ```bash
-   npm publish .work/releases/0.2.0/pi-dc-distill-0.2.0.tgz --access public --registry=https://registry.npmjs.org/
-   npm view pi-dc-distill@0.2.0 version dist.tarball dist.integrity --json --registry=https://registry.npmjs.org/
+   npm publish .work/releases/0.2.1/pi-dc-distill-0.2.1.tgz --access public --registry=https://registry.npmjs.org/
+   npm view pi-dc-distill@0.2.1 version dist.tarball dist.integrity --json --registry=https://registry.npmjs.org/
    ```
 
    Compare registry integrity with the recorded npm pack integrity. Publishing from source would run the checkout's `prepublishOnly` script and recreate the artifact; this workflow publishes the already checked tarball.
@@ -48,7 +48,7 @@ Record the tarball path, SHA-256, and npm pack integrity. The verifier inspects 
 4. Verify each install route independently with an installed Pi, loading one extension copy at a time:
 
    ```bash
-   pi install npm:pi-dc-distill@0.2.0
+   pi install npm:pi-dc-distill@0.2.1
    # Alternatively, after the tap update:
    brew install dotcommander/tap/pi-dc-distill
    pi install "$(brew --prefix)/opt/pi-dc-distill/libexec"

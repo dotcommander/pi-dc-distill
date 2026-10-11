@@ -4,13 +4,13 @@ Deterministic local context compaction for [Pi](https://github.com/earendil-work
 
 ## Install and first compaction
 
-Prerequisite: Pi with Node.js 22.19.0 or newer (the package's `engines` floor). Pi packages execute extension code, so review the source before installing. After 0.2.0 is published to npm:
+Prerequisite: Pi with Node.js 22.19.0 or newer (the package's `engines` floor). Pi packages execute extension code, so review the source before installing. After 0.2.1 is published to npm:
 
 ```bash
-pi install npm:pi-dc-distill@0.2.0
+pi install npm:pi-dc-distill@0.2.1
 ```
 
-Alternatively, after the 0.2.0 Homebrew formula is published to the tap:
+Alternatively, after the 0.2.1 Homebrew formula is published to the tap:
 
 ```bash
 brew install dotcommander/tap/pi-dc-distill
