@@ -3,3 +3,4 @@ node_modules
 .work/
 out/
 repomix-output.md
+package-lock.json

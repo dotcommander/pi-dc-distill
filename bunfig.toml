@@ -1,0 +1,4 @@
+[install.security]
+# Bun Security Scanner API — scans every package during `bun install` / `bun pm scan`.
+# Free mode works with no Socket token; set one via `socket login` for org policy.
+scanner = "@socketsecurity/bun-security-scanner"
