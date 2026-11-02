@@ -13,14 +13,14 @@ stored data or existing session is modified.
 Select a particular installed package and expected host version:
 
 ```sh
-DISTILL_PI_PACKAGE="$PWD/node_modules/@earendil-works/pi-coding-agent" DISTILL_PI_EXPECT_VERSION=0.99.2 bun run distill:e2e
+DISTILL_PI_PACKAGE="$PWD/node_modules/@earendil-works/pi-coding-agent" DISTILL_PI_EXPECT_VERSION=1.5.0 bun run distill:e2e
 ```
 
 The harness loads the checkout's `index.ts` by default. Set the harness-only
 `DISTILL_EXTENSION_PATH` to test an extracted package's actual entrypoint:
 
 ```sh
-DISTILL_EXTENSION_PATH=/absolute/scratch/package/index.ts DISTILL_PI_PACKAGE="$PWD/node_modules/@earendil-works/pi-coding-agent" DISTILL_PI_EXPECT_VERSION=0.99.2 bun run distill:e2e
+DISTILL_EXTENSION_PATH=/absolute/scratch/package/index.ts DISTILL_PI_PACKAGE="$PWD/node_modules/@earendil-works/pi-coding-agent" DISTILL_PI_EXPECT_VERSION=1.5.0 bun run distill:e2e
 ```
 
 Create a real scratch tarball with `npm pack --pack-destination <scratch>`, inspect

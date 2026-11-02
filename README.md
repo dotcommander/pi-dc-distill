@@ -67,7 +67,7 @@ There is no compiler policy configuration. Pi owns compaction triggering, cut se
 
 ## Verification and development
 
-Development uses Bun (1.4.0) with project-local dependencies; the Pi SDK development pins stay at 0.99.2 and host peer ranges stay `*`:
+Development uses Bun (1.4.0) with project-local dependencies; the Pi SDK development pins stay at 1.5.0 and host peer ranges stay `*`:
 
 ```bash
 bun install --frozen-lockfile

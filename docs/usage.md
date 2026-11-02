@@ -63,7 +63,7 @@ cat /path/to/session.jsonl | bun run distill:session -
 bun run distill:session --latest
 ```
 
-The runner reads current Pi version-3 JSONL sessions, prepares the cut with the pinned Pi 0.99.2 SDK, and uses the same source validation, compiler and capacity fitting as the extension. It does not launch Pi, call a provider, append a compaction or modify the source/settings. Unsupported historical headers, malformed JSONL, duplicate identities, dangling parents and cycles fail explicitly. If native preparation finds nothing eligible, it fails rather than summarizing the entire transcript.
+The runner reads current Pi version-3 JSONL sessions, prepares the cut with the pinned Pi 1.5.0 SDK, and uses the same source validation, compiler and capacity fitting as the extension. It does not launch Pi, call a provider, append a compaction or modify the source/settings. Unsupported historical headers, malformed JSONL, duplicate identities, dangling parents and cycles fail explicitly. If native preparation finds nothing eligible, it fails rather than summarizing the entire transcript.
 
 Stdout is only the exact canonical summary, with no extra newline. Redirect it to a file if desired; the selected path, leaf, retained-tail cut, retention setting, token estimate and capacity status appear on stderr. A saved file has no `/compact` instructions, so focus is absent.
 

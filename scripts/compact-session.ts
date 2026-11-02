@@ -56,7 +56,7 @@ export function parseSavedSession(text: string) {
   return { cwd: header.cwd, entries: parseSessionEntries(text), ids: byId };
 }
 
-// prepareCompaction is not a root export in the development SDK pin (0.99.2).
+// prepareCompaction is not a root export in the development SDK pin (1.5.0).
 // Resolve relative to its root module without starting Pi or calling a provider.
 export async function nativePreparation(branch: SessionEntry[], settings: CompactionSettings): Promise<CompactionPreparation | undefined> {
   const module = await import(new URL("./core/compaction/compaction.js", import.meta.resolve("@earendil-works/pi-coding-agent")).href);
