@@ -1,10 +1,10 @@
 class PiDcDistill < Formula
   desc "Deterministic local context compaction extension for Pi"
   homepage "https://github.com/dotcommander/pi-dc-distill"
-  url "https://registry.npmjs.org/pi-dc-distill/-/pi-dc-distill-0.2.1.tgz"
-  version "0.2.1"
-  # SHA-256 of the published 0.2.1 npm tarball (registry bytes verified).
-  sha256 "8166a7b8d67c1d7e2118579eb5518dd45326ad5b2f3ce64f116891c4c3cc6e74"
+  url "https://registry.npmjs.org/pi-dc-distill/-/pi-dc-distill-0.2.2.tgz"
+  version "0.2.2"
+  # SHA-256 of the locally prepared 0.2.2 tarball; publication is pending.
+  sha256 "9414d767004de581d5588be7f1973d0b0772a91918f8b716ed151b3fe40a1614"
   license "MIT"
 
   def install
